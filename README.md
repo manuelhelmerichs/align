@@ -1,8 +1,6 @@
 # align
 
-`align` is a standalone CLI for post-processing posterior neural-network weight samples. It removes known scale symmetries and permutation symmetries so sampled parameter trees can be compared in a common basin.
-
-The code is intentionally producer-agnostic. It reads `.npz` parameter leaves and a pickled JAX `PyTreeDef`; it does not import `bayesmates`, MILE, SMILE, or any sampler package.
+`align` is a standalone CLI for post-processing posterior neural-network weight samples. It removes known scale symmetries and permutation symmetries so sampled parameter trees lie in a common basin.
 
 ## Install
 
@@ -20,7 +18,15 @@ For CUDA 12 JAX wheels:
 python -m pip install -e ".[cuda,dev]"
 ```
 
-## Input Contract
+With `uv`:
+
+```bash
+cd ~/projects/align
+uv sync --extra dev
+uv sync --extra cuda --extra dev  # CUDA 12 JAX wheels
+```
+
+## Input contract
 
 An experiment directory should contain:
 
@@ -39,7 +45,7 @@ An experiment directory should contain:
 
 Each `.npz` must store leaves in the same order as `jax.tree.flatten(position)`, and the tree file must be the matching pickled `PyTreeDef`.
 
-## MILE And SMILE
+## MILE and SMILE
 
 The public `EmanuelSommer/MILE` and `EmanuelSommer/SMILE` repositories use the same basic sample layout for posterior samples: `<experiment>/samples/<chain_id>/sample_<n>.npz` plus a pickled tree file. For tabular FCNs, use:
 
@@ -68,6 +74,14 @@ Useful variants:
 - `align <config> --force-cpu`
 - `align <config> --force-gpu --per-device-batch 128`
 
+With `uv`, prefix the same commands with `uv run`, for example:
+
+```bash
+uv run align configs/examples/align.yaml --validate-only
+uv run align configs/examples/align.yaml --dry-run
+uv run align configs/examples/align.yaml --output-dir results/example/align/weight_matching
+```
+
 ## Documentation
 
 - [docs/align.md](docs/align.md): alignment background and supported methods
@@ -80,4 +94,12 @@ Useful variants:
 python -m pytest
 python -m ruff check .
 python -m ruff format --check .
+```
+
+With `uv`:
+
+```bash
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
 ```

@@ -11,7 +11,7 @@ applying permuted layers keeps the network function invariant.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -39,6 +39,150 @@ def solve_lap_maximize(cost: np.ndarray) -> np.ndarray:
     return perm
 
 
+def _collapse_views(
+    views: Sequence[Any], roles: Sequence[str | None] | None, group_id: str
+) -> tuple[np.ndarray, np.ndarray] | None:
+    if roles is None or len(roles) == 0:
+        if len(views) != 2:
+            return None
+        return np.asarray(views[0]), np.asarray(views[1])
+    if len(roles) != len(views):
+        raise ValueError(
+            f"View role metadata for group '{group_id}' has length {len(roles)}, "
+            f"but {len(views)} views were materialized."
+        )
+
+    incoming: list[np.ndarray] = []
+    outgoing: list[np.ndarray] = []
+    undecided: list[tuple[int, np.ndarray]] = []
+    for idx, (view, role) in enumerate(zip(views, roles, strict=True)):
+        arr = np.asarray(view)
+        if role == "incoming":
+            incoming.append(arr)
+        elif role == "outgoing":
+            outgoing.append(arr)
+        elif role is None:
+            # Preserve deterministic tie-breaking by position for undecided views.
+            undecided.append((idx, arr))
+        else:
+            raise ValueError(f"Unknown view role '{role}' for group '{group_id}'.")
+
+    if undecided:
+        undecided_sorted = [
+            arr for _, arr in sorted(undecided, key=lambda pair: pair[0])
+        ]
+        if not incoming and not outgoing:
+            incoming = undecided_sorted[::2]
+            outgoing = undecided_sorted[1::2]
+        else:
+            for arr in undecided_sorted:
+                target = incoming if len(incoming) <= len(outgoing) else outgoing
+                target.append(arr)
+
+    if not incoming or not outgoing:
+        return None
+
+    def _concat(mats: Sequence[np.ndarray]) -> np.ndarray:
+        if len(mats) == 1:
+            return mats[0]
+        return np.concatenate(mats, axis=1)
+
+    return _concat(incoming), _concat(outgoing)
+
+
+def _views_are_collapsible(
+    views: Sequence[Any], roles: Sequence[str | None] | None, group_id: str
+) -> bool:
+    if roles is None or len(roles) == 0:
+        return len(views) == 2
+    if len(roles) != len(views):
+        raise ValueError(
+            f"View role metadata for group '{group_id}' has length {len(roles)}, "
+            f"but {len(views)} views were materialized."
+        )
+
+    incoming = 0
+    outgoing = 0
+    undecided = 0
+    for role in roles:
+        if role == "incoming":
+            incoming += 1
+        elif role == "outgoing":
+            outgoing += 1
+        elif role is None:
+            undecided += 1
+        else:
+            raise ValueError(f"Unknown view role '{role}' for group '{group_id}'.")
+
+    if undecided:
+        if incoming == 0 and outgoing == 0:
+            incoming += (undecided + 1) // 2
+            outgoing += undecided // 2
+        else:
+            for _ in range(undecided):
+                if incoming <= outgoing:
+                    incoming += 1
+                else:
+                    outgoing += 1
+
+    return incoming > 0 and outgoing > 0
+
+
+class _ChainViews:
+    def __init__(
+        self,
+        *,
+        spec,
+        group_order: Sequence[str],
+        roles_by_group: Mapping[str, Sequence[str | None]],
+        ref_views: Mapping[str, Sequence[Any]],
+        target_views: Mapping[str, Sequence[Any]],
+    ) -> None:
+        self.spec = spec
+        self.group_order = tuple(group_order)
+        self.roles_by_group = roles_by_group
+        self.ref_views = ref_views
+        self.target_views = target_views
+
+    def __iter__(
+        self,
+    ) -> Iterator[tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+        for gid in self.group_order:
+            ref_list = self.ref_views.get(gid)
+            tgt_list = self.target_views.get(gid)
+            if ref_list is None or tgt_list is None:
+                raise ValueError(f"Missing views for group '{gid}'.")
+
+            ref_split = _collapse_views(ref_list, self.roles_by_group.get(gid), gid)
+            if ref_split is None:
+                raise ValueError(f"Could not split reference views for group '{gid}'.")
+            incoming_ref, outgoing_ref = ref_split
+
+            tgt_split = _collapse_views(tgt_list, self.roles_by_group.get(gid), gid)
+            if tgt_split is None:
+                raise ValueError(f"Could not split target views for group '{gid}'.")
+            incoming_tgt, outgoing_tgt = tgt_split
+
+            group = self.spec.groups[gid]
+            if (
+                incoming_ref.shape[0] != group.size
+                or incoming_tgt.shape[0] != group.size
+                or outgoing_ref.shape[0] != group.size
+                or outgoing_tgt.shape[0] != group.size
+            ):
+                raise ValueError(
+                    f"View shapes for group '{gid}' are incompatible with size {group.size}."
+                )
+
+            yield (
+                gid,
+                incoming_ref,
+                outgoing_ref,
+                incoming_tgt,
+                outgoing_tgt,
+            )
+
+
 def _split_chain_views(
     spec,
     ref_views: Mapping[str, Sequence[Any]],
@@ -59,57 +203,6 @@ def _split_chain_views(
     for tmpl in getattr(spec, "view_templates", []):
         roles_by_group.setdefault(tmpl.group, []).append(getattr(tmpl, "role", None))
 
-    def _collapse_views(
-        views: Sequence[Any], roles: Sequence[str | None] | None, group_id: str
-    ) -> tuple[np.ndarray, np.ndarray] | None:
-        if roles is None or len(roles) == 0:
-            if len(views) != 2:
-                return None
-            return np.asarray(views[0]), np.asarray(views[1])
-        if len(roles) != len(views):
-            raise ValueError(
-                f"View role metadata for group '{group_id}' has length {len(roles)}, "
-                f"but {len(views)} views were materialized."
-            )
-
-        incoming: list[np.ndarray] = []
-        outgoing: list[np.ndarray] = []
-        undecided: list[tuple[int, np.ndarray]] = []
-        for idx, (view, role) in enumerate(zip(views, roles, strict=True)):
-            arr = np.asarray(view)
-            if role == "incoming":
-                incoming.append(arr)
-            elif role == "outgoing":
-                outgoing.append(arr)
-            elif role is None:
-                # Preserve deterministic tie-breaking by position for undecided views.
-                undecided.append((idx, arr))
-            else:
-                raise ValueError(f"Unknown view role '{role}' for group '{group_id}'.")
-
-        if undecided:
-            undecided_sorted = [
-                arr for _, arr in sorted(undecided, key=lambda pair: pair[0])
-            ]
-            if not incoming and not outgoing:
-                incoming = undecided_sorted[::2]
-                outgoing = undecided_sorted[1::2]
-            else:
-                for arr in undecided_sorted:
-                    target = incoming if len(incoming) <= len(outgoing) else outgoing
-                    target.append(arr)
-
-        if not incoming or not outgoing:
-            return None
-
-        def _concat(mats: Sequence[np.ndarray]) -> np.ndarray:
-            if len(mats) == 1:
-                return mats[0]
-            return np.concatenate(mats, axis=1)
-
-        return _concat(incoming), _concat(outgoing)
-
-    chain = []
     for gid in group_order:
         ref_list = ref_views.get(gid)
         tgt_list = target_views.get(gid)
@@ -117,40 +210,18 @@ def _split_chain_views(
             raise ValueError(f"Missing views for group '{gid}'.")
         if len(ref_list) != len(tgt_list):
             raise ValueError(f"Mismatched view counts for group '{gid}'.")
-        incoming_ref, outgoing_ref = _collapse_views(
-            ref_list, roles_by_group.get(gid), gid
-        )
-        if incoming_ref is None or outgoing_ref is None:
-            # Chain-style coordinate descent expects one incoming and one outgoing view.
+        if not _views_are_collapsible(ref_list, roles_by_group.get(gid), gid):
             return None
-        incoming_tgt, outgoing_tgt = _collapse_views(
-            tgt_list, roles_by_group.get(gid), gid
-        )
-        if incoming_tgt is None or outgoing_tgt is None:
+        if not _views_are_collapsible(tgt_list, roles_by_group.get(gid), gid):
             return None
 
-        group = spec.groups[gid]
-        if (
-            incoming_ref.shape[0] != group.size
-            or incoming_tgt.shape[0] != group.size
-            or outgoing_ref.shape[0] != group.size
-            or outgoing_tgt.shape[0] != group.size
-        ):
-            raise ValueError(
-                f"View shapes for group '{gid}' are incompatible with size {group.size}."
-            )
-
-        chain.append(
-            (
-                gid,
-                incoming_ref,
-                outgoing_ref,
-                incoming_tgt,
-                outgoing_tgt,
-            )
-        )
-
-    return chain
+    return _ChainViews(
+        spec=spec,
+        group_order=group_order,
+        roles_by_group=roles_by_group,
+        ref_views=ref_views,
+        target_views=target_views,
+    )
 
 
 def _incoming_cost(

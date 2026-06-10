@@ -194,11 +194,17 @@ def _compute_views(
     *,
     strategy,
     backend: str | None = None,
-) -> dict[str, list[Any]]:
+    cache: bool = False,
+) -> Mapping[str, Sequence[Any]]:
     requested_backend = backend or (
         "numpy" if getattr(strategy, "requires_numpy_views", False) else "jax"
     )
-    return adapter.permutation_views(params, spec, backend=requested_backend)  # type: ignore[arg-type]
+    return adapter.permutation_views(
+        params,
+        spec,
+        backend=requested_backend,  # type: ignore[arg-type]
+        cache=cache,
+    )
 
 
 def rebasin_single_sample(
@@ -211,7 +217,7 @@ def rebasin_single_sample(
     method_kwargs: Mapping[str, Any] | None = None,
     strategy: RebasinStrategy | None = None,
     rng_key: jax.Array | None = None,
-    ref_views: Mapping[str, list[Any]] | None = None,
+    ref_views: Mapping[str, Sequence[Any]] | None = None,
     ref_backend: str | None = None,
     is_reference: bool = False,
 ) -> tuple[ParamTree, Mapping[str, Any], dict[str, Any] | None]:
@@ -222,16 +228,27 @@ def rebasin_single_sample(
     backend = ref_backend or (
         "numpy" if getattr(strategy, "requires_numpy_views", False) else "jax"
     )
-    ref_views = ref_views or _compute_views(
-        adapter, spec, ref_params, strategy=strategy, backend=backend
-    )
+    if ref_views is None:
+        ref_views = _compute_views(
+            adapter,
+            spec,
+            ref_params,
+            strategy=strategy,
+            backend=backend,
+            cache=True,
+        )
 
     if is_reference:
         perms = strategy.identity_permutations(spec, ref_views)
         return params, perms, {"reference": True}
 
     target_views = _compute_views(
-        adapter, spec, params, strategy=strategy, backend=backend
+        adapter,
+        spec,
+        params,
+        strategy=strategy,
+        backend=backend,
+        cache=False,
     )
     perms, aux_info = strategy.match(spec, ref_views, target_views, rng_key=rng_key)
 
@@ -248,7 +265,7 @@ def rebasin_batch(
     method: str,
     method_kwargs: Mapping[str, Any] | None = None,
     rng_keys: Sequence[jax.Array | None] | None = None,
-    ref_views: Mapping[str, list[Any]] | None = None,
+    ref_views: Mapping[str, Sequence[Any]] | None = None,
     ref_backend: str | None = None,
 ) -> list[tuple[ParamTree, Mapping[str, Any], dict[str, Any] | None]]:
     """Rebasin a batch of samples using adapter-driven alignment."""
@@ -260,9 +277,15 @@ def rebasin_batch(
     backend = ref_backend or (
         "numpy" if getattr(strategy, "requires_numpy_views", False) else "jax"
     )
-    ref_views = ref_views or _compute_views(
-        adapter, spec, ref_params, strategy=strategy, backend=backend
-    )
+    if ref_views is None:
+        ref_views = _compute_views(
+            adapter,
+            spec,
+            ref_params,
+            strategy=strategy,
+            backend=backend,
+            cache=True,
+        )
 
     if not strategy.supports_batching():
         results = []
@@ -286,7 +309,14 @@ def rebasin_batch(
         return results
 
     target_views_batch = [
-        _compute_views(adapter, spec, params, strategy=strategy, backend=backend)
+        _compute_views(
+            adapter,
+            spec,
+            params,
+            strategy=strategy,
+            backend=backend,
+            cache=False,
+        )
         for params in params_batch
     ]
     perms_batch, aux_batch = strategy.batch_match(

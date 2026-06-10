@@ -165,7 +165,7 @@ class RebasinExecutor(StageExecutor):
         )
         self.ref_backend = backend
         self.ref_views = self.adapter.permutation_views(
-            ref_params, self.spec, backend=backend
+            ref_params, self.spec, backend=backend, cache=True
         )
         try:
             self.strategy.warmup(self.spec, self.ref_views, batch_size=self.batch_size)
