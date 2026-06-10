@@ -1,0 +1,56 @@
+paths:
+  experiment_root: results/example_smile_resnet_run
+  samples_dir: null
+  tree_path: null
+  output_dir: null
+
+architecture: resnet
+adapter:
+  layer_root: core
+  batch_stats_root: batch_stats
+  module_graph: null
+  residual_joins: []
+
+selection:
+  chain_indices: null
+  samples_per_chain: null
+  sample_step: 1
+  max_total: null
+  ref_chain: 0
+  ref_sample: 0
+
+normalize:
+  enabled: false
+
+rebasin:
+  enabled: true
+  method: sinkhorn
+  layer_root: core
+  seed: 0
+  sinkhorn:
+    tau: 0.1
+    n_sinkhorn_iters: 50
+    lr: 0.01
+    max_steps: 200
+    tol: 1.0e-05
+    init_scale: 0.01
+    record_loss_history: false
+    cost_function: l2_weight
+    cost_function_kwargs: {}
+  weight_matching:
+    max_iters: 25
+    tol: 0.0
+
+runtime:
+  resume: false
+  dry_run: false
+  list_samples: false
+  validate_only: false
+  force_cpu: false
+  force_gpu: false
+  parallelism: null
+  device_ids: null
+  per_device_batch: 128
+  verbosity: info
+  validate_artifacts_on_resume: true
+  save_intermediate: false

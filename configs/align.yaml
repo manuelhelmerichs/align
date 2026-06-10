@@ -1,0 +1,62 @@
+paths:
+  experiment_root: results/example_experiment  # Directory containing samples/, tree_sampling or tree.
+  samples_dir: null        # Optional override when samples live outside experiment_root.
+  tree_path: null          # Override the pickled PyTree definition; defaults to tree|tree_sampling.
+  output_dir: null         # Defaults to <experiment_root>/align/<timestamp>; set to reuse an existing folder.
+
+architecture: dense_mlp
+adapter:
+  layer_root: params.fcn
+
+selection:
+  chain_indices: null      # Only align these chains; leave empty to include every chain in samples/.
+  samples_per_chain: null  # Cap how many samples to take from each chain (after stride filtering).
+  sample_step: 1           # Keep every N-th sample inside each chain (1 == use all samples).
+  max_total: null          # Optional global cap on the number of samples processed overall.
+  ref_chain: 0             # Chain id that provides the reference sample before permutations.
+  ref_sample: 0            # Sample id (index within chain) used as the reference parameters.
+
+normalize:
+  enabled: true            # Enable parameter normalization before rebasining.
+  method: scale_normalize  # Currently supported normalization strategy.
+  layer_root: params.fcn   # Dot path to the dense layer subtree in the PyTree.
+  task_type: regression    # Set to classification when aligning classifiers.
+  num_classes: null        # Only required when task_type == classification and classification_head_rescale == true.
+  scale_normalize:
+    epsilon: 1e-8          # Numerical stabiliser for variance scaling.
+    degenerate_handling: preserve  # Alternatives: zero_outgoing, canonical_vector.
+    normalize_biases: true
+    activation: relu
+    activation_kwargs: {}
+    classification_head_rescale: false  # Optional non-symmetric classification heuristic; changes logits when enabled.
+
+rebasin:
+  enabled: true
+  method: weight_matching  # Choose between "sinkhorn" and "weight_matching".
+  layer_root: params.fcn   # Dot path to the dense layer subtree in the PyTree.
+  seed: 0                  # RNG seed ensures deterministic initialisation for stochastic methods.
+  sinkhorn:
+    tau: 0.1               # Entropic regularisation temperature for the Sinkhorn operator.
+    n_sinkhorn_iters: 50   # Row/column normalisation iterations per Sinkhorn projection.
+    lr: 0.01               # Optimiser learning rate for updating Sinkhorn logits.
+    max_steps: 200         # Gradient steps taken while solving the relaxed transport problem.
+    tol: 1.0e-05           # Early-stop tolerance on consecutive Sinkhorn losses.
+    init_scale: 0.01       # Standard deviation of the initial logits before Sinkhorn projection.
+    record_loss_history: false  # True stores per-sample loss curves (larger aux.json); false saves summary stats only.
+  weight_matching:
+    max_iters: 25          # Maximum number of LAP coordinate-descent sweeps performed by weight matching.
+    tol: 0.0               # Threshold for permutation updates; stop early when below this tolerance.
+
+runtime:
+  resume: false            # Reuse manifests/outputs inside output_dir and continue unfinished runs.
+  dry_run: false           # Build manifests, validate configuration, and exit without aligning samples.
+  list_samples: false      # Emit the manifest ordering to stdout and exit (debugging aid).
+  validate_only: false     # Validate configuration + filesystem, then exit before running.
+  force_cpu: false         # Leave false so Sinkhorn auto-selects GPUs; set true when benchmarking CPU-only.
+  force_gpu: false         # Optional override to insist on GPUs even if JAX can't auto-detect them.
+  parallelism: null        # null == auto based on the selected method and visible hardware.
+  device_ids: null         # Explicit CUDA device ids in multi-GPU boxes; omit to consume every visible GPU.
+  per_device_batch: 1      # Use >1 for batched Sinkhorn; weight matching processes one sample at a time.
+  verbosity: info          # Logging verbosity passed to the CLI (quiet/info/debug).
+  validate_artifacts_on_resume: true  # Re-hash folded/permutation files before skipping them; set false to trust checksums.
+  save_intermediate: false # Persist intermediate outputs when chaining normalization and rebasin.

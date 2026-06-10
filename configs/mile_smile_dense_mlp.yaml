@@ -1,0 +1,64 @@
+paths:
+  experiment_root: results/example_mile_or_smile_run
+  samples_dir: null
+  tree_path: null
+  output_dir: null
+
+architecture: dense_mlp
+adapter:
+  layer_root: params.fcn
+
+selection:
+  chain_indices: null
+  samples_per_chain: null
+  sample_step: 1
+  max_total: null
+  ref_chain: 0
+  ref_sample: 0
+
+normalize:
+  enabled: true
+  method: scale_normalize
+  layer_root: params.fcn
+  task_type: regression
+  num_classes: null
+  scale_normalize:
+    epsilon: 1e-8
+    degenerate_handling: preserve
+    normalize_biases: true
+    activation: relu
+    activation_kwargs: {}
+    classification_head_rescale: false
+
+rebasin:
+  enabled: true
+  method: weight_matching
+  layer_root: params.fcn
+  seed: 0
+  weight_matching:
+    max_iters: 25
+    tol: 0.0
+  sinkhorn:
+    tau: 0.1
+    n_sinkhorn_iters: 50
+    lr: 0.01
+    max_steps: 200
+    tol: 1.0e-05
+    init_scale: 0.01
+    record_loss_history: false
+    cost_function: l2_weight
+    cost_function_kwargs: {}
+
+runtime:
+  resume: false
+  dry_run: false
+  list_samples: false
+  validate_only: false
+  force_cpu: true
+  force_gpu: false
+  parallelism: null
+  device_ids: null
+  per_device_batch: 1
+  verbosity: info
+  validate_artifacts_on_resume: true
+  save_intermediate: false

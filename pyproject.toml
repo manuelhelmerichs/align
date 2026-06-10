@@ -1,0 +1,69 @@
+[project]
+name = "align"
+version = "0.1.0"
+description = "Align posterior neural-network weight samples by normalizing scale symmetries and rebasining permutation symmetries."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "jax==0.4.33",
+    "flax==0.9.0",
+    "numpy>=1.26,<3",
+    "optax==0.2.1",
+    "PyYAML>=6.0",
+    "scipy>=1.11",
+    "tqdm>=4.66,<5",
+]
+
+[project.optional-dependencies]
+cuda = [
+    "jax[cuda12_pip]==0.4.33",
+]
+dev = [
+    "coverage>=7.12.0",
+    "pre-commit>=4.0.0",
+    "pytest>=8.3.3",
+    "ruff>=0.14.8",
+]
+
+[project.scripts]
+align = "align.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["align*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = [
+    "tests",
+]
+filterwarnings = [
+    "ignore:JAXopt is no longer maintained\\.:DeprecationWarning",
+]
+markers = [
+    "slow: marks tests that allocate large datasets (deselect with '-m \"not slow\"')",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "UP",
+]
+ignore = [
+    "E501",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
