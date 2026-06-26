@@ -4,6 +4,9 @@
 
 ## Install
 
+The pinned JAX stack currently supports Python 3.11 or 3.12. The repo includes
+`.python-version` so `uv` uses Python 3.12 automatically.
+
 ```bash
 cd ~/projects/align
 python3 -m venv .venv
@@ -87,6 +90,7 @@ uv run align configs/examples/align.yaml --output-dir results/example/align/weig
 - [docs/align.md](docs/align.md): alignment background and supported methods
 - [docs/developer_reference_align.md](docs/developer_reference_align.md): CLI, config schema, runtime, and artifact layout
 - [docs/producer_artifact_contract.md](docs/producer_artifact_contract.md): expected sampler output layout
+- [docs/issue_roadmap.md](docs/issue_roadmap.md): open issue priorities and implementation plan
 
 ## Development
 

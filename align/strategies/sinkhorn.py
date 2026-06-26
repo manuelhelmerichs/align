@@ -254,7 +254,7 @@ class SinkhornStrategy(RebasinStrategy):
                 gid: [jnp.asarray(v) for v in views] for gid, views in ref_views.items()
             },
             target_data={
-                gid: [jnp.asarray(v) for v in views]
+                gid: [jnp.expand_dims(jnp.asarray(v), 0) for v in views]
                 for gid, views in target_views.items()
             },
             rng_key=rng_key,
