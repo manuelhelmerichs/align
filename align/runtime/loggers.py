@@ -14,7 +14,7 @@ from ..artifacts import (
     write_permutations_artifact,
     write_scale_factors_artifact,
 )
-from ..rebasin import ParamTree, save_pytree_npz
+from ..samples import WeightSample, create_sample_codec
 from ..state import ArtifactChecksumStore, SampleManifest, SampleRecord, _file_checksum
 from .common import _STATE_SAVE_INTERVAL_SECONDS
 
@@ -37,6 +37,10 @@ class IncrementalArtifactLogger(ABC):
         self.state_dir = self.output_dir / "state"
         self.aux_dir = self.state_dir / "aux"
         self.tree_path = Path(self.manifest.tree_path)
+        self.sample_codec = create_sample_codec(
+            self.manifest.sample_format,
+            tree_path=self.tree_path,
+        )
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.aux_dir.mkdir(parents=True, exist_ok=True)
         self._checksums = ArtifactChecksumStore(
@@ -64,15 +68,10 @@ class IncrementalArtifactLogger(ABC):
         path = self._aux_path_for(record)
         write_aux_artifact(path, data)
 
-    def _copy_tree_once(self, target_dir: Path, tree_path: Path | None = None) -> None:
+    def _copy_tree_once(self, target_dir: Path) -> None:
         if self._tree_copied:
             return
-        source = Path(tree_path or self.tree_path)
-        if not source.exists():
-            return
-        dest = target_dir / "tree"
-        if not dest.exists():
-            dest.write_bytes(source.read_bytes())
+        self.sample_codec.copy_structure(target_dir, artifact_name="tree")
         self._tree_copied = True
 
     def _update_checksum(
@@ -183,9 +182,7 @@ class IncrementalArtifactLogger(ABC):
         return True
 
     @abstractmethod
-    def write_sample(
-        self, record: SampleRecord, params: ParamTree, tree_path: Path | None = None
-    ) -> None:
+    def write_sample(self, record: SampleRecord, sample: WeightSample) -> None:
         """Persist the primary artifact for ``record``."""
 
     @abstractmethod
@@ -220,23 +217,18 @@ class IncrementalRebasinLogger(IncrementalArtifactLogger):
     def optional_artifacts(self) -> set[str]:
         return {"permutations"}
 
-    def write_sample(
-        self, record: SampleRecord, params: ParamTree, tree_path: Path | None = None
-    ) -> None:
+    def write_sample(self, record: SampleRecord, sample: WeightSample) -> None:
         path = self.artifact_paths(record)["folded"]
         path.parent.mkdir(parents=True, exist_ok=True)
-        save_pytree_npz(path, params)
-        if tree_path is not None:
-            self._copy_tree_once(self.folded_dir, tree_path=tree_path)
-        else:
-            self._copy_tree_once(self.folded_dir)
+        self.sample_codec.save(path, sample)
+        self._copy_tree_once(self.folded_dir)
         self._update_checksum(record, kind="folded", path=path)
 
     def write_permutations(
         self, record: SampleRecord, perms: list[jnp.ndarray]
     ) -> None:
         path = self.artifact_paths(record)["permutations"]
-        perm_path = write_permutations_artifact(path, perms, method=self.method)
+        perm_path = write_permutations_artifact(path, perms)
         if perm_path is None:
             self._update_checksum(
                 record, kind="permutations", path=None, checksum_value=0
@@ -294,16 +286,11 @@ class IncrementalNormalizationLogger(IncrementalArtifactLogger):
     def optional_artifacts(self) -> set[str]:
         return {"scale_factors"}
 
-    def write_sample(
-        self, record: SampleRecord, params: ParamTree, tree_path: Path | None = None
-    ) -> None:
+    def write_sample(self, record: SampleRecord, sample: WeightSample) -> None:
         path = self.artifact_paths(record)["folded"]
         path.parent.mkdir(parents=True, exist_ok=True)
-        save_pytree_npz(path, params)
-        if tree_path is not None:
-            self._copy_tree_once(self.normalized_dir, tree_path=tree_path)
-        else:
-            self._copy_tree_once(self.normalized_dir)
+        self.sample_codec.save(path, sample)
+        self._copy_tree_once(self.normalized_dir)
         self._update_checksum(record, kind="folded", path=path)
 
     def write_scale_factors(
@@ -350,7 +337,7 @@ _NORMALIZE_STATIC_KEYS = frozenset(
     }
 )
 _NORMALIZE_PER_SAMPLE_KEYS = frozenset({"last_layer_gamma"})
-_REBASIN_STATIC_KEYS = frozenset({"method"})
+_REBASIN_STATIC_KEYS = frozenset({"objective", "schedule"})
 _REBASIN_PER_SAMPLE_KEYS = frozenset({"reference"})
 
 
@@ -429,39 +416,37 @@ class AlignLogger(IncrementalArtifactLogger):
             paths["intermediate"] = self.intermediate_dir / rel
         return paths
 
-    def write_sample(
-        self, record: SampleRecord, params: ParamTree, tree_path: Path | None = None
-    ) -> None:
+    def write_sample(self, record: SampleRecord, sample: WeightSample) -> None:
         path = self.artifact_paths(record)["final"]
         path.parent.mkdir(parents=True, exist_ok=True)
-        save_pytree_npz(path, params)
-        self._copy_tree_once(self.final_dir, tree_path=tree_path)
+        self.sample_codec.save(path, sample)
+        self._copy_tree_once(self.final_dir)
         self._update_checksum(record, kind="final", path=path)
 
-    def write_intermediate(self, record: SampleRecord, params: ParamTree) -> None:
+    def write_intermediate(self, record: SampleRecord, sample: WeightSample) -> None:
         if self.intermediate_dir is None:
             return
         path = self.artifact_paths(record).get("intermediate")
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        save_pytree_npz(path, params)
+        self.sample_codec.save(path, sample)
         if not self._intermediate_tree_copied and self.tree_path.exists():
-            dest = self.intermediate_dir / "tree"
-            if not dest.exists():
-                dest.write_bytes(self.tree_path.read_bytes())
+            self.sample_codec.copy_structure(
+                self.intermediate_dir, artifact_name="tree"
+            )
             self._intermediate_tree_copied = True
         self._update_checksum(record, kind="intermediate", path=path)
 
     def write_permutations(
-        self, record: SampleRecord, perms: list[jnp.ndarray], *, method: str
+        self, record: SampleRecord, perms: Mapping[str, Any]
     ) -> None:
         if self.permutations_dir is None:
             return
         path = self.artifact_paths(record).get("permutations")
         if path is None:
             return
-        perm_path = write_permutations_artifact(path, perms, method=method)
+        perm_path = write_permutations_artifact(path, perms)
         if perm_path is None:
             self._update_checksum(
                 record, kind="permutations", path=None, checksum_value=0

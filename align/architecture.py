@@ -1,15 +1,13 @@
-"""Architecture adapters and alignment spec helpers."""
+"""Architecture adapters and alignment helpers."""
 
-import copy
 import importlib
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import jax.numpy as jnp
 import numpy as np
-from flax.core import frozen_dict
 
 
 def _descend(mapping: Mapping[str, Any], path: Sequence[str]) -> Any:
@@ -100,265 +98,19 @@ class PermutationGroup:
     size: int
 
 
-@dataclass
-class ViewTemplate:
-    """Template describing how to build a cost view for a permutation group."""
-
-    name: str
-    group: str
-    weight_path: tuple[str, ...]
-    axis: int
-    bias_path: tuple[str, ...] | None = None
-    role: Literal["incoming", "outgoing"] | None = None
-
-
-@dataclass
-class PermutationRule:
-    """Rule describing where and how to apply a permutation."""
-
-    path: tuple[str, ...]
-    axis: int
-    group: str
-    direction: Literal["left", "right"] = "left"
-
-
-@dataclass
-class AlignmentSite:
-    """Permutation site describing where a group's channels live."""
-
-    id: str
-    group: str
-    params: tuple[tuple[str, ...], ...]
-    tags: tuple[str, ...] = ()
-    invariants: tuple[str, ...] = ()
-
-
-@dataclass
-class AlignmentSpec:
-    """Complete alignment description for an architecture instance."""
-
-    groups: dict[str, PermutationGroup]
-    view_templates: list[ViewTemplate]
-    permutation_rules: list[PermutationRule]
-    sites: list[AlignmentSite] = field(default_factory=list)
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def _templates_by_group(self) -> dict[str, list[ViewTemplate]]:
-        templates: dict[str, list[ViewTemplate]] = {gid: [] for gid in self.groups}
-        for tmpl in self.view_templates:
-            if tmpl.group not in self.groups:
-                raise KeyError(f"View template {tmpl.name!r} references unknown group.")
-            templates[tmpl.group].append(tmpl)
-        return templates
-
-    def materialize_views(
-        self,
-        params: Mapping[str, Any],
-        *,
-        xp,
-        cache: bool = True,
-    ) -> Mapping[str, Sequence[Any]]:
-        """Return flattened views for each permutation group.
-
-        Individual views are materialized on first access. This keeps the
-        strategy-facing API mapping-compatible while avoiding eager allocation
-        of every depth-indexed view during setup.
-        """
-
-        return LazyMaterializedViews(
-            params=params,
-            groups=self.groups,
-            templates_by_group=self._templates_by_group(),
-            xp=xp,
-            cache=cache,
-        )
-
-
-def _materialize_view(
-    params: Mapping[str, Any],
-    tmpl: ViewTemplate,
-    group: PermutationGroup,
-    *,
-    xp,
-) -> Any:
-    weights = xp.asarray(_descend(params, tmpl.weight_path))
-    axis = _canonical_axis(weights.ndim, tmpl.axis)
-    if weights.shape[axis] != group.size:
-        raise ValueError(
-            f"Weight view {tmpl.weight_path} axis {tmpl.axis} "
-            f"has size {weights.shape[axis]}, expected {group.size}"
-        )
-    weights = xp.moveaxis(weights, axis, 0)
-    matrix = weights.reshape(group.size, -1)
-
-    if tmpl.bias_path is not None:
-        bias = xp.asarray(_descend(params, tmpl.bias_path))
-        bias_vec = bias.reshape(-1)
-        if bias_vec.size != group.size:
-            raise ValueError(
-                f"Bias at {tmpl.bias_path} has incompatible size "
-                f"{bias_vec.size}, expected {group.size}"
-            )
-        bias_matrix = bias_vec.reshape(group.size, -1)
-        matrix = xp.concatenate([matrix, bias_matrix], axis=1)
-
-    return matrix
-
-
-class LazyViewSequence(Sequence[Any]):
-    """Sequence of flattened views that materializes entries on demand."""
-
-    def __init__(
-        self,
-        *,
-        params: Mapping[str, Any],
-        group: PermutationGroup,
-        templates: Sequence[ViewTemplate],
-        xp,
-        cache: bool,
-    ) -> None:
-        self._params = params
-        self._group = group
-        self._templates = tuple(templates)
-        self._xp = xp
-        self._cache_enabled = bool(cache)
-        self._cache: dict[int, Any] = {}
-
-    def __len__(self) -> int:
-        return len(self._templates)
-
-    def __getitem__(self, index):
-        if isinstance(index, slice):
-            return [self[idx] for idx in range(*index.indices(len(self)))]
-        if index < 0:
-            index += len(self)
-        if index < 0 or index >= len(self):
-            raise IndexError(index)
-        if self._cache_enabled and index in self._cache:
-            return self._cache[index]
-
-        view = _materialize_view(
-            self._params, self._templates[index], self._group, xp=self._xp
-        )
-        if self._cache_enabled:
-            self._cache[index] = view
-        return view
-
-    def __iter__(self) -> Iterator[Any]:
-        for index in range(len(self)):
-            yield self[index]
-
-    def materialize(self) -> list[Any]:
-        """Return all views as a concrete list."""
-        return list(self)
-
-    def clear_cache(self) -> None:
-        """Drop cached materialized arrays."""
-        self._cache.clear()
-
-
-class LazyMaterializedViews(Mapping[str, Sequence[Any]]):
-    """Mapping of group ids to lazily materialized view sequences."""
-
-    def __init__(
-        self,
-        *,
-        params: Mapping[str, Any],
-        groups: Mapping[str, PermutationGroup],
-        templates_by_group: Mapping[str, Sequence[ViewTemplate]],
-        xp,
-        cache: bool,
-    ) -> None:
-        self._params = params
-        self._groups = dict(groups)
-        self._templates_by_group = {
-            gid: tuple(templates) for gid, templates in templates_by_group.items()
-        }
-        self._group_ids = tuple(groups)
-        self._xp = xp
-        self._cache_enabled = bool(cache)
-        self._sequences: dict[str, LazyViewSequence] = {}
-
-    def __getitem__(self, group_id: str) -> Sequence[Any]:
-        if group_id not in self._groups:
-            raise KeyError(group_id)
-        sequence = self._sequences.get(group_id)
-        if sequence is None:
-            sequence = LazyViewSequence(
-                params=self._params,
-                group=self._groups[group_id],
-                templates=self._templates_by_group[group_id],
-                xp=self._xp,
-                cache=self._cache_enabled,
-            )
-            self._sequences[group_id] = sequence
-        return sequence
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(self._group_ids)
-
-    def __len__(self) -> int:
-        return len(self._group_ids)
-
-    def materialize(self) -> dict[str, list[Any]]:
-        """Return all groups as concrete lists."""
-        return {gid: list(self[gid]) for gid in self}
-
-    def clear_cache(self) -> None:
-        """Drop cached materialized arrays for all groups."""
-        for sequence in self._sequences.values():
-            sequence.clear_cache()
-
-
 class ArchitectureAdapter(ABC):
-    """Interface for architecture-aware alignment."""
+    """Interface for architecture-aware alignment.
+
+    Adapters emit a single graph-native :class:`~align.alignment.AlignmentProblem`
+    per parameter tree. Both stages consume it: rebasin via permutation actions
+    and normalization via the scale action.
+    """
 
     name: str
 
     @abstractmethod
-    def build_spec(self, params: Mapping[str, Any]) -> AlignmentSpec:
-        """Return the alignment spec for ``params``."""
-
-    def permutation_views(
-        self,
-        params: Mapping[str, Any],
-        spec: AlignmentSpec,
-        *,
-        backend: Literal["jax", "numpy"] = "jax",
-        cache: bool = True,
-    ) -> Mapping[str, Sequence[Any]]:
-        """Return cost views for ``params``."""
-        xp = jnp if backend == "jax" else np
-        return spec.materialize_views(params, xp=xp, cache=cache)
-
-    def permute(
-        self, params: Mapping[str, Any], spec: AlignmentSpec, perms: Mapping[str, Any]
-    ) -> Mapping[str, Any]:
-        """Apply grouped permutations to ``params``."""
-        is_frozen = isinstance(params, frozen_dict.FrozenDict)
-        mutable = frozen_dict.unfreeze(params) if is_frozen else copy.deepcopy(params)
-        index_cache: dict[tuple[str, Literal["left", "right"]], Any] = {}
-        for rule in spec.permutation_rules:
-            perm = perms.get(rule.group)
-            if perm is None:
-                continue
-            cache_key = (rule.group, rule.direction)
-            indices = index_cache.get(cache_key)
-            if indices is None:
-                indices = _perm_indices(perm, direction=rule.direction)
-                index_cache[cache_key] = indices
-            target = _descend(mutable, rule.path)
-            updated = apply_perm_to_axis(
-                target, indices, axis=rule.axis, direction=rule.direction
-            )
-            _set_path(mutable, rule.path, updated)
-        return frozen_dict.freeze(mutable) if is_frozen else mutable
-
-    @abstractmethod
-    def normalize(
-        self, params: Mapping[str, Any], spec: AlignmentSpec, **kwargs: Any
-    ) -> tuple[Mapping[str, Any], list[Any], dict[str, Any] | None]:
-        """Normalize scale symmetries using the spec."""
+    def build_problem(self, params: Mapping[str, Any]):
+        """Return the graph-native alignment problem for ``params``."""
 
 
 _ADAPTERS: dict[str, type[ArchitectureAdapter]] = {}
@@ -412,14 +164,8 @@ def available_adapters() -> list[str]:
 
 
 __all__ = [
-    "AlignmentSpec",
     "ArchitectureAdapter",
-    "AlignmentSite",
-    "LazyMaterializedViews",
-    "LazyViewSequence",
     "PermutationGroup",
-    "PermutationRule",
-    "ViewTemplate",
     "available_adapters",
     "get_adapter",
     "register_adapter",

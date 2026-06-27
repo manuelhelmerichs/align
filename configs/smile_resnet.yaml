@@ -3,6 +3,7 @@ paths:
   samples_dir: null
   tree_path: null
   output_dir: null
+  sample_format: pytree_npz
 
 architecture: resnet
 adapter:
@@ -24,22 +25,22 @@ normalize:
 
 rebasin:
   enabled: true
-  method: sinkhorn
+  objective: l2_weight
+  objective_kwargs: {}
   layer_root: core
   seed: 0
-  sinkhorn:
-    tau: 0.1
-    n_sinkhorn_iters: 50
-    lr: 0.01
-    max_steps: 200
-    tol: 1.0e-05
-    init_scale: 0.01
-    record_loss_history: false
-    cost_function: l2_weight
-    cost_function_kwargs: {}
-  weight_matching:
-    max_iters: 25
-    tol: 0.0
+  schedule:
+    - solver: sinkhorn
+      tau: 0.1
+      n_sinkhorn_iters: 50
+      lr: 0.01
+      max_steps: 200
+      tol: 1.0e-05
+      init_scale: 0.01
+      record_loss_history: false
+    - solver: lap
+      max_sweeps: 5
+      tol: 0.0
 
 runtime:
   resume: false

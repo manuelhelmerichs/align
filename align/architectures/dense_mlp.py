@@ -1,21 +1,16 @@
 """Dense MLP architecture adapter."""
 
-import copy
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 import jax.numpy as jnp
-from flax.core import frozen_dict
 
+from ..alignment import AlignmentProblem, AxisBinding, TensorSpec
 from ..architecture import (
-    AlignmentSite,
-    AlignmentSpec,
     ArchitectureAdapter,
     PermutationGroup,
-    PermutationRule,
-    ViewTemplate,
     register_adapter,
 )
 from ..dense_layers import DenseLayer
@@ -80,117 +75,69 @@ class DenseMLPAdapter(ArchitectureAdapter):
             layers.append(DenseLayer(kernel=kernel, bias=bias))
         return layers
 
-    def _inject_layers(
-        self,
-        params: Mapping[str, Any],
-        layer_paths: list[tuple[str, ...]],
-        updated_layers: list[DenseLayer],
-    ) -> Mapping[str, Any]:
-        if len(layer_paths) != len(updated_layers):
-            raise ValueError("Layer count mismatch while injecting updated layers.")
-        is_frozen = isinstance(params, frozen_dict.FrozenDict)
-        mutable = frozen_dict.unfreeze(params) if is_frozen else copy.deepcopy(params)
-        for path, layer in zip(layer_paths, updated_layers, strict=True):
-            node = self._descend(mutable, path)
-            node["kernel"] = layer.kernel
-            node["bias"] = layer.bias
-        return frozen_dict.freeze(mutable) if is_frozen else mutable
-
-    def build_spec(self, params: Mapping[str, Any]) -> AlignmentSpec:
+    def build_problem(self, params: Mapping[str, Any]) -> AlignmentProblem:
         layer_paths = self._infer_layer_paths(params)
         layers = self._extract_layers(params, layer_paths)
 
-        groups: dict[str, PermutationGroup] = {}
-        view_templates: list[ViewTemplate] = []
-        permutation_rules: list[PermutationRule] = []
-        sites: list[AlignmentSite] = []
-
-        for idx, layer in enumerate(layers[:-1]):
-            group_id = f"layer_{idx}"
-            groups[group_id] = PermutationGroup(id=group_id, size=layer.kernel.shape[1])
-            layer_path = layer_paths[idx]
-            view_templates.append(
-                ViewTemplate(
-                    name=f"{group_id}_incoming",
-                    group=group_id,
-                    weight_path=(*layer_path, "kernel"),
-                    axis=1,
-                    bias_path=(*layer_path, "bias"),
-                    role="incoming",
-                )
+        groups: dict[str, PermutationGroup] = {
+            f"layer_{idx}": PermutationGroup(
+                id=f"layer_{idx}", size=int(layer.kernel.shape[1])
             )
-            permutation_rules.extend(
-                [
-                    PermutationRule(
-                        path=(*layer_path, "kernel"),
-                        axis=1,
-                        group=group_id,
-                        direction="right",
-                    ),
-                    PermutationRule(
-                        path=(*layer_path, "bias"),
+            for idx, layer in enumerate(layers[:-1])
+        }
+        tensors: dict[str, TensorSpec] = {}
+        bindings: list[AxisBinding] = []
+
+        def _tensor_id(path: tuple[str, ...]) -> str:
+            return "/".join(path)
+
+        for idx, (layer, layer_path) in enumerate(
+            zip(layers, layer_paths, strict=True)
+        ):
+            kernel_path = (*layer_path, "kernel")
+            bias_path = (*layer_path, "bias")
+            kernel_id = _tensor_id(kernel_path)
+            bias_id = _tensor_id(bias_path)
+            tensors[kernel_id] = TensorSpec(
+                id=kernel_id,
+                path=kernel_path,
+                shape=tuple(int(dim) for dim in layer.kernel.shape),
+                metadata={"layer_index": idx, "kind": "kernel"},
+            )
+            tensors[bias_id] = TensorSpec(
+                id=bias_id,
+                path=bias_path,
+                shape=tuple(int(dim) for dim in layer.bias.shape),
+                metadata={"layer_index": idx, "kind": "bias"},
+            )
+
+            if idx > 0:
+                bindings.append(
+                    AxisBinding(
+                        tensor_id=kernel_id,
                         axis=0,
-                        group=group_id,
-                        direction="left",
-                    ),
-                ]
-            )
+                        group=f"layer_{idx - 1}",
+                        role="in",
+                    )
+                )
+            if idx < len(layers) - 1:
+                group_id = f"layer_{idx}"
+                bindings.append(
+                    AxisBinding(tensor_id=kernel_id, axis=1, group=group_id, role="out")
+                )
+                bindings.append(
+                    AxisBinding(tensor_id=bias_id, axis=0, group=group_id, role="out")
+                )
 
-            next_path = layer_paths[idx + 1]
-            sites.append(
-                AlignmentSite(
-                    id=group_id,
-                    group=group_id,
-                    params=(
-                        (*layer_path, "kernel"),
-                        (*layer_path, "bias"),
-                        (*next_path, "kernel"),
-                    ),
-                    tags=("mlp_hidden",),
-                    invariants=("feeds next layer incoming rows",),
-                )
-            )
-            view_templates.append(
-                ViewTemplate(
-                    name=f"{group_id}_outgoing",
-                    group=group_id,
-                    weight_path=(*next_path, "kernel"),
-                    axis=0,
-                    role="outgoing",
-                )
-            )
-            permutation_rules.append(
-                PermutationRule(
-                    path=(*next_path, "kernel"),
-                    axis=0,
-                    group=group_id,
-                    direction="left",
-                )
-            )
-
-        return AlignmentSpec(
+        problem = AlignmentProblem(
             groups=groups,
-            view_templates=view_templates,
-            permutation_rules=permutation_rules,
-            sites=sites,
+            tensors=tensors,
+            axis_bindings=tuple(bindings),
             metadata={
                 "layer_paths": layer_paths,
                 "group_order": [f"layer_{idx}" for idx in range(len(groups))],
+                "architecture": self.name,
             },
         )
-
-    def normalize(
-        self, params: Mapping[str, Any], spec: AlignmentSpec, **kwargs: Any
-    ) -> tuple[Mapping[str, Any], list[Any], dict[str, Any] | None]:
-        from ..normalize import normalize_layers
-
-        layer_paths = spec.metadata.get("layer_paths")
-        if not isinstance(layer_paths, list):
-            raise RuntimeError(
-                "DenseMLPAdapter spec is missing 'layer_paths' metadata."
-            )
-
-        layers = self._extract_layers(params, layer_paths)
-        normalized_layers, scale_factors, aux = normalize_layers(layers, **kwargs)
-        normalized_params = self._inject_layers(params, layer_paths, normalized_layers)
-        return normalized_params, scale_factors, aux
+        problem.validate(params)
+        return problem

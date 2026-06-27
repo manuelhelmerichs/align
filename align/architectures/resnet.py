@@ -10,13 +10,10 @@ from typing import Any
 import numpy as np
 import yaml
 
+from ..alignment import AlignmentProblem, AxisBinding, GraphConstraint, TensorSpec
 from ..architecture import (
-    AlignmentSite,
-    AlignmentSpec,
     ArchitectureAdapter,
     PermutationGroup,
-    PermutationRule,
-    ViewTemplate,
     _canonical_axis,
     _descend,
     _maybe_descend,
@@ -334,7 +331,9 @@ class ResNetAdapter(ArchitectureAdapter):
         candidate = "/".join(parts)
         return candidate if candidate in available else None
 
-    def build_spec(self, params: Mapping[str, Any]) -> AlignmentSpec:
+    def build_problem(self, params: Mapping[str, Any]) -> AlignmentProblem:
+        """Derive the graph-native alignment problem directly from the modules."""
+
         layer_root_path = tuple(self.layer_root.split("."))
         subtree = _maybe_descend(params, layer_root_path)
         if subtree is None:
@@ -371,10 +370,8 @@ class ResNetAdapter(ArchitectureAdapter):
         unions = _GroupUnionFind()
         order_index = {name: idx for idx, name in enumerate(conv_names)}
         for conv_name in conv_names:
-            conv_path = (*conv_paths[conv_name], "kernel")
-            kernel = _descend(params, conv_path)
-            out_size = int(kernel.shape[-1])
-            unions.add(conv_name, out_size)
+            kernel = _descend(params, (*conv_paths[conv_name], "kernel"))
+            unions.add(conv_name, int(kernel.shape[-1]))
 
         for group in residual_groups:
             names = sorted(group, key=order_index.__getitem__)
@@ -389,39 +386,61 @@ class ResNetAdapter(ArchitectureAdapter):
             unions.union(left, right)
 
         group_map = {name: unions.find(name) for name in conv_names}
-        group_members: dict[str, list[str]] = {}
-        for conv_name, group_id in group_map.items():
-            group_members.setdefault(group_id, []).append(conv_name)
         groups: dict[str, PermutationGroup] = {
             root: PermutationGroup(id=root, size=size)
             for root, size in unions.roots().items()
         }
 
-        def _invariants_for(
-            group_id: str, current: str | None = None
-        ) -> tuple[str, ...]:
-            peers = [name for name in group_members[group_id] if name != current]
-            if peers:
-                return (f"shares residual stream '{group_id}' with {', '.join(peers)}",)
-            return ()
+        tensors: dict[str, TensorSpec] = {}
 
-        def _dedup_paths(paths: list[tuple[str, ...]]) -> tuple[tuple[str, ...], ...]:
-            seen: set[tuple[str, ...]] = set()
-            ordered: list[tuple[str, ...]] = []
-            for path in paths:
-                if path in seen:
-                    continue
-                seen.add(path)
-                ordered.append(path)
-            return tuple(ordered)
+        def _walk(node: Any, prefix: tuple[str, ...]) -> None:
+            if isinstance(node, Mapping):
+                for name, value in node.items():
+                    _walk(value, prefix + (str(name),))
+                return
+            shape = tuple(int(dim) for dim in np.shape(node))
+            if not shape:
+                return
+            tensor_id = "/".join(prefix)
+            tensors[tensor_id] = TensorSpec(
+                id=tensor_id,
+                path=prefix,
+                shape=shape,
+                metadata={"architecture": self.name},
+            )
 
-        view_templates: list[ViewTemplate] = []
-        permutation_rules: list[PermutationRule] = []
+        _walk(params, ())
+
+        bindings: list[AxisBinding] = []
+        seen_bindings: set[tuple[str, int, str]] = set()
+
+        def _bind(path: tuple[str, ...], axis: int, group_id: str, role: str) -> str:
+            tensor_id = "/".join(path)
+            if tensor_id not in tensors:
+                value = _descend(params, path)
+                tensors[tensor_id] = TensorSpec(
+                    id=tensor_id,
+                    path=path,
+                    shape=tuple(int(dim) for dim in np.shape(value)),
+                    metadata={"architecture": self.name},
+                )
+            key = (tensor_id, axis, group_id)
+            if key not in seen_bindings:
+                seen_bindings.add(key)
+                bindings.append(
+                    AxisBinding(
+                        tensor_id=tensor_id, axis=axis, group=group_id, role=role
+                    )
+                )
+            return tensor_id
+
         group_order: list[str] = []
-        sites: list[AlignmentSite] = []
+        conv_to_group: dict[str, str] = {}
+        conv_to_out_tensors: dict[str, list[str]] = {}
 
         for idx, conv_name in enumerate(conv_names):
             group_id = group_map[conv_name]
+            conv_to_group[conv_name] = group_id
             if group_id not in group_order:
                 group_order.append(group_id)
             conv_path = conv_paths[conv_name]
@@ -430,35 +449,11 @@ class ResNetAdapter(ArchitectureAdapter):
             _validate_channel_size(
                 kernel_path, _descend(params, kernel_path), group_size
             )
-            site_paths: list[tuple[str, ...]] = [kernel_path, (*conv_path, "bias")]
-            site_tags: list[str] = ["conv_out", "residual_stream"]
 
-            view_templates.append(
-                ViewTemplate(
-                    name=f"{group_id}_incoming",
-                    group=group_id,
-                    weight_path=kernel_path,
-                    axis=-1,
-                    bias_path=(*conv_path, "bias"),
-                    role="incoming",
-                )
-            )
-            permutation_rules.extend(
-                [
-                    PermutationRule(
-                        path=kernel_path,
-                        axis=-1,
-                        group=group_id,
-                        direction="left",
-                    ),
-                    PermutationRule(
-                        path=(*conv_path, "bias"),
-                        axis=0,
-                        group=group_id,
-                        direction="left",
-                    ),
-                ]
-            )
+            out_tensors: list[str] = [
+                _bind(kernel_path, -1, group_id, "out"),
+                _bind((*conv_path, "bias"), 0, group_id, "out"),
+            ]
 
             frn_name = self._frn_name_for(conv_name, frn_ids)
             bn_name = self._bn_name_for(conv_name, bn_ids)
@@ -468,134 +463,99 @@ class ResNetAdapter(ArchitectureAdapter):
                     f"BatchNorm ({bn_name}) modules."
                 )
             if frn_name:
-                site_tags.append("channel_norm")
-                self._attach_frn_rules(
+                self._attach_frn_bindings(
                     params,
                     group_id,
                     group_size,
                     frn_paths[frn_name],
-                    permutation_rules,
-                    site_paths,
+                    _bind,
+                    out_tensors,
                 )
             if bn_name:
-                site_tags.append("channel_norm")
-                stats_added = self._attach_batchnorm_rules(
+                self._attach_batchnorm_bindings(
                     params,
                     group_id,
                     group_size,
                     bn_paths[bn_name],
-                    permutation_rules,
+                    _bind,
                     layer_root_path,
                     stats_root_path,
-                    site_paths,
+                    out_tensors,
                 )
-                if stats_added:
-                    site_tags.append("bn_state")
+
+            conv_to_out_tensors[conv_name] = list(dict.fromkeys(out_tensors))
 
             next_conv = conv_names[idx + 1] if idx + 1 < len(conv_names) else None
             if next_conv:
                 next_path = (*conv_paths[next_conv], "kernel")
                 next_kernel = _descend(params, next_path)
                 _validate_channel_size(next_path, next_kernel, group_size, axis=-2)
-                view_templates.append(
-                    ViewTemplate(
-                        name=f"{group_id}_outgoing",
-                        group=group_id,
-                        weight_path=next_path,
-                        axis=-2,
-                        role="outgoing",
-                    )
-                )
-                permutation_rules.append(
-                    PermutationRule(
-                        path=next_path,
-                        axis=-2,
-                        group=group_id,
-                        direction="left",
-                    )
-                )
-                sites.append(
-                    AlignmentSite(
-                        id=f"{next_conv}_in",
-                        group=group_id,
-                        params=(next_path,),
-                        tags=("conv_in", "residual_stream"),
-                        invariants=_invariants_for(group_id, conv_name)
-                        + (f"rows feeding {next_conv}",),
-                    )
-                )
+                _bind(next_path, -2, group_id, "in")
 
-            sites.append(
-                AlignmentSite(
-                    id=f"{conv_name}_out",
-                    group=group_id,
-                    params=_dedup_paths(site_paths),
-                    tags=tuple(dict.fromkeys(site_tags)),
-                    invariants=_invariants_for(group_id, conv_name),
-                )
-            )
-
-        dense_candidates = list(dense_paths)
-        for dense_name in sorted(dense_candidates, key=_natural_key):
+        dense_candidates = sorted(dense_paths, key=_natural_key)
+        last_group = group_map[conv_names[-1]]
+        for dense_name in dense_candidates:
             dense_path = (*dense_paths[dense_name], "kernel")
             kernel = _descend(params, dense_path)
             in_size = int(kernel.shape[0])
-            last_group = group_map[conv_names[-1]]
             if groups[last_group].size != in_size:
                 raise ValueError(
                     f"Dense layer {dense_name} expects input {in_size}, "
                     f"but last conv group {last_group} has {groups[last_group].size}."
                 )
-            permutation_rules.append(
-                PermutationRule(
-                    path=dense_path,
-                    axis=0,
-                    group=last_group,
-                    direction="left",
+            _bind(dense_path, 0, last_group, "in")
+
+        constraints: list[GraphConstraint] = []
+
+        def _residual_tie(members: tuple[str, ...], source: str) -> GraphConstraint:
+            tie_groups = tuple(
+                dict.fromkeys(
+                    conv_to_group[member]
+                    for member in members
+                    if member in conv_to_group
                 )
             )
-            view_templates.append(
-                ViewTemplate(
-                    name=f"{last_group}_dense_outgoing",
-                    group=last_group,
-                    weight_path=dense_path,
-                    axis=0,
-                    role="outgoing",
-                )
-            )
-            sites.append(
-                AlignmentSite(
-                    id=f"{dense_name}_head_in",
-                    group=last_group,
-                    params=(dense_path,),
-                    tags=("head_in", "residual_stream"),
-                    invariants=_invariants_for(last_group, conv_names[-1])
-                    + (f"rows feeding {dense_name}",),
-                )
+            tie_tensors: list[str] = []
+            for member in members:
+                tie_tensors.extend(conv_to_out_tensors.get(member, ()))
+            return GraphConstraint(
+                kind="residual_tie",
+                groups=tie_groups,
+                tensors=tuple(dict.fromkeys(tie_tensors)),
+                metadata={"members": members, "source": source},
             )
 
-        return AlignmentSpec(
+        for group in residual_groups:
+            members = tuple(sorted(group, key=order_index.__getitem__))
+            constraints.append(_residual_tie(members, "module_graph"))
+        for left, right in self.residual_joins:
+            constraints.append(_residual_tie((left, right), "manual"))
+
+        problem = AlignmentProblem(
             groups=groups,
-            view_templates=view_templates,
-            permutation_rules=permutation_rules,
-            sites=sites,
+            tensors=tensors,
+            axis_bindings=tuple(bindings),
+            constraints=tuple(constraints),
             metadata={
+                "architecture": self.name,
                 "conv_names": conv_names,
-                "dense_heads": sorted(dense_candidates, key=_natural_key),
+                "dense_heads": dense_candidates,
                 "group_order": group_order,
                 "residual_groups": [sorted(group) for group in residual_groups],
                 "manual_residual_joins": list(self.residual_joins),
             },
         )
+        problem.validate(params)
+        return problem
 
-    def _attach_frn_rules(
+    def _attach_frn_bindings(
         self,
         params: Mapping[str, Any],
         group_id: str,
         group_size: int,
         frn_path: tuple[str, ...],
-        permutation_rules: list[PermutationRule],
-        site_params: list[tuple[str, ...]],
+        bind,
+        out_tensors: list[str],
     ) -> None:
         module = _descend(params, frn_path)
         for param in ("gamma", "beta", "tau"):
@@ -604,41 +564,24 @@ class ResNetAdapter(ArchitectureAdapter):
                 _validate_channel_size(
                     full_path, _descend(params, full_path), group_size
                 )
-                site_params.append(full_path)
-                permutation_rules.append(
-                    PermutationRule(
-                        path=full_path,
-                        axis=-1,
-                        group=group_id,
-                        direction="left",
-                    )
-                )
+                out_tensors.append(bind(full_path, -1, group_id, "out"))
         if "eps" in module:
             eps_path = (*frn_path, "eps")
             eps_value = _descend(params, eps_path)
-            eps_size = int(np.prod(np.shape(eps_value)))
-            if eps_size == group_size:
-                site_params.append(eps_path)
-                permutation_rules.append(
-                    PermutationRule(
-                        path=eps_path,
-                        axis=-1,
-                        group=group_id,
-                        direction="left",
-                    )
-                )
+            if int(np.prod(np.shape(eps_value))) == group_size:
+                out_tensors.append(bind(eps_path, -1, group_id, "out"))
 
-    def _attach_batchnorm_rules(
+    def _attach_batchnorm_bindings(
         self,
         params: Mapping[str, Any],
         group_id: str,
         group_size: int,
         bn_path: tuple[str, ...],
-        permutation_rules: list[PermutationRule],
+        bind,
         layer_root_path: tuple[str, ...],
         stats_root_path: tuple[str, ...] | None,
-        site_params: list[tuple[str, ...]],
-    ) -> bool:
+        out_tensors: list[str],
+    ) -> None:
         module = _descend(params, bn_path)
         for param in ("scale", "bias"):
             if param in module:
@@ -646,48 +589,20 @@ class ResNetAdapter(ArchitectureAdapter):
                 _validate_channel_size(
                     full_path, _descend(params, full_path), group_size
                 )
-                site_params.append(full_path)
-                permutation_rules.append(
-                    PermutationRule(
-                        path=full_path,
-                        axis=-1,
-                        group=group_id,
-                        direction="left",
-                    )
-                )
+                out_tensors.append(bind(full_path, -1, group_id, "out"))
 
         if stats_root_path is None:
-            return False
+            return
         if not bn_path[: len(layer_root_path)] == layer_root_path:
-            return False
+            return
         bn_relative = bn_path[len(layer_root_path) :]
         stats_module = _maybe_descend(params, (*stats_root_path, *bn_relative))
         if not isinstance(stats_module, Mapping):
-            return False
-        added_stats = False
+            return
         for stat in ("mean", "var"):
             if stat in stats_module:
                 full_path = (*stats_root_path, *bn_relative, stat)
                 _validate_channel_size(
                     full_path, _descend(params, full_path), group_size
                 )
-                site_params.append(full_path)
-                added_stats = True
-                permutation_rules.append(
-                    PermutationRule(
-                        path=full_path,
-                        axis=-1,
-                        group=group_id,
-                        direction="left",
-                    )
-                )
-        return added_stats
-
-    def normalize(
-        self, params: Mapping[str, Any], spec: AlignmentSpec, **kwargs: Any
-    ) -> tuple[Mapping[str, Any], list[Any], dict[str, Any] | None]:
-        aux = {
-            "method": "scale_normalize",
-            "note": "conv/FRN normalization not enabled for resnet adapter",
-        }
-        return params, [], aux
+                out_tensors.append(bind(full_path, -1, group_id, "out"))

@@ -4,9 +4,6 @@ This module provides activation-specific norm computation for scale normalizatio
 Each normalizer computes per-neuron norms based on the activation function's
 properties (e.g., positive homogeneity for ReLU/LeakyReLU).
 
-**Important**: This is NOT the same as JAX activation functions. For actual
-activation callables (relu, gelu, etc.), see ``align.strategies.activation_functions``.
-
 Usage::
 
     from align.activation_normalizers import get_activation_normalizer

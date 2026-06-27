@@ -149,6 +149,7 @@ def run(args: argparse.Namespace) -> None:
     exp_root = exp_root.resolve()
     config.paths.experiment_root = exp_root
     samples_dir = (config.paths.samples_dir or (exp_root / "samples")).resolve()
+    sample_format = config.paths.sample_format
     explicit_tree_path = config.paths.tree_path is not None
     tree_path = (config.paths.tree_path or _detect_tree_path(exp_root)).resolve()
     if explicit_tree_path:
@@ -180,6 +181,7 @@ def run(args: argparse.Namespace) -> None:
         samples_dir,
         tree_path,
         selection=config.selection,
+        sample_format=sample_format,
         resume=config.runtime.resume,
     )
     validator.validate_ref_sample(manifest)
@@ -202,6 +204,7 @@ def run(args: argparse.Namespace) -> None:
         "samples_dir": str(samples_dir),
         "tree_path": str(tree_path),
         "output_dir": str(output_dir),
+        "sample_format": sample_format,
     }
     config_payload["stages"] = stages
     if args.print_config:
@@ -286,7 +289,7 @@ def _configure_platform_preferences(config: AlignConfig) -> None:
     if force_gpu:
         preference = "gpu"
     elif config.rebasin and config.rebasin.enabled:
-        if config.rebasin.method.lower() == "sinkhorn":
+        if any(step.solver == "sinkhorn" for step in config.rebasin.schedule):
             preference = "gpu"
     configure_jax_platforms(preference=preference, allow_preallocation=False)
     import jax
@@ -319,10 +322,12 @@ def _format_manifest_summary(manifest) -> str:
     filters = summary.get("filters") or {}
     filter_text = _format_key_values(filters)
     total = summary.get("total_samples", "-")
+    sample_format = summary.get("sample_format", "-")
     return (
         "Manifest | "
         f"chains={chains_text} | "
         f"total_samples={total} | "
+        f"sample_format={sample_format} | "
         f"reference=chain{ref_chain}/sample{ref_sample} | "
         f"filters[{filter_text}]"
     )
@@ -400,6 +405,7 @@ def _digest_payload(config_payload: Mapping[str, Any]) -> dict[str, Any]:
             "experiment_root": resolved.get("experiment_root"),
             "samples_dir": resolved.get("samples_dir"),
             "tree_path": resolved.get("tree_path"),
+            "sample_format": resolved.get("sample_format"),
         },
         "selection": selection,
         "order": config_payload.get("order"),
@@ -417,11 +423,11 @@ def _digest_payload(config_payload: Mapping[str, Any]) -> dict[str, Any]:
     rebasin = config_payload.get("rebasin")
     if rebasin and rebasin.get("enabled", False):
         payload["rebasin"] = {
-            "method": rebasin.get("method"),
+            "objective": rebasin.get("objective"),
+            "objective_kwargs": rebasin.get("objective_kwargs"),
+            "schedule": rebasin.get("schedule"),
             "layer_root": rebasin.get("layer_root"),
             "seed": rebasin.get("seed"),
-            "weight_matching": rebasin.get("weight_matching"),
-            "sinkhorn": rebasin.get("sinkhorn"),
         }
     return payload
 
@@ -437,6 +443,7 @@ def _load_or_build_manifest(
     tree_path: Path,
     *,
     selection,
+    sample_format: str,
     resume: bool,
 ) -> SampleManifest:
     if resume and manifest_path.exists():
@@ -451,6 +458,7 @@ def _load_or_build_manifest(
             max_total=selection.max_total,
             ref_chain=selection.ref_chain,
             ref_sample=selection.ref_sample,
+            sample_format=sample_format,
         )
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest.save(manifest_path)
@@ -509,7 +517,10 @@ def _load_or_create_run_manifest(
         metadata={
             "architecture": config.architecture,
             "normalize_method": config.normalize.method if config.normalize else None,
-            "rebasin_method": config.rebasin.method if config.rebasin else None,
+            "rebasin_objective": config.rebasin.objective if config.rebasin else None,
+            "rebasin_schedule": config.rebasin.schedule_payload()
+            if config.rebasin
+            else None,
         },
     )
     run_manifest.save()
@@ -520,14 +531,12 @@ def _prepare_rebasin_calibration(config: AlignConfig) -> None:
     rebasin_cfg = config.rebasin
     if rebasin_cfg is None or not rebasin_cfg.enabled:
         return
-    method = (rebasin_cfg.method or "").lower()
-    if method == "sinkhorn":
-        cost_kwargs = dict(rebasin_cfg.sinkhorn.cost_function_kwargs)
-        calibration_path = cost_kwargs.get("calibration_data_path")
-        if calibration_path is not None:
-            cost_kwargs["calibration_data"] = np.load(calibration_path)
-            cost_kwargs.pop("calibration_data_path", None)
-            rebasin_cfg.sinkhorn.cost_function_kwargs = cost_kwargs
+    objective_kwargs = dict(rebasin_cfg.objective_kwargs)
+    calibration_path = objective_kwargs.get("calibration_data_path")
+    if calibration_path is not None:
+        objective_kwargs["calibration_data"] = np.load(calibration_path)
+        objective_kwargs.pop("calibration_data_path", None)
+        rebasin_cfg.objective_kwargs = objective_kwargs
 
 
 if __name__ == "__main__":  # pragma: no cover

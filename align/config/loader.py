@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from ..sample_formats import normalize_sample_format
 from ._utils import _merge_dicts
 from .paths import PathConfig, path_to_dict
 from .runtime import RuntimeConfig
@@ -101,11 +102,11 @@ class AlignConfig:
         if self.rebasin is not None:
             payload["rebasin"] = {
                 "enabled": self.rebasin.enabled,
-                "method": self.rebasin.method,
+                "objective": self.rebasin.objective,
+                "objective_kwargs": self.rebasin.objective_kwargs,
+                "schedule": self.rebasin.schedule_payload(),
                 "layer_root": self.rebasin.layer_root,
                 "seed": self.rebasin.seed,
-                "weight_matching": self.rebasin.weight_matching_kwargs,
-                "sinkhorn": self.rebasin.sinkhorn_kwargs,
             }
         else:
             payload["rebasin"] = None
@@ -140,6 +141,7 @@ def validate_paths(config: AlignConfig) -> None:
     samples_dir = config.paths.samples_dir or (root / "samples")
     if not samples_dir.exists():
         raise FileNotFoundError(f"Samples directory not found: {samples_dir}")
+    normalize_sample_format(config.paths.sample_format)
     tree_path = config.paths.tree_path
     if tree_path is not None:
         resolved_tree = tree_path.resolve()
@@ -175,13 +177,11 @@ class ConfigValidator:
         if self.config.rebasin is not None:
             self.config.rebasin.validate_method()
         if self.config.normalize is not None:
-            from ..strategies import available_normalization_strategies
-
-            method_name = self.config.normalize.method.lower()
-            valid = available_normalization_strategies()
-            if method_name not in valid:
+            self.config.normalize.validate_method()
+            if self.config.normalize.enabled and self.config.architecture == "resnet":
                 raise ValueError(
-                    f"Unknown normalization method '{method_name}'. Available: {', '.join(valid)}"
+                    "Normalization is not supported for architecture 'resnet'. "
+                    "Disable normalize or use architecture 'dense_mlp'."
                 )
         from ..architecture import available_adapters
 

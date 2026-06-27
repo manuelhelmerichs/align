@@ -3,6 +3,7 @@ paths:
   samples_dir: null
   tree_path: null
   output_dir: null
+  sample_format: pytree_npz
 
 architecture: dense_mlp
 adapter:
@@ -32,22 +33,14 @@ normalize:
 
 rebasin:
   enabled: true
-  method: weight_matching
+  objective: l2_weight
+  objective_kwargs: {}
   layer_root: params.fcn
   seed: 0
-  weight_matching:
-    max_iters: 25
-    tol: 0.0
-  sinkhorn:
-    tau: 0.1
-    n_sinkhorn_iters: 50
-    lr: 0.01
-    max_steps: 200
-    tol: 1.0e-05
-    init_scale: 0.01
-    record_loss_history: false
-    cost_function: l2_weight
-    cost_function_kwargs: {}
+  schedule:
+    - solver: lap
+      max_sweeps: 25
+      tol: 0.0
 
 runtime:
   resume: false

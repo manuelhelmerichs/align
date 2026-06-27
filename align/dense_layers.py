@@ -1,8 +1,8 @@
 """Dense-layer data structures used by dense MLP utilities.
 
 This module intentionally centralizes dense-layer representations so that
-architecture adapters, normalization, and strategies do not depend on
-`align.rebasin` for dense-specific helpers.
+architecture adapters and normalization do not depend on `align.rebasin` for
+dense-specific helpers.
 """
 
 from dataclasses import dataclass

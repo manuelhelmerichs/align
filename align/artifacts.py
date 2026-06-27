@@ -1,4 +1,4 @@
-"""Shared helpers for rebasin artifact serialization."""
+"""Shared helpers for alignment artifact serialization."""
 
 import json
 from collections.abc import Mapping, Sequence
@@ -7,28 +7,17 @@ from typing import Any
 
 import numpy as np
 
-_PERMUTATION_DTYPE_CACHE: dict[str, np.dtype] = {}
-
-
-def _get_permutation_dtype(method: str) -> np.dtype:
-    """Get permutation dtype for a method, using cache to avoid strategy instantiation."""
-    method_lower = method.lower()
-    if method_lower not in _PERMUTATION_DTYPE_CACHE:
-        from .strategies import get_strategy
-
-        strategy = get_strategy(method_lower)
-        _PERMUTATION_DTYPE_CACHE[method_lower] = strategy.permutation_dtype
-    return _PERMUTATION_DTYPE_CACHE[method_lower]
+_HARD_PERMUTATION_DTYPE = np.dtype(np.uint8)
 
 
 def write_permutations_artifact(
-    path: str | Path, perms: Sequence[Any] | Mapping[str, Any], *, method: str
+    path: str | Path,
+    perms: Sequence[Any] | Mapping[str, Any],
+    *,
+    dtype: np.dtype = _HARD_PERMUTATION_DTYPE,
 ) -> Path | None:
-    """Persist permutation matrices with consistent encoding for both runner and workers.
+    """Persist final hard permutation matrices keyed by group id."""
 
-    The encoding dtype is determined by the strategy's permutation_dtype property.
-    Uses a cache to avoid repeated strategy instantiation.
-    """
     path = Path(path)
     if not perms:
         if path.exists():
@@ -37,9 +26,6 @@ def write_permutations_artifact(
 
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, np.ndarray] = {}
-
-    dtype = _get_permutation_dtype(method)
-
     if isinstance(perms, Mapping):
         items = perms.items()
     else:
@@ -47,12 +33,8 @@ def write_permutations_artifact(
 
     for key, matrix in items:
         array = np.asarray(matrix)
-        name = str(key)
-        if dtype == np.uint8:
-            encoded = (array > 0.5).astype(np.uint8, copy=False)
-        else:
-            encoded = array.astype(dtype, copy=False)
-        payload[name] = encoded
+        encoded = (array > 0.5).astype(dtype, copy=False)
+        payload[str(key)] = encoded
     np.savez_compressed(path, **payload)
     return path
 

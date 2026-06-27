@@ -77,7 +77,7 @@ class AlignRunner:
         if (
             rebasin_cfg
             and rebasin_cfg.enabled
-            and rebasin_cfg.method.lower() == "sinkhorn"
+            and any(step.solver == "sinkhorn" for step in rebasin_cfg.schedule)
         ):
             gpu_count = len(self._visible_gpu_ids(self.config.runtime.device_ids))
             if gpu_count > 0:
@@ -103,8 +103,8 @@ class AlignRunner:
             return
 
         loader = SampleLoader(self.manifest)
-        ref_params = loader.load_reference()
-        self._stage_executors = self._prepare_executors(ref_params)
+        ref_sample = loader.load_reference()
+        self._stage_executors = self._prepare_executors(ref_sample)
 
         use_parallel = self.parallelism > 1 and len(pending) > 1
         if use_parallel:
@@ -183,7 +183,7 @@ class AlignRunner:
         self.logger.maybe_flush(force=force)
         self._last_save_time = now
 
-    def _prepare_executors(self, ref_params) -> list[tuple[str, StageExecutor]]:
+    def _prepare_executors(self, ref_sample) -> list[tuple[str, StageExecutor]]:
         executors: dict[str, StageExecutor] = {}
         adapter_kwargs = dict(getattr(self.config, "adapter", {}) or {})
         if self.config.normalize and self.config.normalize.enabled:
@@ -203,7 +203,7 @@ class AlignRunner:
             )
 
         stage_list: list[tuple[str, StageExecutor]] = []
-        ref_current = ref_params
+        ref_current = ref_sample
         for name in self.stage_order:
             executor = executors.get(name)
             if executor is None:
@@ -266,14 +266,14 @@ class AlignRunner:
         self, pending: list[SampleRecord], loader: SampleLoader, bar
     ) -> None:
         for record in pending:
-            params = loader.load(record)
+            sample = loader.load(record)
             aux_payload: dict[str, Any] = {}
-            current = params
+            current = sample
 
             for idx, (stage, executor) in enumerate(self._stage_executors):
                 last_stage = idx == len(self._stage_executors) - 1
                 result = executor.process_single(record, current)
-                current = result.params
+                current = result.sample
 
                 if result.aux:
                     aux_payload[stage] = result.aux
@@ -284,14 +284,12 @@ class AlignRunner:
                 elif stage == "rebasin":
                     perms = result.artifacts.get("permutations")
                     if perms is not None and self.config.rebasin:
-                        self.logger.write_permutations(
-                            record, perms, method=self.config.rebasin.method
-                        )
+                        self.logger.write_permutations(record, perms)
 
                 if self.save_intermediate and not last_stage:
                     self.logger.write_intermediate(record, current)
 
-            self.logger.write_sample(record, current, tree_path=self.manifest.tree_path)
+            self.logger.write_sample(record, current)
             self.logger.write_aux(record, aux_payload)
             self.run_manifest.record_progress(record=record)
             self._maybe_persist_state()
@@ -320,11 +318,11 @@ class AlignRunner:
             if next_start < len(pending):
                 prefetch_loader.prefetch(pending[next_start : next_start + batch_size])
 
-            params_batch = []
+            sample_batch = []
             stage_meta: list[dict[str, Any]] = []
             for record in batch_records:
-                params = prefetch_loader.get(record)
-                current = params
+                sample = prefetch_loader.get(record)
+                current = sample
                 aux_payload: dict[str, Any] = {}
                 scale_factors = None
                 intermediate_params = None
@@ -334,7 +332,7 @@ class AlignRunner:
                     if stage == "rebasin" and last_stage:
                         break
                     result = executor.process_single(record, current)
-                    current = result.params
+                    current = result.sample
                     if result.aux:
                         aux_payload[stage] = result.aux
                     if stage == "normalize":
@@ -342,7 +340,7 @@ class AlignRunner:
                     if self.save_intermediate and not last_stage:
                         intermediate_params = current
 
-                params_batch.append(current)
+                sample_batch.append(current)
                 stage_meta.append(
                     {
                         "record": record,
@@ -353,7 +351,7 @@ class AlignRunner:
                 )
 
             rebasin_results = rebasin_executor.process_batch(
-                batch_records, params_batch
+                batch_records, sample_batch
             )
             for meta_entry, reb_result in zip(stage_meta, rebasin_results, strict=True):
                 aux_payload = dict(meta_entry["aux"])
@@ -366,7 +364,6 @@ class AlignRunner:
                     self.logger.write_permutations(
                         meta_entry["record"],
                         reb_result.artifacts["permutations"],
-                        method=self.config.rebasin.method,
                     )
                 if meta_entry["scale_factors"] is not None:
                     self.logger.write_scale_factors(
@@ -379,8 +376,7 @@ class AlignRunner:
 
                 self.logger.write_sample(
                     meta_entry["record"],
-                    reb_result.params,
-                    tree_path=self.manifest.tree_path,
+                    reb_result.sample,
                 )
                 self.logger.write_aux(meta_entry["record"], aux_payload)
                 self.run_manifest.record_progress(record=meta_entry["record"])

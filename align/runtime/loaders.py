@@ -1,15 +1,10 @@
 """Sample loading utilities."""
 
-import pickle
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-import jax
-import jax.numpy as jnp
-import numpy as np
-
-from ..rebasin import ParamTree
+from ..samples import WeightSample, create_sample_codec
 from ..state import SampleManifest, SampleRecord
 
 _PREFETCH_EXECUTOR: ThreadPoolExecutor | None = None
@@ -24,25 +19,21 @@ def _get_prefetch_executor() -> ThreadPoolExecutor:
 
 
 class SampleLoader:
-    """Lazy loader that reconstructs PyTrees on demand."""
+    """Lazy loader that materializes canonical weight samples on demand."""
 
     def __init__(self, manifest: SampleManifest, tree_path: Path | None = None):
         self.manifest = manifest
         self.tree_path = Path(tree_path or manifest.tree_path)
-        self._treedef = self._load_tree(self.tree_path)
+        self.codec = create_sample_codec(
+            manifest.sample_format,
+            tree_path=self.tree_path,
+        )
 
-    @staticmethod
-    def _load_tree(tree_path: Path):
-        with open(tree_path, "rb") as handle:
-            return pickle.load(handle)
-
-    def load(self, record: SampleRecord) -> ParamTree:
+    def load(self, record: SampleRecord) -> WeightSample:
         abs_path = record.absolute_path(self.manifest.samples_dir)
-        with np.load(abs_path, allow_pickle=False) as data:
-            leaves = [jnp.asarray(data[key]) for key in data.files]
-        return jax.tree_util.tree_unflatten(self._treedef, leaves)
+        return self.codec.load(abs_path)
 
-    def load_reference(self) -> ParamTree:
+    def load_reference(self) -> WeightSample:
         return self.load(self.manifest.reference_record)
 
 
@@ -65,7 +56,7 @@ class PrefetchingLoader:
     def __init__(self, base_loader: SampleLoader, prefetch_count: int = 2):
         self.base_loader = base_loader
         self.prefetch_count = max(1, prefetch_count)
-        self._prefetch_futures: dict[int, Future[ParamTree]] = {}
+        self._prefetch_futures: dict[int, Future[WeightSample]] = {}
         self._executor = _get_prefetch_executor()
 
     def prefetch(self, records: Sequence[SampleRecord]) -> None:
@@ -81,7 +72,7 @@ class PrefetchingLoader:
                 future = self._executor.submit(self.base_loader.load, record)
                 self._prefetch_futures[record.index] = future
 
-    def get(self, record: SampleRecord) -> ParamTree:
+    def get(self, record: SampleRecord) -> WeightSample:
         """Get sample data, using prefetched result if available."""
         if record.index in self._prefetch_futures:
             future = self._prefetch_futures.pop(record.index)

@@ -22,7 +22,7 @@
   - `uv run ruff check .`
   - `uv run ruff format --check .`
 - Update `docs/align.md`, `docs/developer_reference_align.md`, and example configs when behavior or user-facing configuration changes.
-- Use [docs/issue_roadmap.md](docs/issue_roadmap.md) as the current priority map for open GitHub issues.
+- Use the open GitHub issues (`gh issue list`) as the current priority map.
 
 ## Research notes
 

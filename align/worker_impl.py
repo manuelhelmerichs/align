@@ -19,17 +19,21 @@ from .artifacts import (
 from .state import SampleManifest, SampleRecord, _file_checksum
 
 if TYPE_CHECKING:
-    from .rebasin import ParamTree
+    from .samples import WeightSample, WeightSampleCodec
 
 
 class _ArtifactWriter:
     """Persists stage outputs to a scratch directory for the parent to commit."""
 
     def __init__(
-        self, scratch_root: Path, *, rebasin_method: str | None, save_intermediate: bool
+        self,
+        scratch_root: Path,
+        *,
+        sample_codec: WeightSampleCodec,
+        save_intermediate: bool,
     ) -> None:
         self.root = Path(scratch_root)
-        self.rebasin_method = (rebasin_method or "").lower() if rebasin_method else None
+        self.sample_codec = sample_codec
         self.save_intermediate = bool(save_intermediate)
         self.root.mkdir(parents=True, exist_ok=True)
 
@@ -37,16 +41,12 @@ class _ArtifactWriter:
         self,
         record: SampleRecord,
         *,
-        final_params: ParamTree,
+        final_sample: WeightSample,
         permutations,
         scale_factors,
-        intermediate_params: ParamTree | None = None,
+        intermediate_sample: WeightSample | None = None,
         aux: dict[str, Any] | None = None,
     ) -> tuple[dict[str, str | None], dict[str, int]]:
-        from .rebasin import (
-            save_pytree_npz,
-        )  # Imported lazily to honor worker device settings
-
         sample_dir = self.root / f"sample_{record.index}"
         if sample_dir.exists():
             shutil.rmtree(sample_dir)
@@ -56,16 +56,15 @@ class _ArtifactWriter:
         checksums: dict[str, int] = {}
 
         final_path = sample_dir / "final.npz"
-        save_pytree_npz(final_path, final_params)
+        self.sample_codec.save(final_path, final_sample)
         artifacts["final_path"] = str(final_path)
         checksums["final"] = _file_checksum(final_path)
 
         perm_path = None
-        if permutations is not None and self.rebasin_method:
+        if permutations is not None:
             perm_path = write_permutations_artifact(
                 sample_dir / "permutations.npz",
                 permutations,
-                method=self.rebasin_method,
             )
         artifacts["permutations_path"] = str(perm_path) if perm_path else None
         checksums["permutations"] = _file_checksum(perm_path) if perm_path else 0
@@ -80,9 +79,9 @@ class _ArtifactWriter:
 
         if self.save_intermediate:
             intermediate_path = None
-            if intermediate_params is not None:
+            if intermediate_sample is not None:
                 intermediate_path = sample_dir / "intermediate.npz"
-                save_pytree_npz(intermediate_path, intermediate_params)
+                self.sample_codec.save(intermediate_path, intermediate_sample)
             artifacts["intermediate_path"] = (
                 str(intermediate_path) if intermediate_path else None
             )
@@ -119,15 +118,14 @@ class _WorkerLoop:
         self.save_intermediate = bool(save_intermediate)
         self.per_device_batch = max(1, int(per_device_batch))
 
-        self.rebasin_method = None
-        for name, executor in self.stages:
-            if name == "rebasin":
-                self.rebasin_method = executor.config.method
-                break
+        from .samples import create_sample_codec
 
         self._artifact_writer = _ArtifactWriter(
             Path(job["scratch_dir"]),
-            rebasin_method=self.rebasin_method,
+            sample_codec=create_sample_codec(
+                manifest.sample_format,
+                tree_path=manifest.tree_path,
+            ),
             save_intermediate=self.save_intermediate,
         )
 
@@ -197,16 +195,16 @@ class _WorkerLoop:
     def _process_sequential(self, records: list[SampleRecord]) -> None:
         for record in records:
             self._set_active_sample(record.index)
-            params = self.loader.load(record)
+            sample = self.loader.load(record)
             aux_payload: dict[str, Any] = {}
-            intermediate_params = None
+            intermediate_sample = None
             permutations = None
             scale_factors = None
 
             for idx, (name, executor) in enumerate(self.stages):
                 last_stage = idx == len(self.stages) - 1
-                result = executor.process_single(record, params)
-                params = result.params
+                result = executor.process_single(record, sample)
+                sample = result.sample
                 if result.aux:
                     aux_payload[name] = result.aux
                 if name == "normalize":
@@ -214,15 +212,15 @@ class _WorkerLoop:
                 if name == "rebasin":
                     permutations = result.artifacts.get("permutations")
                 if self.save_intermediate and not last_stage:
-                    intermediate_params = params
+                    intermediate_sample = sample
 
             self._emit_commit(
                 record,
-                params,
+                sample,
                 permutations=permutations,
                 scale_factors=scale_factors,
                 aux=aux_payload,
-                intermediate_params=intermediate_params,
+                intermediate_sample=intermediate_sample,
             )
 
     def _process_batched(self, records: list[SampleRecord]) -> None:
@@ -240,41 +238,41 @@ class _WorkerLoop:
             if next_start < len(records):
                 prefetch_loader.prefetch(records[next_start : next_start + batch_size])
 
-            params_batch = []
+            sample_batch = []
             meta: list[dict[str, Any]] = []
             for record in batch_records:
                 self._set_active_sample(record.index)
-                params = prefetch_loader.get(record)
-                current = params
+                sample = prefetch_loader.get(record)
+                current = sample
                 aux_payload: dict[str, Any] = {}
                 scale_factors = None
-                intermediate_params = None
+                intermediate_sample = None
 
                 for idx, (name, executor) in enumerate(self.stages):
                     last_stage = idx == len(self.stages) - 1
                     if name == "rebasin" and last_stage:
                         break
                     result = executor.process_single(record, current)
-                    current = result.params
+                    current = result.sample
                     if result.aux:
                         aux_payload[name] = result.aux
                     if name == "normalize":
                         scale_factors = result.artifacts.get("scale_factors")
                     if self.save_intermediate and not last_stage:
-                        intermediate_params = current
+                        intermediate_sample = current
 
-                params_batch.append(current)
+                sample_batch.append(current)
                 meta.append(
                     {
                         "record": record,
                         "aux": aux_payload,
                         "scale_factors": scale_factors,
-                        "intermediate": intermediate_params,
+                        "intermediate": intermediate_sample,
                     }
                 )
 
             batch_results: list[Any] = rebasin_executor.process_batch(
-                batch_records, params_batch
+                batch_records, sample_batch
             )
             for meta_entry, reb_result in zip(meta, batch_results, strict=True):
                 aux_payload = dict(meta_entry["aux"])
@@ -282,11 +280,11 @@ class _WorkerLoop:
                     aux_payload["rebasin"] = reb_result.aux
                 self._emit_commit(
                     meta_entry["record"],
-                    reb_result.params,
+                    reb_result.sample,
                     permutations=reb_result.artifacts.get("permutations"),
                     scale_factors=meta_entry["scale_factors"],
                     aux=aux_payload,
-                    intermediate_params=meta_entry["intermediate"],
+                    intermediate_sample=meta_entry["intermediate"],
                 )
 
         prefetch_loader.clear()
@@ -294,19 +292,19 @@ class _WorkerLoop:
     def _emit_commit(
         self,
         record: SampleRecord,
-        params: ParamTree,
+        sample: WeightSample,
         *,
         permutations,
         scale_factors,
         aux: dict[str, Any] | None,
-        intermediate_params: ParamTree | None,
+        intermediate_sample: WeightSample | None,
     ) -> None:
         artifacts, checksums = self._artifact_writer.write(
             record,
-            final_params=params,
+            final_sample=sample,
             permutations=permutations,
             scale_factors=scale_factors,
-            intermediate_params=intermediate_params,
+            intermediate_sample=intermediate_sample,
             aux=aux,
         )
         payload = {
@@ -372,7 +370,7 @@ class _WorkerLoop:
 
 
 def _build_stage_executors(
-    job: dict[str, Any], manifest: SampleManifest, ref_params: ParamTree
+    job: dict[str, Any], manifest: SampleManifest, ref_sample: WeightSample
 ):
     from .runtime.stages import NormalizeExecutor, RebasinExecutor
 
@@ -415,7 +413,7 @@ def _build_stage_executors(
             (name, name_to_exec[name]) for name in stage_order if name in name_to_exec
         ]
 
-    ref_current = ref_params
+    ref_current = ref_sample
     for _, executor in stages:
         executor.prepare(manifest, ref_current)
         ref_current = executor.reference_output(manifest.reference_record, ref_current)
@@ -434,8 +432,8 @@ def run_worker(job: dict[str, Any], command_queue, progress_queue) -> None:
     from .runtime.loaders import SampleLoader  # Imported after device visibility is set
 
     loader = SampleLoader(manifest)
-    ref_params = loader.load_reference()
-    stages = _build_stage_executors(job, manifest, ref_params)
+    ref_sample = loader.load_reference()
+    stages = _build_stage_executors(job, manifest, ref_sample)
 
     loop = _WorkerLoop(
         job,

@@ -3,6 +3,7 @@ paths:
   samples_dir: null        # Optional override when samples live outside experiment_root.
   tree_path: null          # Override the pickled PyTree definition; defaults to tree|tree_sampling.
   output_dir: null         # Defaults to <experiment_root>/align/<timestamp>; set to reuse an existing folder.
+  sample_format: pytree_npz # SMILE/MILE-style leaf-order NPZ files plus a pickled PyTreeDef.
 
 architecture: dense_mlp
 adapter:
@@ -18,7 +19,7 @@ selection:
 
 normalize:
   enabled: true            # Enable parameter normalization before rebasining.
-  method: scale_normalize  # Currently supported normalization strategy.
+  method: scale_normalize  # Currently supported normalization method.
   layer_root: params.fcn   # Dot path to the dense layer subtree in the PyTree.
   task_type: regression    # Set to classification when aligning classifiers.
   num_classes: null        # Only required when task_type == classification and classification_head_rescale == true.
@@ -32,20 +33,26 @@ normalize:
 
 rebasin:
   enabled: true
-  method: weight_matching  # Choose between "sinkhorn" and "weight_matching".
+  objective: l2_weight     # Complete graph objective over bound parameter tensors.
+  objective_kwargs: {}
   layer_root: params.fcn   # Dot path to the dense layer subtree in the PyTree.
   seed: 0                  # RNG seed ensures deterministic initialisation for stochastic methods.
-  sinkhorn:
-    tau: 0.1               # Entropic regularisation temperature for the Sinkhorn operator.
-    n_sinkhorn_iters: 50   # Row/column normalisation iterations per Sinkhorn projection.
-    lr: 0.01               # Optimiser learning rate for updating Sinkhorn logits.
-    max_steps: 200         # Gradient steps taken while solving the relaxed transport problem.
-    tol: 1.0e-05           # Early-stop tolerance on consecutive Sinkhorn losses.
-    init_scale: 0.01       # Standard deviation of the initial logits before Sinkhorn projection.
-    record_loss_history: false  # True stores per-sample loss curves (larger aux.json); false saves summary stats only.
-  weight_matching:
-    max_iters: 25          # Maximum number of LAP coordinate-descent sweeps performed by weight matching.
-    tol: 0.0               # Threshold for permutation updates; stop early when below this tolerance.
+  schedule:
+    - solver: lap          # Exact coordinate-descent LAP update when each group occurs at most once per tensor.
+      max_sweeps: 25
+      tol: 0.0
+    # Mixed schedules can add Sinkhorn refinement and a final LAP polish:
+    # - solver: sinkhorn
+    #   tau: 0.1
+    #   n_sinkhorn_iters: 50
+    #   lr: 0.01
+    #   max_steps: 200
+    #   tol: 1.0e-05
+    #   init_scale: 0.01
+    #   record_loss_history: false
+    # - solver: lap
+    #   max_sweeps: 5
+    #   tol: 0.0
 
 runtime:
   resume: false            # Reuse manifests/outputs inside output_dir and continue unfinished runs.
@@ -54,9 +61,9 @@ runtime:
   validate_only: false     # Validate configuration + filesystem, then exit before running.
   force_cpu: false         # Leave false so Sinkhorn auto-selects GPUs; set true when benchmarking CPU-only.
   force_gpu: false         # Optional override to insist on GPUs even if JAX can't auto-detect them.
-  parallelism: null        # null == auto based on the selected method and visible hardware.
+  parallelism: null        # null == auto based on the schedule and visible hardware.
   device_ids: null         # Explicit CUDA device ids in multi-GPU boxes; omit to consume every visible GPU.
-  per_device_batch: 1      # Use >1 for batched Sinkhorn; weight matching processes one sample at a time.
+  per_device_batch: 1      # Use >1 for pure Sinkhorn schedules; LAP schedules process one sample at a time.
   verbosity: info          # Logging verbosity passed to the CLI (quiet/info/debug).
   validate_artifacts_on_resume: true  # Re-hash folded/permutation files before skipping them; set false to trust checksums.
   save_intermediate: false # Persist intermediate outputs when chaining normalization and rebasin.

@@ -11,7 +11,7 @@ from .synthetic import (
     measure_rebasin_performance,
     permutation_matrix,
     run_alignment_benchmark,
-    run_weight_matching_robustness_sweep,
+    run_lap_robustness_sweep,
 )
 
 __all__ = [
@@ -25,5 +25,5 @@ __all__ = [
     "measure_rebasin_performance",
     "permutation_matrix",
     "run_alignment_benchmark",
-    "run_weight_matching_robustness_sweep",
+    "run_lap_robustness_sweep",
 ]

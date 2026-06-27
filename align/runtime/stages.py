@@ -7,13 +7,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import jax
-import jax.numpy as jnp
 
+from ..alignment import SolverScheduleStep
 from ..architecture import get_adapter
 from ..config.stages import NormalizeConfig, RebasinConfig
-from ..rebasin import ParamTree, rebasin_batch, rebasin_single_sample
+from ..rebasin import build_scheduler, rebasin_batch, rebasin_single_sample
+from ..samples import ParamTree, WeightSample
 from ..state import SampleManifest, SampleRecord
-from ..strategies import get_strategy
 
 _LOG = logging.getLogger(__name__)
 
@@ -22,27 +22,33 @@ _LOG = logging.getLogger(__name__)
 class StageResult:
     """Container for per-stage outputs."""
 
-    params: ParamTree
+    sample: WeightSample
     artifacts: dict[str, Any]
     aux: dict[str, Any] | None = None
+
+    @property
+    def params(self):
+        """Convenience access to the canonical parameter PyTree."""
+
+        return self.sample.params
 
 
 class StageExecutor(ABC):
     """Abstract interface for pipeline stages (normalize, rebasin)."""
 
     @abstractmethod
-    def prepare(self, manifest: SampleManifest, ref_params: ParamTree) -> None:
+    def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
         """Perform any one-time setup using the reference sample."""
 
     @abstractmethod
-    def process_single(self, record: SampleRecord, params: ParamTree) -> StageResult:
+    def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
         """Run this stage for a single sample."""
 
     @abstractmethod
     def process_batch(
         self,
         records: Sequence[SampleRecord],
-        params_list: Sequence[ParamTree],
+        samples: Sequence[WeightSample],
     ) -> list[StageResult]:
         """Run this stage for a batch of samples."""
 
@@ -56,9 +62,11 @@ class StageExecutor(ABC):
     def prefers_gpu(self) -> bool:
         """Whether this stage prefers GPU execution."""
 
-    def reference_output(self, record: SampleRecord, params: ParamTree) -> ParamTree:
+    def reference_output(
+        self, record: SampleRecord, sample: WeightSample
+    ) -> WeightSample:
         """Return reference params after applying this stage (default: no-op)."""
-        return params
+        return sample
 
 
 class NormalizeExecutor(StageExecutor):
@@ -75,22 +83,26 @@ class NormalizeExecutor(StageExecutor):
         self.architecture = architecture
         self.adapter_kwargs = dict(adapter_kwargs)
         self.adapter = None
-        self.spec = None
+        self.problem = None
+        self.normalizer = None
 
-    def prepare(self, manifest: SampleManifest, ref_params: ParamTree) -> None:
+    def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
+        from ..scale_normalizer import ScaleNormalizer
+
         adapter_kwargs = dict(self.adapter_kwargs)
         if self.config.layer_root:
             adapter_kwargs.setdefault("layer_root", self.config.layer_root)
         self.adapter = get_adapter(self.architecture, **adapter_kwargs)
-        self.spec = self.adapter.build_spec(ref_params)
+        self.problem = self.adapter.build_problem(ref_sample.params)
+        self.normalizer = ScaleNormalizer()
 
-    def process_single(self, record: SampleRecord, params: ParamTree) -> StageResult:
-        if self.adapter is None or self.spec is None:
+    def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
+        if self.adapter is None or self.problem is None or self.normalizer is None:
             raise RuntimeError("NormalizeExecutor not prepared.")
 
-        normalized_params, scale_factors, aux = self.adapter.normalize(
-            params,
-            self.spec,
+        normalized_params, scale_factors, aux = self.normalizer.normalize(
+            self.problem,
+            sample.params,
             task_type=self.config.task_type,
             num_classes=self.config.num_classes,
             **self.config.method_kwargs,
@@ -98,7 +110,7 @@ class NormalizeExecutor(StageExecutor):
         aux_payload = dict(aux or {"method": self.config.method})
         aux_payload["method"] = self.config.method
         return StageResult(
-            params=normalized_params,
+            sample=sample.with_params(normalized_params),
             artifacts={"scale_factors": scale_factors},
             aux=aux_payload,
         )
@@ -106,11 +118,11 @@ class NormalizeExecutor(StageExecutor):
     def process_batch(
         self,
         records: Sequence[SampleRecord],
-        params_list: Sequence[ParamTree],
+        samples: Sequence[WeightSample],
     ) -> list[StageResult]:
         return [
-            self.process_single(record, params)
-            for record, params in zip(records, params_list, strict=True)
+            self.process_single(record, sample)
+            for record, sample in zip(records, samples, strict=True)
         ]
 
     @property
@@ -121,8 +133,10 @@ class NormalizeExecutor(StageExecutor):
     def prefers_gpu(self) -> bool:
         return False
 
-    def reference_output(self, record: SampleRecord, params: ParamTree) -> ParamTree:
-        return self.process_single(record, params).params
+    def reference_output(
+        self, record: SampleRecord, sample: WeightSample
+    ) -> WeightSample:
+        return self.process_single(record, sample).sample
 
 
 class RebasinExecutor(StageExecutor):
@@ -144,35 +158,35 @@ class RebasinExecutor(StageExecutor):
         self.batch_size = max(1, int(batch_size))
 
         self.adapter = None
-        self.spec = None
-        self.ref_params = None
-        self.ref_views = None
+        self.problem = None
+        self.ref_sample: WeightSample | None = None
+        self.ref_data = None
         self.ref_backend = None
-        self.strategy = None
+        self.scheduler = None
         self.architecture = architecture
         self.adapter_kwargs = dict(adapter_kwargs)
 
-    def prepare(self, manifest: SampleManifest, ref_params: ParamTree) -> None:
+    def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
         adapter_kwargs = dict(self.adapter_kwargs)
         if self.config.layer_root:
             adapter_kwargs.setdefault("layer_root", self.config.layer_root)
         self.adapter = get_adapter(self.architecture, **adapter_kwargs)
-        self.spec = self.adapter.build_spec(ref_params)
-        self.ref_params = ref_params
-        self.strategy = get_strategy(self.config.method, **self.config.method_kwargs)
-        backend = (
-            "numpy" if getattr(self.strategy, "requires_numpy_views", False) else "jax"
+        self.problem = self.adapter.build_problem(ref_sample.params)
+        self.ref_sample = ref_sample
+        schedule = tuple(
+            SolverScheduleStep.from_mapping(step.to_dict())
+            for step in self.config.schedule
         )
+        self.scheduler = build_scheduler(
+            objective=self.config.objective,
+            objective_kwargs=self.config.objective_kwargs,
+            schedule=schedule,
+        )
+        backend = self.scheduler.backend
         self.ref_backend = backend
-        self.ref_views = self.adapter.permutation_views(
-            ref_params, self.spec, backend=backend, cache=True
+        self.ref_data = self.problem.materialize(
+            ref_sample.params, backend=backend, cache=True
         )
-        try:
-            self.strategy.warmup(self.spec, self.ref_views, batch_size=self.batch_size)
-        except Exception:
-            _LOG.debug(
-                "Rebasin warmup failed; continuing without warmup.", exc_info=True
-            )
 
     def _rng_for_record(self, record: SampleRecord) -> jax.Array | None:
         if self._base_key is None:
@@ -181,56 +195,58 @@ class RebasinExecutor(StageExecutor):
 
     def _stage_result(
         self,
+        sample: WeightSample,
         params: ParamTree,
-        perms: list[jnp.ndarray],
+        perms: Mapping[str, Any],
         aux: dict[str, Any] | None,
     ) -> StageResult:
         aux_payload = dict(aux or {})
-        aux_payload["method"] = self.config.method
+        aux_payload["objective"] = self.config.objective
+        aux_payload["schedule"] = self.config.schedule_payload()
         return StageResult(
-            params=params, artifacts={"permutations": perms}, aux=aux_payload
+            sample=sample.with_params(params),
+            artifacts={"permutations": perms},
+            aux=aux_payload,
         )
 
-    def process_single(self, record: SampleRecord, params: ParamTree) -> StageResult:
+    def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
         if (
             self.adapter is None
-            or self.spec is None
-            or self.ref_params is None
-            or self.strategy is None
-            or self.ref_views is None
+            or self.problem is None
+            or self.ref_sample is None
+            or self.scheduler is None
+            or self.ref_data is None
         ):
             raise RuntimeError("RebasinExecutor not prepared.")
 
         folded_params, perms, aux_info = rebasin_single_sample(
-            self.adapter,
-            self.spec,
-            self.ref_params,
-            params,
-            method=self.config.method,
-            method_kwargs=self.config.method_kwargs,
+            self.problem,
+            self.ref_sample.params,
+            sample.params,
+            scheduler=self.scheduler,
             rng_key=self._rng_for_record(record),
-            ref_views=self.ref_views,
+            ref_data=self.ref_data,
             ref_backend=self.ref_backend,
             is_reference=record.index == self.reference_index,
         )
-        return self._stage_result(folded_params, perms, aux_info)
+        return self._stage_result(sample, folded_params, perms, aux_info)
 
     def process_batch(
         self,
         records: Sequence[SampleRecord],
-        params_list: Sequence[ParamTree],
+        samples: Sequence[WeightSample],
     ) -> list[StageResult]:
         if (
             self.adapter is None
-            or self.spec is None
-            or self.ref_params is None
-            or self.strategy is None
-            or self.ref_views is None
+            or self.problem is None
+            or self.ref_sample is None
+            or self.scheduler is None
+            or self.ref_data is None
         ):
             raise RuntimeError("RebasinExecutor not prepared.")
 
         record_list = list(records)
-        params_batch = list(params_list)
+        sample_batch = list(samples)
         if not record_list:
             return []
 
@@ -242,44 +258,57 @@ class RebasinExecutor(StageExecutor):
             if rec.index == self.reference_index
         ]
         for pos in ref_positions:
-            results[pos] = self.process_single(record_list[pos], params_batch[pos])
+            results[pos] = self.process_single(record_list[pos], sample_batch[pos])
 
         non_ref_positions = [
             idx for idx in range(len(record_list)) if results[idx] is None
         ]
         if non_ref_positions:
+            if not self.scheduler.supports_batching:
+                for pos in non_ref_positions:
+                    results[pos] = self.process_single(
+                        record_list[pos], sample_batch[pos]
+                    )
+                return [res for res in results if res is not None]
+
             target_records = [record_list[idx] for idx in non_ref_positions]
-            target_params = [params_batch[idx] for idx in non_ref_positions]
+            target_samples = [sample_batch[idx] for idx in non_ref_positions]
+            target_params = [sample.params for sample in target_samples]
             rng_keys = [self._rng_for_record(rec) for rec in target_records]
+            rng_key = rng_keys[0] if rng_keys else None
             batch_results = rebasin_batch(
-                self.adapter,
-                self.spec,
-                self.ref_params,
+                self.problem,
+                self.ref_sample.params,
                 target_params,
-                method=self.config.method,
-                method_kwargs=self.config.method_kwargs,
-                ref_views=self.ref_views,
+                scheduler=self.scheduler,
+                ref_data=self.ref_data,
                 ref_backend=self.ref_backend,
-                rng_keys=rng_keys,
+                rng_key=rng_key,
             )
             for pos, result in zip(non_ref_positions, batch_results, strict=True):
                 folded_params, perms, aux = result
-                results[pos] = self._stage_result(folded_params, perms, aux)
+                results[pos] = self._stage_result(
+                    sample_batch[pos], folded_params, perms, aux
+                )
 
         return [res for res in results if res is not None]
 
     @property
     def supports_batching(self) -> bool:
-        if self.strategy is None:
+        if self.scheduler is None:
             return False
-        return bool(self.strategy.supports_batching())
+        return bool(self.scheduler.supports_batching)
 
     @property
     def prefers_gpu(self) -> bool:
-        return self.config.method.lower() == "sinkhorn"
+        if self.scheduler is None:
+            return any(step.solver == "sinkhorn" for step in self.config.schedule)
+        return bool(self.scheduler.prefers_gpu)
 
-    def reference_output(self, record: SampleRecord, params: ParamTree) -> ParamTree:
-        return self.process_single(record, params).params
+    def reference_output(
+        self, record: SampleRecord, sample: WeightSample
+    ) -> WeightSample:
+        return self.process_single(record, sample).sample
 
 
 __all__ = [

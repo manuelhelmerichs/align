@@ -46,13 +46,15 @@ An experiment directory should contain:
   module_graph.json  # optional, used by the resnet adapter
 ```
 
-Each `.npz` must store leaves in the same order as `jax.tree.flatten(position)`, and the tree file must be the matching pickled `PyTreeDef`.
+The default sample format is `pytree_npz`: each `.npz` stores leaves in the same order as `jax.tree.flatten(position)`, and the tree file is the matching pickled `PyTreeDef`. `align` decodes this into a canonical in-memory `WeightSample` before adapters or solvers run.
 
 ## MILE and SMILE
 
 The public `EmanuelSommer/MILE` and `EmanuelSommer/SMILE` repositories use the same basic sample layout for posterior samples: `<experiment>/samples/<chain_id>/sample_<n>.npz` plus a pickled tree file. For tabular FCNs, use:
 
 ```yaml
+paths:
+  sample_format: pytree_npz
 architecture: dense_mlp
 adapter:
   layer_root: params.fcn
@@ -67,7 +69,7 @@ See [docs/producer_artifact_contract.md](docs/producer_artifact_contract.md) for
 ```bash
 align configs/examples/align.yaml --validate-only
 align configs/examples/align.yaml --dry-run
-align configs/examples/align.yaml --output-dir results/example/align/weight_matching
+align configs/examples/align.yaml --output-dir results/example/align/lap
 ```
 
 Useful variants:
@@ -82,15 +84,14 @@ With `uv`, prefix the same commands with `uv run`, for example:
 ```bash
 uv run align configs/examples/align.yaml --validate-only
 uv run align configs/examples/align.yaml --dry-run
-uv run align configs/examples/align.yaml --output-dir results/example/align/weight_matching
+uv run align configs/examples/align.yaml --output-dir results/example/align/lap
 ```
 
 ## Documentation
 
-- [docs/align.md](docs/align.md): alignment background and supported methods
+- [docs/align.md](docs/align.md): alignment background and objective/schedule configuration
 - [docs/developer_reference_align.md](docs/developer_reference_align.md): CLI, config schema, runtime, and artifact layout
 - [docs/producer_artifact_contract.md](docs/producer_artifact_contract.md): expected sampler output layout
-- [docs/issue_roadmap.md](docs/issue_roadmap.md): open issue priorities and implementation plan
 
 ## Development
 

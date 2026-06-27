@@ -7,7 +7,6 @@ mathematically known for the exact-orbit problems.
 
 from __future__ import annotations
 
-import copy
 import time
 import tracemalloc
 from collections.abc import Callable, Mapping, Sequence
@@ -18,9 +17,20 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from align.architecture import AlignmentSpec, ArchitectureAdapter
+from align.alignment import (
+    AlignmentProblem,
+    AxisBinding,
+    PermutationState,
+    ScaleState,
+    TensorSpec,
+)
+from align.architecture import (
+    ArchitectureAdapter,
+    PermutationGroup,
+)
 from align.architectures import DenseMLPAdapter, ResNetAdapter
-from align.rebasin import clear_strategy_cache, rebasin_single_sample
+from align.rebasin import default_lap_schedule, rebasin_single_sample
+from align.scale_normalizer import ScaleNormalizer
 
 ParamTree = Mapping[str, Any]
 ApplyFn = Callable[[ParamTree, jax.Array], jax.Array]
@@ -31,8 +41,8 @@ class SyntheticOrbitCase:
     """A synthetic pair of functionally equivalent parameter trees."""
 
     name: str
-    adapter: ArchitectureAdapter
-    spec: AlignmentSpec
+    adapter: ArchitectureAdapter | None
+    problem: AlignmentProblem
     reference: ParamTree
     target: ParamTree
     inputs: jax.Array
@@ -107,13 +117,6 @@ def _descend(mapping: Mapping[str, Any], path: Sequence[str]) -> Any:
     return node
 
 
-def _set_path(mapping: dict[str, Any], path: Sequence[str], value: Any) -> None:
-    node = mapping
-    for key in path[:-1]:
-        node = node[key]
-    node[path[-1]] = value
-
-
 def _flatten_arrays(params: ParamTree) -> tuple[list[np.ndarray], Any]:
     leaves, treedef = jax.tree_util.tree_flatten(
         jax.tree_util.tree_map(np.asarray, params)
@@ -181,6 +184,33 @@ def _residual_conv_apply(params: ParamTree, x: jax.Array) -> jax.Array:
     return pooled @ jnp.asarray(dense["kernel"]) + jnp.asarray(dense["bias"])
 
 
+def _split_concat_conv_apply(params: ParamTree, x: jax.Array) -> jax.Array:
+    core = params["core"]  # type: ignore[index]
+    stem = _conv1x1(
+        x,
+        jnp.asarray(core["Stem"]["kernel"]),
+        jnp.asarray(core["Stem"]["bias"]),
+    )
+    stem = jnp.maximum(0.0, stem)
+    branch_a = _conv1x1(
+        stem,
+        jnp.asarray(core["BranchA"]["kernel"]),
+        jnp.asarray(core["BranchA"]["bias"]),
+    )
+    branch_b = _conv1x1(
+        stem,
+        jnp.asarray(core["BranchB"]["kernel"]),
+        jnp.asarray(core["BranchB"]["bias"]),
+    )
+    joined = jnp.concatenate(
+        [jnp.maximum(0.0, branch_a), jnp.maximum(0.0, branch_b)],
+        axis=-1,
+    )
+    pooled = jnp.mean(joined, axis=(1, 2))
+    dense = core["Dense_0"]
+    return pooled @ jnp.asarray(dense["kernel"]) + jnp.asarray(dense["bias"])
+
+
 def _make_dense_params(
     *,
     key: jax.Array,
@@ -203,49 +233,12 @@ def _make_dense_params(
     return {"params": {"fcn": fcn}}
 
 
-def _apply_dense_scales(
-    params: ParamTree,
-    spec: AlignmentSpec,
-    scales: Sequence[np.ndarray],
-) -> ParamTree:
-    r"""Apply the positive homogeneous MLP scale symmetry.
+def _scale_state(
+    problem: AlignmentProblem, scales: Mapping[str, np.ndarray]
+) -> ScaleState:
+    """Build a :class:`ScaleState` from per-group positive scale vectors."""
 
-    For hidden scales ``s_l`` and kernels stored as ``(in_dim, out_dim)``:
-    ``W_1' = W_1 diag(s_1)^{-1}``,
-    ``W_l' = diag(s_{l-1}) W_l diag(s_l)^{-1}``, and
-    ``W_L' = diag(s_{L-1}) W_L``. Hidden biases are divided by their own
-    hidden scale and the output bias is unchanged.
-    """
-
-    layer_paths = spec.metadata.get("layer_paths")
-    if not isinstance(layer_paths, list):
-        raise ValueError("Dense MLP spec is missing layer_paths metadata.")
-    if len(scales) != len(layer_paths) - 1:
-        raise ValueError("Need one positive scale vector per hidden layer.")
-
-    mutable = copy.deepcopy(params)
-    previous_scale: jnp.ndarray | None = None
-    for idx, path in enumerate(layer_paths):
-        kernel_path = (*path, "kernel")
-        bias_path = (*path, "bias")
-        kernel = jnp.asarray(_descend(mutable, kernel_path))
-        bias = jnp.asarray(_descend(mutable, bias_path))
-
-        if previous_scale is not None:
-            kernel = previous_scale[:, None] * kernel
-
-        if idx < len(layer_paths) - 1:
-            scale = jnp.asarray(scales[idx], dtype=kernel.dtype)
-            if bool(np.any(np.asarray(scale) <= 0.0)):
-                raise ValueError("Scale symmetry requires strictly positive scales.")
-            kernel = kernel / scale[None, :]
-            bias = bias / scale
-            previous_scale = scale
-
-        _set_path(mutable, kernel_path, kernel)
-        _set_path(mutable, bias_path, bias)
-
-    return mutable
+    return ScaleState.from_scales(problem, dict(scales))
 
 
 def _inverse_permutations(perms: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -259,24 +252,24 @@ def make_dense_mlp_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
     param_key, input_key = jax.random.split(key)
     reference = _make_dense_params(key=param_key, sizes=(3, 5, 4, 2))
     adapter = DenseMLPAdapter()
-    spec = adapter.build_spec(reference)
+    problem = adapter.build_problem(reference)
 
-    scales = (
-        np.array([1.7, 0.6, 2.3, 1.1, 0.8], dtype=np.float32),
-        np.array([0.7, 1.6, 1.2, 2.1], dtype=np.float32),
-    )
+    scales = {
+        "layer_0": np.array([1.7, 0.6, 2.3, 1.1, 0.8], dtype=np.float32),
+        "layer_1": np.array([0.7, 1.6, 1.2, 2.1], dtype=np.float32),
+    }
     forward_perms = {
         "layer_0": permutation_matrix([2, 4, 1, 0, 3]),
         "layer_1": permutation_matrix([3, 1, 0, 2]),
     }
-    scaled = _apply_dense_scales(reference, spec, scales)
-    target = adapter.permute(scaled, spec, forward_perms)
+    scaled = problem.apply_scales(reference, _scale_state(problem, scales))
+    target = problem.apply(scaled, PermutationState.from_perms(problem, forward_perms))
     inputs = jax.random.normal(input_key, (13, 3), dtype=jnp.float32)
 
     return SyntheticOrbitCase(
         name=f"dense_mlp_exact_orbit_seed_{seed}",
         adapter=adapter,
-        spec=spec,
+        problem=problem,
         reference=reference,
         target=target,
         inputs=inputs,
@@ -338,22 +331,157 @@ def make_residual_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
         ]
     }
     adapter = ResNetAdapter(layer_root="core", module_graph=module_graph)
-    spec = adapter.build_spec(reference)
-    group_id = spec.metadata["group_order"][0]
+    problem = adapter.build_problem(reference)
+    group_id = problem.metadata["group_order"][0]
     forward_perms = {group_id: permutation_matrix([2, 0, 3, 1])}
-    target = adapter.permute(reference, spec, forward_perms)
+    target = problem.apply(
+        reference, PermutationState.from_perms(problem, forward_perms)
+    )
     inputs = jax.random.normal(input_key, (7, 3, 3, 2), dtype=jnp.float32)
 
     return SyntheticOrbitCase(
         name=f"residual_conv_exact_orbit_seed_{seed}",
         adapter=adapter,
-        spec=spec,
+        problem=problem,
         reference=reference,
         target=target,
         inputs=inputs,
         apply_fn=_residual_conv_apply,
         expected_permutations=_inverse_permutations(forward_perms),
         expected_residual_ties=(("core/Conv_0", "core/Conv_2"),),
+    )
+
+
+def make_split_concat_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+    """Build a branch/fan-out 1x1-conv case with sliced concat head bindings."""
+
+    key = jax.random.PRNGKey(seed)
+    k_stem, k_a, k_b, k_dense, input_key = jax.random.split(key, 5)
+    input_channels = 2
+    stem_channels = 3
+    branch_a_channels = 2
+    branch_b_channels = 4
+    output_channels = 2
+    reference = {
+        "core": {
+            "Stem": {
+                "kernel": jax.random.normal(
+                    k_stem,
+                    (1, 1, input_channels, stem_channels),
+                    dtype=jnp.float32,
+                ),
+                "bias": 0.1
+                * jax.random.normal(k_stem, (stem_channels,), dtype=jnp.float32),
+            },
+            "BranchA": {
+                "kernel": jax.random.normal(
+                    k_a,
+                    (1, 1, stem_channels, branch_a_channels),
+                    dtype=jnp.float32,
+                ),
+                "bias": 0.1
+                * jax.random.normal(k_a, (branch_a_channels,), dtype=jnp.float32),
+            },
+            "BranchB": {
+                "kernel": jax.random.normal(
+                    k_b,
+                    (1, 1, stem_channels, branch_b_channels),
+                    dtype=jnp.float32,
+                ),
+                "bias": 0.1
+                * jax.random.normal(k_b, (branch_b_channels,), dtype=jnp.float32),
+            },
+            "Dense_0": {
+                "kernel": jax.random.normal(
+                    k_dense,
+                    (branch_a_channels + branch_b_channels, output_channels),
+                    dtype=jnp.float32,
+                ),
+                "bias": 0.1
+                * jax.random.normal(k_dense, (output_channels,), dtype=jnp.float32),
+            },
+        }
+    }
+    groups = {
+        "stem": PermutationGroup(id="stem", size=stem_channels),
+        "branch_a": PermutationGroup(id="branch_a", size=branch_a_channels),
+        "branch_b": PermutationGroup(id="branch_b", size=branch_b_channels),
+    }
+
+    def _tensor(path: tuple[str, ...]) -> TensorSpec:
+        tensor_id = "/".join(path)
+        return TensorSpec(
+            id=tensor_id,
+            path=path,
+            shape=tuple(int(dim) for dim in np.shape(_descend(reference, path))),
+        )
+
+    tensor_paths = (
+        ("core", "Stem", "kernel"),
+        ("core", "Stem", "bias"),
+        ("core", "BranchA", "kernel"),
+        ("core", "BranchA", "bias"),
+        ("core", "BranchB", "kernel"),
+        ("core", "BranchB", "bias"),
+        ("core", "Dense_0", "kernel"),
+        ("core", "Dense_0", "bias"),
+    )
+    tensors = {"/".join(path): _tensor(path) for path in tensor_paths}
+    problem = AlignmentProblem(
+        groups=groups,
+        tensors=tensors,
+        axis_bindings=(
+            AxisBinding("core/Stem/kernel", axis=-1, group="stem", role="out"),
+            AxisBinding("core/Stem/bias", axis=0, group="stem", role="out"),
+            AxisBinding("core/BranchA/kernel", axis=-2, group="stem", role="in"),
+            AxisBinding("core/BranchA/kernel", axis=-1, group="branch_a", role="out"),
+            AxisBinding("core/BranchA/bias", axis=0, group="branch_a", role="out"),
+            AxisBinding("core/BranchB/kernel", axis=-2, group="stem", role="in"),
+            AxisBinding("core/BranchB/kernel", axis=-1, group="branch_b", role="out"),
+            AxisBinding("core/BranchB/bias", axis=0, group="branch_b", role="out"),
+            AxisBinding(
+                "core/Dense_0/kernel",
+                axis=0,
+                group="branch_a",
+                start=0,
+                stop=branch_a_channels,
+                role="in",
+            ),
+            AxisBinding(
+                "core/Dense_0/kernel",
+                axis=0,
+                group="branch_b",
+                start=branch_a_channels,
+                stop=branch_a_channels + branch_b_channels,
+                role="in",
+            ),
+        ),
+        metadata={
+            "architecture": "split_concat_conv",
+            "group_order": tuple(groups),
+        },
+    )
+    problem.validate(reference)
+    forward_perms = {
+        "stem": permutation_matrix([2, 0, 1]),
+        "branch_a": permutation_matrix([1, 0]),
+        "branch_b": permutation_matrix([2, 0, 3, 1]),
+    }
+    target = problem.apply(
+        reference,
+        PermutationState(group_order=problem.group_order, hard=forward_perms),
+    )
+    inputs = jax.random.normal(input_key, (9, 3, 3, input_channels), dtype=jnp.float32)
+
+    return SyntheticOrbitCase(
+        name=f"split_concat_conv_exact_orbit_seed_{seed}",
+        adapter=None,
+        problem=problem,
+        reference=reference,
+        target=target,
+        inputs=inputs,
+        apply_fn=_split_concat_conv_apply,
+        expected_permutations=_inverse_permutations(forward_perms),
     )
 
 
@@ -390,14 +518,18 @@ def recovered_permutation_error(
 
 
 def residual_constraint_violations(
-    spec: AlignmentSpec, expected_ties: Sequence[Sequence[str]]
+    problem: AlignmentProblem, expected_ties: Sequence[Sequence[str]]
 ) -> int:
     """Count expected residual channel ties that are not represented by one group."""
 
     conv_to_group: dict[str, str] = {}
-    for site in spec.sites:
-        if site.id.endswith("_out"):
-            conv_to_group[site.id[: -len("_out")]] = site.group
+    for binding in problem.axis_bindings:
+        if (
+            binding.role == "out"
+            and binding.tensor_id.endswith("/kernel")
+            and len(problem.tensors[binding.tensor_id].shape) >= 2
+        ):
+            conv_to_group[binding.tensor_id[: -len("/kernel")]] = binding.group
 
     violations = 0
     for tied_convs in expected_ties:
@@ -415,9 +547,9 @@ def _normalize_if_requested(
 ) -> ParamTree:
     if not normalize:
         return params
-    normalized, _, _ = case.adapter.normalize(
+    normalized, _, _ = ScaleNormalizer().normalize(
+        case.problem,
         params,
-        case.spec,
         task_type="regression",
         normalize_biases=True,
     )
@@ -427,8 +559,9 @@ def _normalize_if_requested(
 def run_alignment_benchmark(
     case: SyntheticOrbitCase,
     *,
-    method: str = "weight_matching",
-    method_kwargs: Mapping[str, Any] | None = None,
+    objective: str = "l2_weight",
+    objective_kwargs: Mapping[str, Any] | None = None,
+    schedule: Sequence[Mapping[str, Any]] | None = None,
     normalize: bool = False,
     rng_seed: int = 0,
 ) -> AlignmentBenchmarkResult:
@@ -437,12 +570,12 @@ def run_alignment_benchmark(
     reference = _normalize_if_requested(case, case.reference, normalize)
     target = _normalize_if_requested(case, case.target, normalize)
     aligned, perms, aux = rebasin_single_sample(
-        case.adapter,
-        case.spec,
+        case.problem,
         reference,
         target,
-        method=method,
-        method_kwargs=dict(method_kwargs or {}),
+        objective=objective,
+        objective_kwargs=dict(objective_kwargs or {}),
+        schedule=schedule or default_lap_schedule(),
         rng_key=jax.random.PRNGKey(rng_seed),
     )
 
@@ -465,7 +598,7 @@ def run_alignment_benchmark(
             perms, case.expected_permutations
         ),
         residual_constraint_violations=residual_constraint_violations(
-            case.spec, case.expected_residual_ties
+            case.problem, case.expected_residual_ties
         ),
     )
     return AlignmentBenchmarkResult(
@@ -476,34 +609,33 @@ def run_alignment_benchmark(
     )
 
 
-def run_weight_matching_robustness_sweep(
+def run_lap_robustness_sweep(
     *,
     seeds: Sequence[int],
-    max_iters_values: Sequence[int],
+    max_sweeps_values: Sequence[int],
 ) -> list[tuple[int, int, AlignmentBenchmarkMetrics]]:
-    """Sweep dense exact-orbit seeds and weight-matching iteration budgets."""
+    """Sweep dense exact-orbit seeds and LAP sweep budgets."""
 
     results: list[tuple[int, int, AlignmentBenchmarkMetrics]] = []
     for seed in seeds:
         case = make_dense_mlp_orbit_case(seed=seed)
-        for max_iters in max_iters_values:
-            clear_strategy_cache()
+        for max_sweeps in max_sweeps_values:
             result = run_alignment_benchmark(
                 case,
-                method="weight_matching",
-                method_kwargs={"max_iters": int(max_iters), "tol": 0.0},
+                schedule=[{"solver": "lap", "max_sweeps": int(max_sweeps), "tol": 0.0}],
                 normalize=True,
                 rng_seed=seed,
             )
-            results.append((seed, int(max_iters), result.metrics))
+            results.append((seed, int(max_sweeps), result.metrics))
     return results
 
 
 def measure_rebasin_performance(
     case: SyntheticOrbitCase,
     *,
-    method: str = "weight_matching",
-    method_kwargs: Mapping[str, Any] | None = None,
+    objective: str = "l2_weight",
+    objective_kwargs: Mapping[str, Any] | None = None,
+    schedule: Sequence[Mapping[str, Any]] | None = None,
     normalize: bool = False,
     warm_repetitions: int = 3,
     rng_seed: int = 0,
@@ -513,15 +645,14 @@ def measure_rebasin_performance(
     if warm_repetitions < 1:
         raise ValueError("warm_repetitions must be at least 1.")
 
-    method_kwargs = dict(method_kwargs or {})
-    clear_strategy_cache()
     tracemalloc.start()
     try:
         cold_start = time.perf_counter()
         run_alignment_benchmark(
             case,
-            method=method,
-            method_kwargs=method_kwargs,
+            objective=objective,
+            objective_kwargs=objective_kwargs,
+            schedule=schedule,
             normalize=normalize,
             rng_seed=rng_seed,
         )
@@ -531,8 +662,9 @@ def measure_rebasin_performance(
         for idx in range(warm_repetitions):
             run_alignment_benchmark(
                 case,
-                method=method,
-                method_kwargs=method_kwargs,
+                objective=objective,
+                objective_kwargs=objective_kwargs,
+                schedule=schedule,
                 normalize=normalize,
                 rng_seed=rng_seed + idx + 1,
             )

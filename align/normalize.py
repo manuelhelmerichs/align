@@ -10,7 +10,11 @@ import jax.numpy as jnp
 
 from .activation_normalizers import get_activation_normalizer
 from .dense_layers import DenseLayer
-from .rebasin import ParamTree
+from .samples import ParamTree
+
+_VALID_DEGENERATE_HANDLING = frozenset(
+    {"preserve", "zero_outgoing", "canonical_vector"}
+)
 
 
 @dataclass
@@ -35,7 +39,20 @@ def _compute_incoming_norms_jit(
     return jnp.sqrt(kernel_sq + bias_sq + epsilon)
 
 
-@functools.partial(jax.jit, static_argnums=(3, 5, 6))
+def _validate_degenerate_handling(value: str) -> str:
+    if value not in _VALID_DEGENERATE_HANDLING:
+        valid = ", ".join(sorted(_VALID_DEGENERATE_HANDLING))
+        raise ValueError(f"Unknown degenerate_handling '{value}'. Available: {valid}")
+    return value
+
+
+def _require_bool(name: str, value: bool) -> bool:
+    if type(value) is not bool:
+        raise TypeError(f"{name} must be a bool, got {type(value).__name__}.")
+    return value
+
+
+@functools.partial(jax.jit, static_argnums=(3, 5))
 def _normalize_hidden_layer_jit(
     kernel: jax.Array,
     bias: jax.Array,
@@ -43,15 +60,14 @@ def _normalize_hidden_layer_jit(
     degenerate_handling: str,
     degenerate_mask: jax.Array,
     epsilon: float,
-    normalize_biases: bool,
 ) -> tuple[jax.Array, jax.Array]:
     """JIT-compiled hidden layer normalization.
 
-    static_argnums: degenerate_handling (3), epsilon (5), normalize_biases (6).
+    static_argnums: degenerate_handling (3), epsilon (5).
     """
     safe_norms = jnp.where(degenerate_mask, 1.0, norms)
     normalized_kernel = kernel / safe_norms[None, :]
-    normalized_bias = bias / safe_norms if normalize_biases else bias
+    normalized_bias = bias / safe_norms
 
     if degenerate_handling == "canonical_vector":
         canonical = jnp.zeros_like(normalized_kernel)
@@ -61,10 +77,9 @@ def _normalize_hidden_layer_jit(
         normalized_kernel = jnp.where(
             degenerate_mask[None, :], canonical, normalized_kernel
         )
-        if normalize_biases:
-            normalized_bias = jnp.where(
-                degenerate_mask, jnp.zeros_like(normalized_bias), normalized_bias
-            )
+        normalized_bias = jnp.where(
+            degenerate_mask, jnp.zeros_like(normalized_bias), normalized_bias
+        )
 
     return normalized_kernel, normalized_bias
 
@@ -95,6 +110,7 @@ def compute_incoming_norms(
 
     Uses JIT-compiled implementation for performance.
     """
+    normalize_biases = _require_bool("normalize_biases", normalize_biases)
     return _compute_incoming_norms_jit(
         layer.kernel, layer.bias, epsilon, normalize_biases
     )
@@ -103,6 +119,7 @@ def compute_incoming_norms(
 def _outgoing_scale_factors(
     norms: jnp.ndarray, degenerate_mask: jnp.ndarray, *, degenerate_handling: str
 ) -> jnp.ndarray:
+    degenerate_handling = _validate_degenerate_handling(degenerate_handling)
     if degenerate_handling in ("zero_outgoing", "canonical_vector"):
         return jnp.where(degenerate_mask, 0.0, norms)
     return jnp.where(degenerate_mask, 1.0, norms)
@@ -121,6 +138,8 @@ def normalize_hidden_layer(
 
     Uses JIT-compiled implementation for performance.
     """
+    degenerate_handling = _validate_degenerate_handling(degenerate_handling)
+    normalize_biases = _require_bool("normalize_biases", normalize_biases)
     if degenerate_mask is None:
         kernel_sq = jnp.sum(layer.kernel**2, axis=0)
         bias_sq = layer.bias**2 if normalize_biases else 0.0
@@ -134,7 +153,6 @@ def normalize_hidden_layer(
         degenerate_handling,
         degenerate_mask,
         epsilon,
-        normalize_biases,
     )
     return DenseLayer(kernel=kernel, bias=bias)
 
@@ -177,6 +195,11 @@ def normalize_layers(
 
     if len(layers) < 2:
         raise ValueError("Need at least 2 layers (1 hidden + 1 output)")
+    degenerate_handling = _validate_degenerate_handling(degenerate_handling)
+    normalize_biases = _require_bool("normalize_biases", normalize_biases)
+    classification_head_rescale = _require_bool(
+        "classification_head_rescale", classification_head_rescale
+    )
 
     task = (task_type or "regression").lower()
     if task not in ("regression", "classification"):
@@ -267,7 +290,7 @@ def _batch_normalize_hidden_layer_jit(
 
     # Normalize: kernel / norms[None, :] -> (batch, in_dim, out_dim) / (batch, 1, out_dim)
     normalized_kernels = kernels / safe_norms[:, None, :]
-    normalized_biases = biases / safe_norms if normalize_biases else biases
+    normalized_biases = biases / safe_norms
 
     if degenerate_handling == "canonical_vector":
         canonical = jnp.zeros_like(normalized_kernels)
@@ -276,10 +299,9 @@ def _batch_normalize_hidden_layer_jit(
         normalized_kernels = jnp.where(
             degenerate_mask[:, None, :], canonical, normalized_kernels
         )
-        if normalize_biases:
-            normalized_biases = jnp.where(
-                degenerate_mask, jnp.zeros_like(normalized_biases), normalized_biases
-            )
+        normalized_biases = jnp.where(
+            degenerate_mask, jnp.zeros_like(normalized_biases), normalized_biases
+        )
 
     return normalized_kernels, normalized_biases, norms
 
@@ -321,6 +343,11 @@ def batch_normalize_layers(
 
     if num_layers < 2:
         raise ValueError("Need at least 2 layers (1 hidden + 1 output)")
+    degenerate_handling = _validate_degenerate_handling(degenerate_handling)
+    normalize_biases = _require_bool("normalize_biases", normalize_biases)
+    classification_head_rescale = _require_bool(
+        "classification_head_rescale", classification_head_rescale
+    )
 
     task = (task_type or "regression").lower()
     if task not in ("regression", "classification"):

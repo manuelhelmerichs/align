@@ -10,7 +10,7 @@ Configuration is split across submodules for maintainability:
 - ``loader``: YAML loading, merging, and validation
 """
 
-from ..options import SinkhornOptions, WeightMatchingOptions
+from ..options import RebasinScheduleStep
 from .loader import (
     AlignConfig,
     ConfigValidator,
@@ -24,8 +24,7 @@ from .selection import SelectionConfig
 from .stages import NormalizationOptions, NormalizeConfig, RebasinConfig
 
 __all__ = [
-    "SinkhornOptions",
-    "WeightMatchingOptions",
+    "RebasinScheduleStep",
     "PathConfig",
     "SelectionConfig",
     "NormalizationOptions",
