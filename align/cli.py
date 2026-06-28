@@ -13,7 +13,12 @@ from typing import Any
 import numpy as np
 
 from ._jax_platforms import configure_jax_platforms
-from .config import AlignConfig, ConfigValidator, load_align_config
+from .config import (
+    AlignConfig,
+    ConfigValidator,
+    load_align_config,
+    resolve_adapter_defaults,
+)
 from .config._utils import _parse_int_list
 from .logging_utils import configure_logging
 from .state import RunManifest, SampleManifest, compute_config_digest
@@ -161,13 +166,7 @@ def run(args: argparse.Namespace) -> None:
     config.paths.output_dir = output_dir
     config.paths.samples_dir = samples_dir
     config.paths.tree_path = tree_path
-    if config.architecture == "resnet":
-        adapter_kwargs = dict(getattr(config, "adapter", {}) or {})
-        if adapter_kwargs.get("module_graph") is None:
-            module_graph_path = exp_root / "module_graph.json"
-            if module_graph_path.exists():
-                adapter_kwargs["module_graph"] = str(module_graph_path)
-                config.adapter = adapter_kwargs
+    resolve_adapter_defaults(config)
 
     if output_dir.exists() and not config.runtime.resume:
         raise FileExistsError(

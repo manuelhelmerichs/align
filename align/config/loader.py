@@ -151,6 +151,23 @@ def validate_paths(config: AlignConfig) -> None:
             raise FileNotFoundError(f"Tree path must be a file: {resolved_tree}")
 
 
+def resolve_adapter_defaults(config: AlignConfig) -> None:
+    """Fill adapter defaults derivable from resolved path configuration."""
+
+    if config.architecture != "resnet":
+        return
+    root = config.paths.experiment_root
+    if root is None:
+        return
+    adapter_kwargs = dict(getattr(config, "adapter", {}) or {})
+    if adapter_kwargs.get("module_graph") is not None:
+        return
+    module_graph_path = Path(root) / "module_graph.json"
+    if module_graph_path.exists():
+        adapter_kwargs["module_graph"] = str(module_graph_path)
+        config.adapter = adapter_kwargs
+
+
 def validate_ref_sample(manifest: SampleManifest, selection: SelectionConfig) -> None:
     """Ensure the reference sample exists inside the manifest."""
 
@@ -196,6 +213,7 @@ __all__ = [
     "AlignConfig",
     "ConfigValidator",
     "load_align_config",
+    "resolve_adapter_defaults",
     "validate_paths",
     "validate_ref_sample",
 ]

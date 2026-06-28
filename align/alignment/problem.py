@@ -193,6 +193,7 @@ class AlignmentProblem:
                 raise ValueError(
                     "metadata['group_order'] must contain exactly the problem groups."
                 )
+            return ordered
         return tuple(self.groups)
 
     def bindings_for_tensor(self, tensor_id: str) -> tuple[AxisBinding, ...]:

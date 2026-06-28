@@ -15,6 +15,7 @@ from .loader import (
     AlignConfig,
     ConfigValidator,
     load_align_config,
+    resolve_adapter_defaults,
     validate_paths,
     validate_ref_sample,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "AlignConfig",
     "ConfigValidator",
     "load_align_config",
+    "resolve_adapter_defaults",
     "validate_paths",
     "validate_ref_sample",
 ]

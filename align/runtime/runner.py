@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ..config import AlignConfig
+from ..config import AlignConfig, resolve_adapter_defaults
 from ..logging_utils import progress_bar
 from ..state import RunManifest, SampleManifest, SampleRecord
 from .common import (
@@ -45,6 +45,7 @@ class AlignRunner:
         self.logger = logger
         self.progress_logger = progress_logger or _LOG
         self.config = config
+        resolve_adapter_defaults(self.config)
         self.save_intermediate = bool(config.runtime.save_intermediate)
         self.per_device_batch = max(
             1, int(getattr(config.runtime, "per_device_batch", None) or 1)

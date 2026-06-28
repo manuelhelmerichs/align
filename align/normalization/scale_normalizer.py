@@ -9,7 +9,7 @@ former adapter-specific normalization byte-for-byte.
 It supports the linear ReLU-MLP class of graphs (each permutation group has a
 single ``out``-role producer kernel, kernels are 2-D, and the groups form a
 single chain feeding one output head). Residual ties and branches give a group
-multiple ``out``-role producers and are rejected pending issue #4; convolutional
+multiple ``out``-role producers and are rejected pending issue #14; convolutional
 kernels are rejected as non-dense. This preserves the previous "ResNet normalize
 unsupported" behaviour with a clearer message.
 """
@@ -80,7 +80,7 @@ def _scale_chain(problem: AlignmentProblem) -> list[_LayerPaths]:
                 f"Scale normalization is undefined for group {group_id!r}: it has "
                 f"{len(kernel_ids)} out-role producers ({', '.join(kernel_ids)}). "
                 "Residual ties and branches need shared-scale semantics that are "
-                "deferred to issue #4; disable the normalize stage for this "
+                "deferred to issue #14; disable the normalize stage for this "
                 "architecture."
             )
         kernel_id = kernel_ids[0]
