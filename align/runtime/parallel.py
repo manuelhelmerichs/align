@@ -13,7 +13,7 @@ from .common import _WORKER_HEARTBEAT_INTERVAL, _WORKER_HEARTBEAT_TIMEOUT
 
 
 def worker_process_main(job: dict[str, object], command_queue, progress_queue) -> None:
-    from ..worker_impl import run_worker
+    from .worker import run_worker
 
     run_worker(job, command_queue, progress_queue)
 

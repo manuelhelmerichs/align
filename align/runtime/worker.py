@@ -11,15 +11,15 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .artifacts import (
+from ..artifacts import (
     write_aux_artifact,
     write_permutations_artifact,
     write_scale_factors_artifact,
 )
-from .state import SampleManifest, SampleRecord, _file_checksum
+from ..state import SampleManifest, SampleRecord, _file_checksum
 
 if TYPE_CHECKING:
-    from .samples import WeightSample, WeightSampleCodec
+    from ..samples import WeightSample, WeightSampleCodec
 
 
 class _ArtifactWriter:
@@ -118,7 +118,7 @@ class _WorkerLoop:
         self.save_intermediate = bool(save_intermediate)
         self.per_device_batch = max(1, int(per_device_batch))
 
-        from .samples import create_sample_codec
+        from ..samples import create_sample_codec
 
         self._artifact_writer = _ArtifactWriter(
             Path(job["scratch_dir"]),
@@ -224,7 +224,7 @@ class _WorkerLoop:
             )
 
     def _process_batched(self, records: list[SampleRecord]) -> None:
-        from .runtime.loaders import (
+        from .loaders import (
             PrefetchingLoader,
         )  # Imported lazily to respect device visibility
 
@@ -372,7 +372,7 @@ class _WorkerLoop:
 def _build_stage_executors(
     job: dict[str, Any], manifest: SampleManifest, ref_sample: WeightSample
 ):
-    from .runtime.stages import NormalizeExecutor, RebasinExecutor
+    from .stages import NormalizeExecutor, RebasinExecutor
 
     stages: list[tuple[str, Any]] = []
     normalize_cfg = job.get("normalize_config")
@@ -429,7 +429,7 @@ def run_worker(job: dict[str, Any], command_queue, progress_queue) -> None:
 
     manifest = SampleManifest.load(Path(job["manifest_path"]))
 
-    from .runtime.loaders import SampleLoader  # Imported after device visibility is set
+    from .loaders import SampleLoader  # Imported after device visibility is set
 
     loader = SampleLoader(manifest)
     ref_sample = loader.load_reference()

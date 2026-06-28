@@ -1,7 +1,14 @@
-"""Built-in architecture adapters."""
+"""Architecture adapters: the adapter framework plus built-in adapters."""
 
 import importlib
 from typing import Any
+
+from .base import (
+    ArchitectureAdapter,
+    available_adapters,
+    get_adapter,
+    register_adapter,
+)
 
 _ADAPTER_EXPORTS = {
     "DenseMLPAdapter": "align.architectures.dense_mlp",
@@ -22,4 +29,11 @@ def __dir__() -> list[str]:
     return sorted(set(globals()) | set(_ADAPTER_EXPORTS))
 
 
-__all__ = list(_ADAPTER_EXPORTS)
+__all__ = [
+    "ArchitectureAdapter",
+    "DenseMLPAdapter",
+    "ResNetAdapter",
+    "available_adapters",
+    "get_adapter",
+    "register_adapter",
+]

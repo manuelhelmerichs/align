@@ -8,10 +8,14 @@ from typing import Any
 
 import jax
 
-from ..alignment import SolverScheduleStep
-from ..architecture import get_adapter
+from ..architectures import get_adapter
 from ..config.stages import NormalizeConfig, RebasinConfig
-from ..rebasin import build_scheduler, rebasin_batch, rebasin_single_sample
+from ..rebasin import (
+    SolverScheduleStep,
+    build_scheduler,
+    rebasin_batch,
+    rebasin_single_sample,
+)
 from ..samples import ParamTree, WeightSample
 from ..state import SampleManifest, SampleRecord
 
@@ -87,7 +91,7 @@ class NormalizeExecutor(StageExecutor):
         self.normalizer = None
 
     def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
-        from ..scale_normalizer import ScaleNormalizer
+        from ..normalization import ScaleNormalizer
 
         adapter_kwargs = dict(self.adapter_kwargs)
         if self.config.layer_root:

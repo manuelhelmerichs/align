@@ -8,8 +8,7 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 
-from ..architecture import apply_perm_to_axis
-from .problem import binding_axis_interval
+from ..alignment import apply_perm_to_axis, binding_axis_interval
 
 
 class Objective(ABC):

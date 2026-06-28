@@ -1,29 +1,18 @@
-"""Scale normalization for ReLU MLPs."""
+"""Scale-normalization math kernel for dense ReLU-style MLPs."""
 
 import functools
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 
-from .activation_normalizers import get_activation_normalizer
+from .activations import get_activation_normalizer
 from .dense_layers import DenseLayer
-from .samples import ParamTree
 
 _VALID_DEGENERATE_HANDLING = frozenset(
     {"preserve", "zero_outgoing", "canonical_vector"}
 )
-
-
-@dataclass
-class NormalizationResult:
-    """Result of normalizing a single sample."""
-
-    normalized_params: ParamTree
-    scale_factors: list[jnp.ndarray]
-    aux: dict[str, Any] | None = None
 
 
 @functools.partial(jax.jit, static_argnums=(2, 3))
@@ -457,7 +446,6 @@ def batch_normalize_layers(
 
 
 __all__ = [
-    "NormalizationResult",
     "compute_incoming_norms",
     "normalize_hidden_layer",
     "scale_outgoing_weights",

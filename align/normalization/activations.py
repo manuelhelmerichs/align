@@ -6,7 +6,7 @@ properties (e.g., positive homogeneity for ReLU/LeakyReLU).
 
 Usage::
 
-    from align.activation_normalizers import get_activation_normalizer
+    from align.normalization import get_activation_normalizer
 
     normalizer = get_activation_normalizer("relu")
     norms = normalizer.compute_norms(layer, epsilon=1e-8, normalize_biases=True)
@@ -59,7 +59,7 @@ class ReLUNormalizer(ActivationNormalizer):
     def compute_norms(
         self, layer: DenseLayer, epsilon: float, normalize_biases: bool
     ) -> jnp.ndarray:
-        from .normalize import compute_incoming_norms
+        from .kernel import compute_incoming_norms
 
         return compute_incoming_norms(
             layer, epsilon=epsilon, normalize_biases=normalize_biases
@@ -76,7 +76,7 @@ class LeakyReLUNormalizer(ActivationNormalizer):
     def compute_norms(
         self, layer: DenseLayer, epsilon: float, normalize_biases: bool
     ) -> jnp.ndarray:
-        from .normalize import compute_incoming_norms
+        from .kernel import compute_incoming_norms
 
         return compute_incoming_norms(
             layer, epsilon=epsilon, normalize_biases=normalize_biases

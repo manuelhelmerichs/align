@@ -10,15 +10,15 @@ from typing import Any
 import numpy as np
 import yaml
 
-from ..alignment import AlignmentProblem, AxisBinding, GraphConstraint, TensorSpec
-from ..architecture import (
-    ArchitectureAdapter,
+from ..alignment import (
+    AlignmentProblem,
+    AxisBinding,
+    GraphConstraint,
     PermutationGroup,
-    _canonical_axis,
-    _descend,
-    _maybe_descend,
-    register_adapter,
+    TensorSpec,
 )
+from ..alignment.tensor_ops import _canonical_axis, _descend, _maybe_descend
+from .base import ArchitectureAdapter, register_adapter
 
 
 def _natural_key(value: str) -> list[int | str]:

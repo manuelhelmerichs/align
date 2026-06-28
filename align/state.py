@@ -529,7 +529,7 @@ class ArtifactChecksumStore:
     ):
         self.path = Path(path)
         self.total = int(total_samples)
-        self.kinds: tuple[str, ...] = tuple(kinds or ("folded", "permutations"))
+        self.kinds: tuple[str, ...] = tuple(kinds or ("final", "permutations"))
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
         columns = max(1, len(self.kinds))

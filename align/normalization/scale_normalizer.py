@@ -3,7 +3,7 @@
 The :class:`ScaleNormalizer` is the deterministic canonicalization counterpart of
 the rebasin solver stack: it reads producer/consumer axis roles off an
 :class:`~align.alignment.AlignmentProblem` and reuses the
-:func:`align.normalize.normalize_layers` math kernel so its output matches the
+:func:`align.normalization.normalize_layers` math kernel so its output matches the
 former adapter-specific normalization byte-for-byte.
 
 It supports the linear ReLU-MLP class of graphs (each permutation group has a
@@ -23,8 +23,8 @@ from typing import Any
 import jax.numpy as jnp
 from flax.core import frozen_dict
 
-from .alignment import AlignmentProblem
-from .architecture import _descend, _set_path
+from ..alignment import AlignmentProblem
+from ..alignment.tensor_ops import _descend, _set_path
 from .dense_layers import DenseLayer
 
 ParamTree = Mapping[str, Any]
@@ -42,6 +42,10 @@ def _scale_chain(problem: AlignmentProblem) -> list[_LayerPaths]:
     """
 
     tensors = problem.tensors
+    if not problem.group_order:
+        raise ValueError(
+            "Scale normalization requires at least one hidden permutation group."
+        )
     chain: list[_LayerPaths] = []
     producer_kernel_ids: set[str] = set()
     previous_group: str | None = None
@@ -156,7 +160,7 @@ class ScaleNormalizer:
     ) -> tuple[ParamTree, list[Any], dict[str, Any]]:
         """Return ``(normalized_params, scale_factors, aux)`` for ``params``."""
 
-        from .normalize import normalize_layers
+        from .kernel import normalize_layers
 
         chain = _scale_chain(problem)
         layers = [

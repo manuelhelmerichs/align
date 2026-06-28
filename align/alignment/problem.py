@@ -11,13 +11,20 @@ import jax.numpy as jnp
 import numpy as np
 from flax.core import frozen_dict
 
-from ..architecture import (
-    PermutationGroup,
+from .tensor_ops import (
     _canonical_axis,
     _descend,
     _set_path,
     apply_perm_to_axis,
 )
+
+
+@dataclass
+class PermutationGroup:
+    """A set of channels/units that must share a permutation."""
+
+    id: str
+    size: int
 
 
 @dataclass(frozen=True)

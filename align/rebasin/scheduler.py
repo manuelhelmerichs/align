@@ -8,14 +8,14 @@ from typing import Any
 import jax
 import numpy as np
 
-from .problem import materialize_many
+from ..alignment import materialize_many
+from .permutation_state import PermutationState
 from .solvers import (
     LAPGroupSolver,
     SinkhornBlockSolver,
     SolverScheduleStep,
     _scheduled_groups,
 )
-from .state import PermutationState
 
 
 class SolverScheduler:

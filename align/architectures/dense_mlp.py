@@ -7,13 +7,9 @@ from typing import Any
 
 import jax.numpy as jnp
 
-from ..alignment import AlignmentProblem, AxisBinding, TensorSpec
-from ..architecture import (
-    ArchitectureAdapter,
-    PermutationGroup,
-    register_adapter,
-)
-from ..dense_layers import DenseLayer
+from ..alignment import AlignmentProblem, AxisBinding, PermutationGroup, TensorSpec
+from ..normalization import DenseLayer
+from .base import ArchitectureAdapter, register_adapter
 
 
 @register_adapter

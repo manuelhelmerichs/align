@@ -11,7 +11,7 @@ import optax
 
 from ..options import RebasinScheduleStep as SolverScheduleStep
 from .objectives import UnsupportedGroupLinearization
-from .state import (
+from .permutation_state import (
     PermutationState,
     as_permutation_matrix,
     sinkhorn_operator,

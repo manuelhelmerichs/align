@@ -7,14 +7,12 @@ from typing import Any
 
 import jax
 
-from .alignment import (
-    AlignmentProblem,
-    PermutationState,
-    SolverScheduler,
-    SolverScheduleStep,
-    get_objective,
-)
-from .samples import ParamTree
+from ..alignment import AlignmentProblem
+from ..samples import ParamTree
+from .objectives import get_objective
+from .permutation_state import PermutationState
+from .scheduler import SolverScheduler
+from .solvers import SolverScheduleStep
 
 
 def default_lap_schedule(

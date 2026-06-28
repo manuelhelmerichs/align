@@ -20,17 +20,20 @@ import numpy as np
 from align.alignment import (
     AlignmentProblem,
     AxisBinding,
-    PermutationState,
-    ScaleState,
+    PermutationGroup,
     TensorSpec,
 )
-from align.architecture import (
+from align.architectures import (
     ArchitectureAdapter,
-    PermutationGroup,
+    DenseMLPAdapter,
+    ResNetAdapter,
 )
-from align.architectures import DenseMLPAdapter, ResNetAdapter
-from align.rebasin import default_lap_schedule, rebasin_single_sample
-from align.scale_normalizer import ScaleNormalizer
+from align.normalization import ScaleNormalizer, ScaleState
+from align.rebasin import (
+    PermutationState,
+    default_lap_schedule,
+    rebasin_single_sample,
+)
 
 ParamTree = Mapping[str, Any]
 ApplyFn = Callable[[ParamTree, jax.Array], jax.Array]

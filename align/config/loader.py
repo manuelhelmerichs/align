@@ -183,7 +183,7 @@ class ConfigValidator:
                     "Normalization is not supported for architecture 'resnet'. "
                     "Disable normalize or use architecture 'dense_mlp'."
                 )
-        from ..architecture import available_adapters
+        from ..architectures import available_adapters
 
         if self.config.architecture not in available_adapters():
             raise ValueError(

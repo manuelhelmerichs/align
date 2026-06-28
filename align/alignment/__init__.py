@@ -1,57 +1,30 @@
-"""Graph-native alignment core."""
+"""Shared graph-native alignment core.
 
-from .objectives import (
-    L2WeightObjective,
-    Objective,
-    available_objectives,
-    get_objective,
-    register_objective,
-)
+Defines the architecture-derived alignment graph (:class:`AlignmentProblem` and
+its tensor/axis/group/constraint types) plus the low-level array and pytree
+primitives both symmetry-removal stages build on. The permutation stage lives in
+``align.rebasin`` and the scale stage in ``align.normalization``; both consume the
+``AlignmentProblem`` and its symmetry actions (``apply`` / ``apply_scales``).
+"""
+
 from .problem import (
     AlignmentProblem,
     AxisBinding,
     GraphConstraint,
+    PermutationGroup,
     TensorSpec,
     binding_axis_interval,
     materialize_many,
 )
-from .scale_state import ScaleState
-from .scheduler import SolverScheduler
-from .solvers import (
-    LAPGroupSolver,
-    SinkhornBlockSolver,
-    SolverScheduleStep,
-    UnsupportedGroupLinearization,
-    available_solvers,
-)
-from .state import (
-    PermutationState,
-    as_permutation_matrix,
-    sinkhorn_operator,
-    solve_lap_maximize,
-)
+from .tensor_ops import apply_perm_to_axis
 
 __all__ = [
     "AlignmentProblem",
     "AxisBinding",
     "GraphConstraint",
+    "PermutationGroup",
     "TensorSpec",
+    "apply_perm_to_axis",
     "binding_axis_interval",
     "materialize_many",
-    "PermutationState",
-    "ScaleState",
-    "as_permutation_matrix",
-    "sinkhorn_operator",
-    "solve_lap_maximize",
-    "Objective",
-    "L2WeightObjective",
-    "register_objective",
-    "get_objective",
-    "available_objectives",
-    "SolverScheduleStep",
-    "SolverScheduler",
-    "LAPGroupSolver",
-    "SinkhornBlockSolver",
-    "UnsupportedGroupLinearization",
-    "available_solvers",
 ]

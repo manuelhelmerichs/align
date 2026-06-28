@@ -20,20 +20,18 @@ from .common import _STATE_SAVE_INTERVAL_SECONDS
 
 
 class IncrementalArtifactLogger(ABC):
-    """Shared helpers for streaming loggers."""
+    """Shared checksum and artifact helpers for pipeline loggers."""
 
     def __init__(
         self,
         manifest: SampleManifest,
         output_dir: Path,
         *,
-        method: str,
         checksum_kinds: Sequence[str],
-        primary_kind: str = "folded",
+        primary_kind: str = "final",
     ) -> None:
         self.manifest = manifest
         self.output_dir = Path(output_dir)
-        self.method = method.lower()
         self.state_dir = self.output_dir / "state"
         self.aux_dir = self.state_dir / "aux"
         self.tree_path = Path(self.manifest.tree_path)
@@ -190,141 +188,6 @@ class IncrementalArtifactLogger(ABC):
         """Persist summary metadata."""
 
 
-class IncrementalRebasinLogger(IncrementalArtifactLogger):
-    """Stream results to disk as each sample is processed."""
-
-    def __init__(self, manifest: SampleManifest, output_dir: Path, *, method: str):
-        super().__init__(
-            manifest,
-            output_dir,
-            method=method,
-            checksum_kinds=("folded", "permutations"),
-        )
-        self.folded_dir = self.output_dir / "folded"
-        self.permutations_dir = self.output_dir / "permutations"
-        self.folded_dir.mkdir(parents=True, exist_ok=True)
-        self.permutations_dir.mkdir(parents=True, exist_ok=True)
-        self.primary_dir = self.folded_dir
-
-    def artifact_paths(self, record: SampleRecord) -> Mapping[str, Path]:
-        rel = self._relative_sample_path(record)
-        return {
-            "folded": self.folded_dir / rel,
-            "permutations": self.permutations_dir / rel,
-        }
-
-    @property
-    def optional_artifacts(self) -> set[str]:
-        return {"permutations"}
-
-    def write_sample(self, record: SampleRecord, sample: WeightSample) -> None:
-        path = self.artifact_paths(record)["folded"]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.sample_codec.save(path, sample)
-        self._copy_tree_once(self.folded_dir)
-        self._update_checksum(record, kind="folded", path=path)
-
-    def write_permutations(
-        self, record: SampleRecord, perms: list[jnp.ndarray]
-    ) -> None:
-        path = self.artifact_paths(record)["permutations"]
-        perm_path = write_permutations_artifact(path, perms)
-        if perm_path is None:
-            self._update_checksum(
-                record, kind="permutations", path=None, checksum_value=0
-            )
-            return
-        self._update_checksum(record, kind="permutations", path=perm_path)
-
-    def finalize(
-        self, *, method: str, reference_index: int, elapsed_seconds: float
-    ) -> None:
-        self.maybe_flush(force=True)
-        out_path = self.output_dir / "rebasin_summary.json"
-        summary = {
-            "method": method,
-            "reference_index": reference_index,
-            "elapsed_seconds": float(elapsed_seconds),
-        }
-        out_path.write_text(json.dumps(summary, indent=2))
-        aux_payload: list[dict[str, Any]] = []
-        for record in self.manifest.records:
-            path = self._aux_path_for(record)
-            if path.exists():
-                aux_payload.append(json.loads(path.read_text()))
-            else:
-                aux_payload.append({})
-        (self.output_dir / "rebasin_aux.json").write_text(
-            json.dumps(aux_payload, separators=(",", ":"))
-        )
-
-
-class IncrementalNormalizationLogger(IncrementalArtifactLogger):
-    """Stream normalization results to disk as each sample is processed."""
-
-    def __init__(self, manifest: SampleManifest, output_dir: Path, *, method: str):
-        super().__init__(
-            manifest,
-            output_dir,
-            method=method,
-            checksum_kinds=("folded", "scale_factors"),
-        )
-        self.normalized_dir = self.output_dir / "normalized"
-        self.scale_factors_dir = self.output_dir / "scale_factors"
-        self.normalized_dir.mkdir(parents=True, exist_ok=True)
-        self.scale_factors_dir.mkdir(parents=True, exist_ok=True)
-        self.primary_dir = self.normalized_dir
-
-    def artifact_paths(self, record: SampleRecord) -> Mapping[str, Path]:
-        rel = self._relative_sample_path(record)
-        return {
-            "folded": self.normalized_dir / rel,
-            "scale_factors": self.scale_factors_dir / rel,
-        }
-
-    @property
-    def optional_artifacts(self) -> set[str]:
-        return {"scale_factors"}
-
-    def write_sample(self, record: SampleRecord, sample: WeightSample) -> None:
-        path = self.artifact_paths(record)["folded"]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.sample_codec.save(path, sample)
-        self._copy_tree_once(self.normalized_dir)
-        self._update_checksum(record, kind="folded", path=path)
-
-    def write_scale_factors(
-        self, record: SampleRecord, scales: list[jnp.ndarray]
-    ) -> None:
-        path = self.artifact_paths(record)["scale_factors"]
-        scale_path = write_scale_factors_artifact(path, scales)
-        if scale_path is None:
-            self._update_checksum(
-                record, kind="scale_factors", path=None, checksum_value=0
-            )
-            return
-        self._update_checksum(record, kind="scale_factors", path=scale_path)
-
-    def finalize(self, *, method: str, elapsed_seconds: float) -> None:
-        self.maybe_flush(force=True)
-        summary_path = self.output_dir / "normalization_summary.json"
-        summary = {
-            "method": method,
-            "elapsed_seconds": float(elapsed_seconds),
-        }
-        summary_path.write_text(json.dumps(summary, indent=2))
-        aux_payload: list[dict[str, Any]] = []
-        for record in self.manifest.records:
-            path = self._aux_path_for(record)
-            if path.exists():
-                aux_payload.append(json.loads(path.read_text()))
-            else:
-                aux_payload.append({})
-        (self.output_dir / "normalization_aux.json").write_text(
-            json.dumps(aux_payload, separators=(",", ":"))
-        )
-
-
 _NORMALIZE_STATIC_KEYS = frozenset(
     {
         "task_type",
@@ -371,7 +234,6 @@ class AlignLogger(IncrementalArtifactLogger):
         super().__init__(
             manifest,
             output_dir,
-            method="align",
             checksum_kinds=checksum_kinds,
             primary_kind="final",
         )
@@ -553,7 +415,5 @@ class AlignLogger(IncrementalArtifactLogger):
 
 __all__ = [
     "IncrementalArtifactLogger",
-    "IncrementalRebasinLogger",
-    "IncrementalNormalizationLogger",
     "AlignLogger",
 ]

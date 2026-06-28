@@ -38,9 +38,11 @@ rebasin:
       tol: 1.0e-05
       init_scale: 0.01
       record_loss_history: false
-    - solver: lap
-      max_sweeps: 5
-      tol: 0.0
+    # Add a final LAP polish only for groups known to be LAP-compatible:
+    # - solver: lap
+    #   groups: [core/Conv_1]
+    #   max_sweeps: 5
+    #   tol: 0.0
 
 runtime:
   resume: false
