@@ -21,4 +21,4 @@
   - `uv run pytest`
   - `uv run ruff check .`
   - `uv run ruff format --check .`
-- Update `docs/align.md`, `docs/developer_reference_align.md`, and example configs when behavior or user-facing configuration changes.
+- Update `docs/theory.md`, `docs/developer_reference.md`, and example configs when behavior or user-facing configuration changes.

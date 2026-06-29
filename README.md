@@ -8,7 +8,6 @@ The pinned JAX stack currently supports Python 3.11 or 3.12. The repo includes
 `.python-version` so `uv` uses Python 3.12 automatically.
 
 ```bash
-cd ~/projects/align
 uv sync --extra dev
 ```
 
