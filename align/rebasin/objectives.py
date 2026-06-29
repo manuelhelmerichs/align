@@ -8,7 +8,7 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 
-from ..alignment import apply_perm_to_axis, binding_axis_interval
+from ..alignment import apply_perm_to_axis, axis_slice, binding_axis_interval
 
 
 class Objective(ABC):
@@ -93,12 +93,6 @@ def _apply_matrix_axis(tensor, matrix, *, axis: int, tensor_is_batched: bool):
     return jnp.moveaxis(out, 1, axis)
 
 
-def _axis_slice(ndim: int, axis: int, start: int, stop: int) -> tuple[slice, ...]:
-    indexer = [slice(None)] * ndim
-    indexer[axis] = slice(start, stop)
-    return tuple(indexer)
-
-
 def _apply_state_to_tensor(problem, tensor_id: str, tensor, state):
     updated = jnp.asarray(tensor)
     for binding in problem.bindings_for_tensor(tensor_id):
@@ -121,7 +115,7 @@ def _apply_state_to_tensor(problem, tensor_id: str, tensor, state):
                 tensor_is_batched=tensor_is_batched,
             )
             continue
-        indexer = _axis_slice(updated.ndim, axis, start, stop)
+        indexer = axis_slice(updated.ndim, axis, start, stop)
         segment = updated[indexer]
         transformed = _apply_matrix_axis(
             segment,
@@ -146,16 +140,14 @@ def _apply_other_groups_hard(problem, tensor_id: str, tensor, state, group_id: s
                 updated,
                 np.asarray(state.hard[binding.group]),
                 axis=axis,
-                direction="left",
             )
             continue
-        indexer = _axis_slice(updated.ndim, axis, start, stop)
+        indexer = axis_slice(updated.ndim, axis, start, stop)
         segment = updated[indexer]
         transformed = apply_perm_to_axis(
             segment,
             np.asarray(state.hard[binding.group]),
             axis=axis,
-            direction="left",
         )
         updated = np.array(updated, copy=True)
         updated[indexer] = transformed
@@ -224,7 +216,7 @@ class L2WeightObjective(Objective):
             axis, start, stop = binding_axis_interval(
                 problem.tensors[tensor_id].shape, binding
             )
-            indexer = _axis_slice(ref.ndim, axis, start, stop)
+            indexer = axis_slice(ref.ndim, axis, start, stop)
             ref_mat = np.moveaxis(ref[indexer], axis, 0).reshape(group.size, -1)
             target_mat = np.moveaxis(target[indexer], axis, 0).reshape(group.size, -1)
             cost += ref_mat @ target_mat.T

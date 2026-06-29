@@ -2,7 +2,7 @@
 
 from ..state import RunManifest, SampleManifest, SampleRecord, compute_config_digest
 from .loaders import PrefetchingLoader, SampleLoader
-from .loggers import AlignLogger, IncrementalArtifactLogger
+from .loggers import AlignLogger
 from .runner import AlignRunner
 
 __all__ = [
@@ -11,7 +11,6 @@ __all__ = [
     "SampleLoader",
     "PrefetchingLoader",
     "RunManifest",
-    "IncrementalArtifactLogger",
     "AlignLogger",
     "AlignRunner",
     "compute_config_digest",

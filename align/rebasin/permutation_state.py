@@ -127,14 +127,6 @@ class PermutationState:
         state = cls.identity(problem, backend=backend)
         return state.with_hard(perms)
 
-    def copy(self) -> PermutationState:
-        return PermutationState(
-            group_order=tuple(self.group_order),
-            hard=dict(self.hard),
-            logits=dict(self.logits) if self.logits is not None else None,
-            metadata=dict(self.metadata),
-        )
-
     def with_hard(self, updates: Mapping[str, Any]) -> PermutationState:
         hard = dict(self.hard)
         hard.update(dict(updates))

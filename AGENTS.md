@@ -22,8 +22,3 @@
   - `uv run ruff check .`
   - `uv run ruff format --check .`
 - Update `docs/align.md`, `docs/developer_reference_align.md`, and example configs when behavior or user-facing configuration changes.
-- Use the open GitHub issues (`gh issue list`) as the current priority map.
-
-## Research notes
-
-- For nontrivial research or design decisions, create a concise action zettel in `~/Projects/zettelkasten/Action zettel` with the tag `#project/align`.

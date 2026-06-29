@@ -53,6 +53,24 @@ def _tree_override_path(manifest_path: Path) -> Path:
     return manifest_path.with_name(f"{manifest_path.stem}.tree_path.txt")
 
 
+def _read_tree_override(manifest_path: Path, *, discard_stale: bool) -> Path | None:
+    override_path = _tree_override_path(Path(manifest_path).resolve())
+    if not override_path.exists():
+        return None
+    recorded = override_path.read_text().strip()
+    if not recorded:
+        return None
+    candidate = Path(recorded).resolve()
+    if candidate.exists():
+        return candidate
+    if discard_stale:
+        try:
+            override_path.unlink()
+        except FileNotFoundError:
+            pass
+    return None
+
+
 def _extract_last_int(text: str) -> int:
     match = _INT_PATTERN.search(text)
     if not match:
@@ -288,19 +306,13 @@ class SampleManifest:
 
     def ensure_shared_tree(self, manifest_path: Path) -> Path:
         manifest_path = Path(manifest_path).resolve()
+        shared_tree = _read_tree_override(manifest_path, discard_stale=True)
+        if shared_tree is not None:
+            self.tree_path = shared_tree
+            return shared_tree
+
         override_path = _tree_override_path(manifest_path)
         copy_path = _tree_copy_path(manifest_path)
-        if override_path.exists():
-            recorded = override_path.read_text().strip()
-            if recorded:
-                candidate = Path(recorded)
-                if candidate.exists():
-                    self.tree_path = candidate
-                    return candidate
-                try:
-                    override_path.unlink()
-                except FileNotFoundError:
-                    pass
         source = Path(self.tree_path).resolve()
         if not source.exists():
             raise FileNotFoundError(f"Tree path not found: {source}")
@@ -346,15 +358,9 @@ class SampleManifest:
         self.records = _SharedSampleRecordList(records_path, paths_path)
 
     def _apply_shared_tree_override(self, manifest_path: Path) -> None:
-        override_path = _tree_override_path(Path(manifest_path).resolve())
-        if not override_path.exists():
-            return
-        recorded = override_path.read_text().strip()
-        if not recorded:
-            return
-        candidate = Path(recorded).resolve()
-        if candidate.exists():
-            self.tree_path = candidate
+        shared_tree = _read_tree_override(manifest_path, discard_stale=False)
+        if shared_tree is not None:
+            self.tree_path = shared_tree
 
     @classmethod
     def load(cls, path: Path) -> SampleManifest:

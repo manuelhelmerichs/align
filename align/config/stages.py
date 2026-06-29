@@ -44,6 +44,7 @@ _VALID_DEGENERATE_HANDLING = frozenset(
 )
 _VALID_NORMALIZATION_METHODS = frozenset({"scale_normalize"})
 _VALID_TASK_TYPES = frozenset({"regression", "classification"})
+_VALID_ACTIVATIONS = frozenset({"relu", "leaky_relu"})
 
 
 def _validate_config_fields(
@@ -89,10 +90,18 @@ class NormalizationOptions:
         self.normalize_biases = _require_bool(
             "scale_normalize.normalize_biases", self.normalize_biases
         )
-        self.activation = str(self.activation).lower()
+        self.activation = _validate_choice(
+            "scale_normalize.activation",
+            str(self.activation).lower(),
+            _VALID_ACTIVATIONS,
+        )
         if not isinstance(self.activation_kwargs, Mapping):
             raise ValueError("scale_normalize.activation_kwargs must be a mapping.")
         self.activation_kwargs = dict(self.activation_kwargs)
+        if self.activation_kwargs:
+            raise ValueError(
+                "scale_normalize.activation_kwargs is currently unsupported."
+            )
         self.classification_head_rescale = _require_bool(
             "scale_normalize.classification_head_rescale",
             self.classification_head_rescale,
@@ -174,6 +183,16 @@ class NormalizeConfig:
         _validate_choice(
             "normalization method", self.method, _VALID_NORMALIZATION_METHODS
         )
+        if (
+            self.enabled
+            and self.method == "scale_normalize"
+            and self.task_type == "classification"
+            and self.scale_normalize.classification_head_rescale
+            and self.num_classes is None
+        ):
+            raise ValueError(
+                "num_classes must be specified when classification_head_rescale is enabled."
+            )
 
 
 @dataclass

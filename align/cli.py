@@ -15,9 +15,11 @@ import numpy as np
 from ._jax_platforms import configure_jax_platforms
 from .config import (
     AlignConfig,
-    ConfigValidator,
     load_align_config,
     resolve_adapter_defaults,
+    validate_method,
+    validate_paths,
+    validate_ref_sample,
 )
 from .config._utils import _parse_int_list
 from .logging_utils import configure_logging
@@ -145,9 +147,7 @@ def run(args: argparse.Namespace) -> None:
     _configure_platform_preferences(config)
 
     logger = configure_logging(config.runtime.verbosity)
-    validator = ConfigValidator(config)
-
-    validator.validate_paths()
+    validate_paths(config)
     exp_root = config.paths.experiment_root
     if exp_root is None:
         raise ValueError("experiment_root must be provided via CLI or config file.")
@@ -183,19 +183,9 @@ def run(args: argparse.Namespace) -> None:
         sample_format=sample_format,
         resume=config.runtime.resume,
     )
-    validator.validate_ref_sample(manifest)
+    validate_ref_sample(manifest, config.selection)
 
-    if config.normalize and config.normalize.enabled:
-        if (
-            config.normalize.method.lower() == "scale_normalize"
-            and config.normalize.task_type.lower() == "classification"
-            and config.normalize.scale_normalize.classification_head_rescale
-            and config.normalize.num_classes is None
-        ):
-            raise ValueError(
-                "num_classes must be specified when classification_head_rescale is enabled."
-            )
-    validator.validate_method()
+    validate_method(config)
 
     config_payload = config.as_dict()
     config_payload["resolved_paths"] = {

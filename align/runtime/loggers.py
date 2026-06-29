@@ -1,16 +1,14 @@
-"""Incremental artifact loggers used by runtime runners."""
+"""Incremental artifact logger used by runtime runners."""
 
 import json
 import time
-from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import jax.numpy as jnp
 
 from ..artifacts import (
-    write_aux_artifact,
     write_permutations_artifact,
     write_scale_factors_artifact,
 )
@@ -18,17 +16,36 @@ from ..samples import WeightSample, create_sample_codec
 from ..state import ArtifactChecksumStore, SampleManifest, SampleRecord, _file_checksum
 from .common import _STATE_SAVE_INTERVAL_SECONDS
 
+_NORMALIZE_STATIC_KEYS = frozenset(
+    {
+        "task_type",
+        "epsilon",
+        "degenerate_handling",
+        "normalize_biases",
+        "activation",
+        "classification_head_rescale",
+        "num_classes",
+    }
+)
+_NORMALIZE_PER_SAMPLE_KEYS = frozenset({"last_layer_gamma"})
+_REBASIN_STATIC_KEYS = frozenset({"objective", "schedule"})
+_REBASIN_PER_SAMPLE_KEYS = frozenset({"reference"})
 
-class IncrementalArtifactLogger(ABC):
-    """Shared checksum and artifact helpers for pipeline loggers."""
+
+class AlignLogger:
+    """Logger for the align pipeline.
+
+    Owns the final/intermediate/permutation/scale-factor layout, checksum
+    bookkeeping, scratch commits, and summary/aux files.
+    """
 
     def __init__(
         self,
         manifest: SampleManifest,
         output_dir: Path,
         *,
-        checksum_kinds: Sequence[str],
-        primary_kind: str = "final",
+        stages: list[str],
+        save_intermediate: bool = False,
     ) -> None:
         self.manifest = manifest
         self.output_dir = Path(output_dir)
@@ -41,16 +58,50 @@ class IncrementalArtifactLogger(ABC):
         )
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.aux_dir.mkdir(parents=True, exist_ok=True)
+
+        self.stages = list(stages)
+        self.save_intermediate = bool(save_intermediate) and len(self.stages) > 1
+        self._static_config: dict[str, dict[str, Any]] = {}
+
+        checksum_kinds = ["final"]
+        if "rebasin" in self.stages:
+            checksum_kinds.append("permutations")
+        if "normalize" in self.stages:
+            checksum_kinds.append("scale_factors")
+        if self.save_intermediate:
+            checksum_kinds.append("intermediate")
+
         self._checksums = ArtifactChecksumStore(
             self.state_dir / "artifact_checksums.npy",
             self.manifest.total,
             kinds=tuple(checksum_kinds),
         )
-        self.primary_kind = primary_kind
+        self.primary_kind = "final"
         self._last_flush = time.time()
         self._flush_interval = _STATE_SAVE_INTERVAL_SECONDS
         self._tree_copied = False
-        self.primary_dir: Path | None = None
+
+        self.final_dir = self.output_dir / "final"
+        self.permutations_dir = (
+            self.output_dir / "permutations" if "rebasin" in self.stages else None
+        )
+        self.scale_factors_dir = (
+            self.output_dir / "scale_factors" if "normalize" in self.stages else None
+        )
+        self.intermediate_dir = (
+            self.output_dir / "intermediate" if self.save_intermediate else None
+        )
+
+        self.final_dir.mkdir(parents=True, exist_ok=True)
+        if self.permutations_dir:
+            self.permutations_dir.mkdir(parents=True, exist_ok=True)
+        if self.scale_factors_dir:
+            self.scale_factors_dir.mkdir(parents=True, exist_ok=True)
+        if self.intermediate_dir:
+            self.intermediate_dir.mkdir(parents=True, exist_ok=True)
+
+        self.primary_dir = self.final_dir
+        self._intermediate_tree_copied = False
 
     @staticmethod
     def _relative_sample_path(record: SampleRecord) -> Path:
@@ -59,12 +110,6 @@ class IncrementalArtifactLogger(ABC):
     def _aux_path_for(self, record: SampleRecord) -> Path:
         rel = self._relative_sample_path(record)
         return self.aux_dir / rel.with_suffix(".json")
-
-    def write_auxiliary(
-        self, record: SampleRecord, data: Mapping[str, Any] | None
-    ) -> None:
-        path = self._aux_path_for(record)
-        write_aux_artifact(path, data)
 
     def _copy_tree_once(self, target_dir: Path) -> None:
         if self._tree_copied:
@@ -97,12 +142,21 @@ class IncrementalArtifactLogger(ABC):
 
     @property
     def optional_artifacts(self) -> set[str]:
-        """Kinds allowed to be missing (checksum=0)."""
-        return set()
+        optional = {"permutations", "scale_factors"}
+        if self.save_intermediate:
+            optional.add("intermediate")
+        return optional
 
-    @abstractmethod
     def artifact_paths(self, record: SampleRecord) -> Mapping[str, Path]:
-        """Return artifact destinations for ``record`` keyed by checksum kind."""
+        rel = self._relative_sample_path(record)
+        paths: dict[str, Path] = {"final": self.final_dir / rel}
+        if self.permutations_dir is not None:
+            paths["permutations"] = self.permutations_dir / rel
+        if self.scale_factors_dir is not None:
+            paths["scale_factors"] = self.scale_factors_dir / rel
+        if self.intermediate_dir is not None:
+            paths["intermediate"] = self.intermediate_dir / rel
+        return paths
 
     def commit_from_scratch(
         self,
@@ -112,6 +166,7 @@ class IncrementalArtifactLogger(ABC):
         checksums: Mapping[str, int] | None = None,
     ) -> None:
         """Move scratch artifacts into place and update checksums."""
+
         for kind, dest in self.artifact_paths(record).items():
             src_key = f"{kind}_path"
             src_path = artifacts.get(src_key)
@@ -179,105 +234,6 @@ class IncrementalArtifactLogger(ABC):
                 return False
         return True
 
-    @abstractmethod
-    def write_sample(self, record: SampleRecord, sample: WeightSample) -> None:
-        """Persist the primary artifact for ``record``."""
-
-    @abstractmethod
-    def finalize(self, **kwargs: Any) -> None:
-        """Persist summary metadata."""
-
-
-_NORMALIZE_STATIC_KEYS = frozenset(
-    {
-        "task_type",
-        "epsilon",
-        "degenerate_handling",
-        "normalize_biases",
-        "activation",
-        "classification_head_rescale",
-        "num_classes",
-    }
-)
-_NORMALIZE_PER_SAMPLE_KEYS = frozenset({"last_layer_gamma"})
-_REBASIN_STATIC_KEYS = frozenset({"objective", "schedule"})
-_REBASIN_PER_SAMPLE_KEYS = frozenset({"reference"})
-
-
-class AlignLogger(IncrementalArtifactLogger):
-    """Logger for the align pipeline.
-
-    Extends IncrementalArtifactLogger with support for multi-stage pipelines,
-    intermediate artifacts, and stage-specific outputs (permutations, scale factors).
-    """
-
-    def __init__(
-        self,
-        manifest: SampleManifest,
-        output_dir: Path,
-        *,
-        stages: list[str],
-        save_intermediate: bool = False,
-    ) -> None:
-        self.stages = list(stages)
-        self.save_intermediate = bool(save_intermediate) and len(self.stages) > 1
-        self._static_config: dict[str, dict[str, Any]] = {}
-
-        checksum_kinds = ["final"]
-        if "rebasin" in self.stages:
-            checksum_kinds.append("permutations")
-        if "normalize" in self.stages:
-            checksum_kinds.append("scale_factors")
-        if self.save_intermediate:
-            checksum_kinds.append("intermediate")
-
-        super().__init__(
-            manifest,
-            output_dir,
-            checksum_kinds=checksum_kinds,
-            primary_kind="final",
-        )
-
-        self.final_dir = self.output_dir / "final"
-        self.permutations_dir = (
-            self.output_dir / "permutations" if "rebasin" in self.stages else None
-        )
-        self.scale_factors_dir = (
-            self.output_dir / "scale_factors" if "normalize" in self.stages else None
-        )
-        self.intermediate_dir = (
-            self.output_dir / "intermediate" if self.save_intermediate else None
-        )
-
-        self.final_dir.mkdir(parents=True, exist_ok=True)
-        if self.permutations_dir:
-            self.permutations_dir.mkdir(parents=True, exist_ok=True)
-        if self.scale_factors_dir:
-            self.scale_factors_dir.mkdir(parents=True, exist_ok=True)
-        if self.intermediate_dir:
-            self.intermediate_dir.mkdir(parents=True, exist_ok=True)
-
-        self.primary_dir = self.final_dir
-        self._intermediate_tree_copied = False
-
-    @property
-    def optional_artifacts(self) -> set[str]:
-        optional = {"permutations", "scale_factors"}
-        if self.save_intermediate:
-            optional.add("intermediate")
-        return optional
-
-    def artifact_paths(self, record: SampleRecord) -> Mapping[str, Path]:
-        rel = self._relative_sample_path(record)
-        paths: dict[str, Path] = {"final": self.final_dir / rel}
-        if self.permutations_dir is not None:
-            paths["permutations"] = self.permutations_dir / rel
-        if self.scale_factors_dir is not None:
-            paths["scale_factors"] = self.scale_factors_dir / rel
-        if self.intermediate_dir is not None:
-            paths["intermediate"] = self.intermediate_dir / rel
-        return paths
-
     def write_sample(self, record: SampleRecord, sample: WeightSample) -> None:
         path = self.artifact_paths(record)["final"]
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -335,9 +291,10 @@ class AlignLogger(IncrementalArtifactLogger):
     def write_aux(self, record: SampleRecord, payload: Mapping[str, Any]) -> None:
         """Write auxiliary data, merging with existing aux if present.
 
-        Static config keys are extracted and stored once in the summary.
-        Only per-sample varying data is stored in individual aux files.
+        Static config keys are extracted and stored once in the summary. Only
+        per-sample varying data is stored in individual aux files.
         """
+
         if not payload:
             return
 
@@ -413,7 +370,4 @@ class AlignLogger(IncrementalArtifactLogger):
         )
 
 
-__all__ = [
-    "IncrementalArtifactLogger",
-    "AlignLogger",
-]
+__all__ = ["AlignLogger"]

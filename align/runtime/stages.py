@@ -11,7 +11,6 @@ import jax
 from ..architectures import get_adapter
 from ..config.stages import NormalizeConfig, RebasinConfig
 from ..rebasin import (
-    SolverScheduleStep,
     build_scheduler,
     rebasin_batch,
     rebasin_single_sample,
@@ -177,14 +176,10 @@ class RebasinExecutor(StageExecutor):
         self.adapter = get_adapter(self.architecture, **adapter_kwargs)
         self.problem = self.adapter.build_problem(ref_sample.params)
         self.ref_sample = ref_sample
-        schedule = tuple(
-            SolverScheduleStep.from_mapping(step.to_dict())
-            for step in self.config.schedule
-        )
         self.scheduler = build_scheduler(
             objective=self.config.objective,
             objective_kwargs=self.config.objective_kwargs,
-            schedule=schedule,
+            schedule=self.config.schedule,
         )
         backend = self.scheduler.backend
         self.ref_backend = backend

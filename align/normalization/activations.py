@@ -1,92 +1,32 @@
-"""Activation normalizer registry for scale normalization.
-
-This module provides activation-specific norm computation for scale normalization.
-Each normalizer computes per-neuron norms based on the activation function's
-properties (e.g., positive homogeneity for ReLU/LeakyReLU).
-
-Usage::
-
-    from align.normalization import get_activation_normalizer
-
-    normalizer = get_activation_normalizer("relu")
-    norms = normalizer.compute_norms(layer, epsilon=1e-8, normalize_biases=True)
-"""
+"""Activation validation for positive-homogeneous scale normalization."""
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
+from typing import Any
 
-import jax.numpy as jnp
-
-if TYPE_CHECKING:  # pragma: no cover
-    from .dense_layers import DenseLayer
-
-
-class ActivationNormalizer(ABC):
-    name: str
-
-    @abstractmethod
-    def compute_norms(
-        self, layer: DenseLayer, epsilon: float, normalize_biases: bool
-    ) -> jnp.ndarray: ...
+SUPPORTED_ACTIVATIONS = {
+    "relu": "positive_homogeneous",
+    "leaky_relu": "positive_homogeneous",
+}
 
 
-_NORMALIZERS: dict[str, type[ActivationNormalizer]] = {}
+def validate_activation(
+    name: str,
+    activation_kwargs: Mapping[str, Any] | None = None,
+) -> str:
+    """Validate and normalize an activation name for scale normalization."""
 
-
-def register_activation_normalizer(name: str):
-    def decorator(cls: type[ActivationNormalizer]) -> type[ActivationNormalizer]:
-        _NORMALIZERS[name] = cls
-        return cls
-
-    return decorator
-
-
-def get_activation_normalizer(name: str, **kwargs) -> ActivationNormalizer:
-    key = name.lower()
-    if key not in _NORMALIZERS:
+    key = str(name).lower()
+    if key not in SUPPORTED_ACTIVATIONS:
+        available = ", ".join(sorted(SUPPORTED_ACTIVATIONS))
+        raise ValueError(f"Unknown activation '{name}'. Available: {available}")
+    if activation_kwargs:
         raise ValueError(
-            f"Unknown activation normalizer '{name}'. Available: {list(_NORMALIZERS)}"
+            "scale_normalize.activation_kwargs is currently unsupported; "
+            f"{key} uses the shared positive-homogeneous norm formula."
         )
-    return _NORMALIZERS[key](**kwargs)
+    return key
 
 
-@register_activation_normalizer("relu")
-class ReLUNormalizer(ActivationNormalizer):
-    name = "relu"
-
-    def compute_norms(
-        self, layer: DenseLayer, epsilon: float, normalize_biases: bool
-    ) -> jnp.ndarray:
-        from .kernel import compute_incoming_norms
-
-        return compute_incoming_norms(
-            layer, epsilon=epsilon, normalize_biases=normalize_biases
-        )
-
-
-@register_activation_normalizer("leaky_relu")
-class LeakyReLUNormalizer(ActivationNormalizer):
-    name = "leaky_relu"
-
-    def __init__(self, negative_slope: float = 0.01) -> None:
-        self.negative_slope = negative_slope
-
-    def compute_norms(
-        self, layer: DenseLayer, epsilon: float, normalize_biases: bool
-    ) -> jnp.ndarray:
-        from .kernel import compute_incoming_norms
-
-        return compute_incoming_norms(
-            layer, epsilon=epsilon, normalize_biases=normalize_biases
-        )
-
-
-__all__ = [
-    "ActivationNormalizer",
-    "get_activation_normalizer",
-    "register_activation_normalizer",
-    "ReLUNormalizer",
-    "LeakyReLUNormalizer",
-]
+__all__ = ["SUPPORTED_ACTIVATIONS", "validate_activation"]

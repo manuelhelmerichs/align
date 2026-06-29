@@ -13,9 +13,9 @@ Configuration is split across submodules for maintainability:
 from ..options import RebasinScheduleStep
 from .loader import (
     AlignConfig,
-    ConfigValidator,
     load_align_config,
     resolve_adapter_defaults,
+    validate_method,
     validate_paths,
     validate_ref_sample,
 )
@@ -33,9 +33,9 @@ __all__ = [
     "RebasinConfig",
     "RuntimeConfig",
     "AlignConfig",
-    "ConfigValidator",
     "load_align_config",
     "resolve_adapter_defaults",
+    "validate_method",
     "validate_paths",
     "validate_ref_sample",
 ]

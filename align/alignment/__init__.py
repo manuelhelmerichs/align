@@ -13,10 +13,9 @@ from .problem import (
     GraphConstraint,
     PermutationGroup,
     TensorSpec,
-    binding_axis_interval,
     materialize_many,
 )
-from .tensor_ops import apply_perm_to_axis
+from .tensor_ops import apply_perm_to_axis, axis_slice, binding_axis_interval
 
 __all__ = [
     "AlignmentProblem",
@@ -25,6 +24,7 @@ __all__ = [
     "PermutationGroup",
     "TensorSpec",
     "apply_perm_to_axis",
+    "axis_slice",
     "binding_axis_interval",
     "materialize_many",
 ]

@@ -7,7 +7,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from .activations import get_activation_normalizer
+from .activations import validate_activation
 from .dense_layers import DenseLayer
 
 _VALID_DEGENERATE_HANDLING = frozenset(
@@ -71,12 +71,6 @@ def _normalize_hidden_layer_jit(
         )
 
     return normalized_kernel, normalized_bias
-
-
-@jax.jit
-def _scale_outgoing_jit(kernel: jax.Array, scale: jax.Array) -> jax.Array:
-    """JIT-compiled outgoing weight scaling."""
-    return kernel * scale[:, None]
 
 
 @functools.partial(jax.jit, static_argnums=(2, 3))
@@ -146,15 +140,6 @@ def normalize_hidden_layer(
     return DenseLayer(kernel=kernel, bias=bias)
 
 
-def scale_outgoing_weights(layer: DenseLayer, scale: jnp.ndarray) -> DenseLayer:
-    """Scale outgoing weights (rows) by the provided factors.
-
-    Uses JIT-compiled implementation for performance.
-    """
-    scaled_kernel = _scale_outgoing_jit(layer.kernel, scale)
-    return DenseLayer(kernel=scaled_kernel, bias=layer.bias)
-
-
 def normalize_last_layer_classification(
     layer: DenseLayer, num_classes: int, epsilon: float = 1e-8
 ) -> tuple[DenseLayer, float]:
@@ -198,7 +183,7 @@ def normalize_layers(
             "num_classes required when classification_head_rescale is enabled"
         )
 
-    normalizer = get_activation_normalizer(activation, **(activation_kwargs or {}))
+    activation = validate_activation(activation, activation_kwargs)
 
     normalized_layers: list[DenseLayer] = []
     scale_factors: list[jnp.ndarray] = []
@@ -213,7 +198,7 @@ def normalize_layers(
 
         if idx < len(layers) - 1:
             working = DenseLayer(kernel=kernel, bias=bias)
-            norms = normalizer.compute_norms(
+            norms = compute_incoming_norms(
                 working, epsilon=epsilon, normalize_biases=normalize_biases
             )
             raw_norm_sq = jnp.sum(working.kernel**2, axis=0)
@@ -257,199 +242,7 @@ def normalize_layers(
     return normalized_layers, scale_factors, aux
 
 
-@functools.partial(jax.jit, static_argnums=(2, 3, 4))
-def _batch_normalize_hidden_layer_jit(
-    kernels: jax.Array,  # (batch, in_dim, out_dim)
-    biases: jax.Array,  # (batch, out_dim)
-    degenerate_handling: str,
-    epsilon: float,
-    normalize_biases: bool,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """JIT-compiled batched hidden layer normalization using vmap.
-
-    Returns: (normalized_kernels, normalized_biases, scale_factors)
-    """
-    kernel_sq = jnp.sum(kernels**2, axis=1)
-    bias_sq = biases**2 if normalize_biases else jnp.zeros_like(biases)
-    raw_norm_sq = kernel_sq + bias_sq
-    norms = jnp.sqrt(raw_norm_sq + epsilon)
-
-    degenerate_mask = raw_norm_sq <= epsilon
-    safe_norms = jnp.where(degenerate_mask, 1.0, norms)
-
-    # Normalize: kernel / norms[None, :] -> (batch, in_dim, out_dim) / (batch, 1, out_dim)
-    normalized_kernels = kernels / safe_norms[:, None, :]
-    normalized_biases = biases / safe_norms
-
-    if degenerate_handling == "canonical_vector":
-        canonical = jnp.zeros_like(normalized_kernels)
-        mask_values = jnp.where(degenerate_mask, 1.0, 0.0)
-        canonical = canonical.at[:, 0, :].set(mask_values)
-        normalized_kernels = jnp.where(
-            degenerate_mask[:, None, :], canonical, normalized_kernels
-        )
-        normalized_biases = jnp.where(
-            degenerate_mask, jnp.zeros_like(normalized_biases), normalized_biases
-        )
-
-    return normalized_kernels, normalized_biases, norms
-
-
-def batch_normalize_layers(
-    layers_batch: Sequence[Sequence[DenseLayer]],
-    *,
-    task_type: str = "regression",
-    num_classes: int | None = None,
-    epsilon: float = 1e-8,
-    degenerate_handling: str = "preserve",
-    normalize_biases: bool = True,
-    activation: str = "relu",
-    activation_kwargs: dict[str, Any] | None = None,
-    classification_head_rescale: bool = False,
-) -> tuple[list[list[DenseLayer]], list[list[jnp.ndarray]], list[dict[str, Any]]]:
-    """Apply scale normalization to a batch of layer sequences using vmap.
-
-    Args:
-        layers_batch: Sequence of layer sequences, each sample has the same architecture.
-        task_type: "regression" or "classification"
-        num_classes: Required only when classification_head_rescale is enabled.
-        epsilon: Small constant for numerical stability.
-        degenerate_handling: How to handle degenerate neurons.
-        normalize_biases: Whether to include biases in norm computation.
-        activation: Activation function name.
-        activation_kwargs: Additional activation kwargs.
-        classification_head_rescale: Whether to apply the non-symmetric final-layer
-            rescaling heuristic for classification.
-
-    Returns:
-        Tuple of (normalized_layers_batch, scale_factors_batch, aux_batch)
-    """
-    if not layers_batch:
-        return [], [], []
-
-    batch_size = len(layers_batch)
-    num_layers = len(layers_batch[0])
-
-    if num_layers < 2:
-        raise ValueError("Need at least 2 layers (1 hidden + 1 output)")
-    degenerate_handling = _validate_degenerate_handling(degenerate_handling)
-    normalize_biases = _require_bool("normalize_biases", normalize_biases)
-    classification_head_rescale = _require_bool(
-        "classification_head_rescale", classification_head_rescale
-    )
-
-    task = (task_type or "regression").lower()
-    if task not in ("regression", "classification"):
-        raise ValueError("task_type must be 'regression' or 'classification'")
-    if task == "classification" and classification_head_rescale and num_classes is None:
-        raise ValueError(
-            "num_classes required when classification_head_rescale is enabled"
-        )
-
-    stacked_kernels = [
-        jnp.stack(
-            [layers_batch[b][layer_idx].kernel for b in range(batch_size)], axis=0
-        )
-        for layer_idx in range(num_layers)
-    ]
-    stacked_biases = [
-        jnp.stack([layers_batch[b][layer_idx].bias for b in range(batch_size)], axis=0)
-        for layer_idx in range(num_layers)
-    ]
-
-    normalized_kernels = [None] * num_layers
-    normalized_biases = [None] * num_layers
-    scale_factors_stacked = []
-
-    for layer_idx in range(num_layers - 1):
-        kernels = stacked_kernels[layer_idx]
-        biases = stacked_biases[layer_idx]
-
-        if layer_idx > 0:
-            outgoing = scale_factors_stacked[layer_idx - 1]
-            raw_outgoing_sq = jnp.square(outgoing) - epsilon
-            if degenerate_handling in ("zero_outgoing", "canonical_vector"):
-                degenerate_mask = raw_outgoing_sq <= epsilon
-                outgoing = jnp.where(degenerate_mask, 0.0, outgoing)
-            else:
-                degenerate_mask = raw_outgoing_sq <= epsilon
-                outgoing = jnp.where(degenerate_mask, 1.0, outgoing)
-            # Scale: (batch, in_dim, out_dim) * (batch, in_dim, 1)
-            kernels = kernels * outgoing[:, :, None]
-
-        norm_k, norm_b, norms = _batch_normalize_hidden_layer_jit(
-            kernels, biases, degenerate_handling, epsilon, normalize_biases
-        )
-        normalized_kernels[layer_idx] = norm_k
-        normalized_biases[layer_idx] = norm_b
-        scale_factors_stacked.append(norms)
-
-    last_kernels = stacked_kernels[-1]
-    if num_layers > 1:
-        outgoing = scale_factors_stacked[-1]
-        raw_outgoing_sq = jnp.square(outgoing) - epsilon
-        if degenerate_handling in ("zero_outgoing", "canonical_vector"):
-            degenerate_mask = raw_outgoing_sq <= epsilon
-            outgoing = jnp.where(degenerate_mask, 0.0, outgoing)
-        else:
-            degenerate_mask = raw_outgoing_sq <= epsilon
-            outgoing = jnp.where(degenerate_mask, 1.0, outgoing)
-        last_kernels = last_kernels * outgoing[:, :, None]
-
-    normalized_kernels[-1] = last_kernels
-    normalized_biases[-1] = stacked_biases[-1]
-
-    aux_template: dict[str, Any] = {
-        "task_type": task,
-        "epsilon": epsilon,
-        "degenerate_handling": degenerate_handling,
-        "normalize_biases": normalize_biases,
-        "activation": activation,
-        "classification_head_rescale": classification_head_rescale,
-    }
-
-    gammas = None
-    if task == "classification" and classification_head_rescale:
-        last_k = normalized_kernels[-1]
-        last_b = normalized_biases[-1]
-        gamma_sq = (
-            jnp.sum(last_k**2, axis=(1, 2)) + jnp.sum(last_b**2, axis=1) + epsilon
-        )
-        gammas = jnp.sqrt(gamma_sq)
-        scale = jnp.sqrt(num_classes) / gammas
-        normalized_kernels[-1] = last_k * scale[:, None, None]
-        normalized_biases[-1] = last_b * scale[:, None]
-
-    normalized_batch: list[list[DenseLayer]] = []
-    scale_batch: list[list[jnp.ndarray]] = []
-    aux_batch: list[dict[str, Any]] = []
-
-    for b in range(batch_size):
-        sample_layers = [
-            DenseLayer(
-                kernel=normalized_kernels[layer_idx][b],
-                bias=normalized_biases[layer_idx][b],
-            )
-            for layer_idx in range(num_layers)
-        ]
-        sample_scales = [sf[b] for sf in scale_factors_stacked]
-        sample_aux = dict(aux_template)
-        if task == "classification" and gammas is not None:
-            sample_aux["last_layer_gamma"] = float(gammas[b])
-            sample_aux["num_classes"] = int(num_classes)
-
-        normalized_batch.append(sample_layers)
-        scale_batch.append(sample_scales)
-        aux_batch.append(sample_aux)
-
-    return normalized_batch, scale_batch, aux_batch
-
-
 __all__ = [
     "compute_incoming_norms",
-    "normalize_hidden_layer",
-    "scale_outgoing_weights",
-    "normalize_last_layer_classification",
     "normalize_layers",
-    "batch_normalize_layers",
 ]

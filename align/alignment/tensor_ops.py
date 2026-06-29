@@ -6,7 +6,7 @@ adapters that emit it.
 """
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
@@ -55,41 +55,48 @@ def _canonical_axis(ndim: int, axis: int) -> int:
     return axis
 
 
-def _perm_indices(
-    perm: Any, *, direction: Literal["left", "right"]
-):  # pragma: no cover - small helper
-    xp = _array_backend(perm)
-    perm_arr = xp.asarray(perm)
-    # Accept either an index vector (already a permutation) or a permutation matrix.
-    #
-    # NOTE: All permutation application in this codebase is done via indexing
-    # ("take" along an axis). For that usage, the same index order should be
-    # applied regardless of whether the rule is tagged "left" or "right".
-    #
-    # For a permutation matrix P with P[i, j] = 1 meaning "new[i] = old[j]",
-    # the corresponding indices are argmax over axis=1.
-    if perm_arr.ndim == 1:
-        return perm_arr.astype(int)
-    if perm_arr.ndim != 2:
+def binding_axis_interval(shape: Sequence[int], binding: Any) -> tuple[int, int, int]:
+    """Return canonical ``(axis, start, stop)`` for a tensor-axis binding."""
+
+    axis = _canonical_axis(len(shape), binding.axis)
+    axis_size = int(shape[axis])
+    start = 0 if binding.start is None else int(binding.start)
+    stop = axis_size if binding.stop is None else int(binding.stop)
+    if start < 0:
+        start += axis_size
+    if stop < 0:
+        stop += axis_size
+    if start < 0 or stop > axis_size or start >= stop:
         raise ValueError(
-            f"Expected permutation as 1D indices or 2D matrix, got ndim={perm_arr.ndim}."
+            f"Axis binding for tensor {binding.tensor_id!r} uses invalid interval "
+            f"[{binding.start}, {binding.stop}) on axis size {axis_size}."
         )
-    return xp.argmax(perm_arr, axis=1)
+    return axis, start, stop
 
 
-def apply_perm_to_axis(
-    tensor: Any, perm: Any, *, axis: int, direction: Literal["left", "right"]
-):
+def axis_slice(ndim: int, axis: int, start: int, stop: int) -> tuple[slice, ...]:
+    """Return an index tuple selecting ``[start, stop)`` along one axis."""
+
+    indexer = [slice(None)] * ndim
+    indexer[axis] = slice(start, stop)
+    return tuple(indexer)
+
+
+def apply_perm_to_axis(tensor: Any, perm: Any, *, axis: int):
     """Apply a permutation (matrix or indices) to ``tensor`` along ``axis``."""
     xp = _array_backend(tensor)
     perm_arr = xp.asarray(perm)
     if perm_arr.ndim == 1:
         indices = perm_arr.astype(int)
+    elif perm_arr.ndim == 2:
+        indices = xp.argmax(perm_arr, axis=1)
     else:
-        indices = _perm_indices(perm_arr, direction=direction)
+        raise ValueError(
+            f"Expected permutation as 1D indices or 2D matrix, got ndim={perm_arr.ndim}."
+        )
     moved = xp.moveaxis(tensor, axis, 0)
     permuted = moved[indices]
     return xp.moveaxis(permuted, 0, axis)
 
 
-__all__ = ["apply_perm_to_axis"]
+__all__ = ["apply_perm_to_axis", "axis_slice", "binding_axis_interval"]

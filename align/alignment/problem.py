@@ -16,6 +16,8 @@ from .tensor_ops import (
     _descend,
     _set_path,
     apply_perm_to_axis,
+    axis_slice,
+    binding_axis_interval,
 )
 
 
@@ -69,33 +71,6 @@ class GraphConstraint:
 
 def _array_namespace(backend: Literal["jax", "numpy"]):
     return jnp if backend == "jax" else np
-
-
-def binding_axis_interval(
-    shape: Sequence[int], binding: AxisBinding
-) -> tuple[int, int, int]:
-    """Return canonical ``(axis, start, stop)`` for a tensor-axis binding."""
-
-    axis = _canonical_axis(len(shape), binding.axis)
-    axis_size = int(shape[axis])
-    start = 0 if binding.start is None else int(binding.start)
-    stop = axis_size if binding.stop is None else int(binding.stop)
-    if start < 0:
-        start += axis_size
-    if stop < 0:
-        stop += axis_size
-    if start < 0 or stop > axis_size or start >= stop:
-        raise ValueError(
-            f"Axis binding for tensor {binding.tensor_id!r} uses invalid interval "
-            f"[{binding.start}, {binding.stop}) on axis size {axis_size}."
-        )
-    return axis, start, stop
-
-
-def _axis_slice(ndim: int, axis: int, start: int, stop: int) -> tuple[slice, ...]:
-    indexer = [slice(None)] * ndim
-    indexer[axis] = slice(start, stop)
-    return tuple(indexer)
 
 
 def _set_axis_slice(tensor: Any, indexer: tuple[slice, ...], value: Any):
@@ -359,7 +334,7 @@ class AlignmentProblem:
                 if start == 0 and stop == int(tensor.shape[axis]):
                     updated = transform(updated, axis, binding)
                     continue
-                indexer = _axis_slice(np.ndim(updated), axis, start, stop)
+                indexer = axis_slice(np.ndim(updated), axis, start, stop)
                 segment = updated[indexer]
                 transformed = transform(segment, axis, binding)
                 updated = _set_axis_slice(updated, indexer, transformed)
@@ -376,7 +351,6 @@ class AlignmentProblem:
                 segment,
                 state.hard[binding.group],
                 axis=axis,
-                direction="left",
             )
 
         return self._transform_bound_tensors(params, _permute)

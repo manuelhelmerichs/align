@@ -56,13 +56,6 @@ class ScaleState:
         state.scales.update(dict(scales))
         return state
 
-    def copy(self) -> ScaleState:
-        return ScaleState(
-            group_order=tuple(self.group_order),
-            scales=dict(self.scales),
-            metadata=dict(self.metadata),
-        )
-
     def validate(self, problem) -> None:
         """Validate group coverage, vector shapes, and positivity."""
 

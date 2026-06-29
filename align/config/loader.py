@@ -178,42 +178,32 @@ def validate_ref_sample(manifest: SampleManifest, selection: SelectionConfig) ->
         )
 
 
-class ConfigValidator:
-    """Centralized validator for align configuration."""
+def validate_method(config: AlignConfig) -> None:
+    """Validate configured stage methods and architecture compatibility."""
 
-    def __init__(self, config: AlignConfig) -> None:
-        self.config = config
-
-    def validate_paths(self) -> None:
-        validate_paths(self.config)
-
-    def validate_ref_sample(self, manifest: SampleManifest) -> None:
-        validate_ref_sample(manifest, self.config.selection)
-
-    def validate_method(self) -> None:
-        if self.config.rebasin is not None:
-            self.config.rebasin.validate_method()
-        if self.config.normalize is not None:
-            self.config.normalize.validate_method()
-            if self.config.normalize.enabled and self.config.architecture == "resnet":
-                raise ValueError(
-                    "Normalization is not supported for architecture 'resnet'. "
-                    "Disable normalize or use architecture 'dense_mlp'."
-                )
-        from ..architectures import available_adapters
-
-        if self.config.architecture not in available_adapters():
+    if config.rebasin is not None:
+        config.rebasin.validate_method()
+    if config.normalize is not None:
+        config.normalize.validate_method()
+        if config.normalize.enabled and config.architecture == "resnet":
             raise ValueError(
-                f"Unknown architecture '{self.config.architecture}'. "
-                f"Available: {', '.join(available_adapters())}"
+                "Normalization is not supported for architecture 'resnet'. "
+                "Disable normalize or use architecture 'dense_mlp'."
             )
+    from ..architectures import available_adapters
+
+    if config.architecture not in available_adapters():
+        raise ValueError(
+            f"Unknown architecture '{config.architecture}'. "
+            f"Available: {', '.join(available_adapters())}"
+        )
 
 
 __all__ = [
     "AlignConfig",
-    "ConfigValidator",
     "load_align_config",
     "resolve_adapter_defaults",
+    "validate_method",
     "validate_paths",
     "validate_ref_sample",
 ]

@@ -7,7 +7,6 @@ import queue
 import shutil
 import threading
 import traceback
-from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +16,7 @@ from ..artifacts import (
     write_scale_factors_artifact,
 )
 from ..state import SampleManifest, SampleRecord, _file_checksum
+from .pipeline import PipelineOutput, StagePipeline
 
 if TYPE_CHECKING:
     from ..samples import WeightSample, WeightSampleCodec
@@ -95,6 +95,23 @@ class _ArtifactWriter:
         return artifacts, checksums
 
 
+class _WorkerPipelineSink:
+    """Emit completed pipeline outputs as worker commit messages."""
+
+    def __init__(self, worker: _WorkerLoop) -> None:
+        self.worker = worker
+
+    def write(self, output: PipelineOutput) -> None:
+        self.worker._emit_commit(
+            output.record,
+            output.sample,
+            permutations=output.permutations,
+            scale_factors=output.scale_factors,
+            aux=output.aux,
+            intermediate_sample=output.intermediate_sample,
+        )
+
+
 class _WorkerLoop:
     def __init__(
         self,
@@ -117,6 +134,10 @@ class _WorkerLoop:
         self.stages = stages
         self.save_intermediate = bool(save_intermediate)
         self.per_device_batch = max(1, int(per_device_batch))
+        self._pipeline = StagePipeline(
+            self.stages,
+            save_intermediate=self.save_intermediate,
+        )
 
         from ..samples import create_sample_codec
 
@@ -176,118 +197,22 @@ class _WorkerLoop:
     def _handle_records(self, records: list[SampleRecord]) -> None:
         if not records:
             return
-        pending = deque(records)
-        self._set_active_sample(pending[0].index if pending else None)
+        self._set_active_sample(records[0].index)
         try:
-            if self._can_batch_rebasin():
-                self._process_batched(records)
-            else:
-                self._process_sequential(records)
+            batch_size = (
+                self.per_device_batch
+                if self._pipeline.can_batch_rebasin(self.per_device_batch)
+                else 1
+            )
+            self._pipeline.run_records(
+                records,
+                self.loader,
+                _WorkerPipelineSink(self),
+                batch_size=batch_size,
+                on_record_start=lambda record: self._set_active_sample(record.index),
+            )
         finally:
             self._set_active_sample(None)
-
-    def _can_batch_rebasin(self) -> bool:
-        if not self.stages or self.stages[-1][0] != "rebasin":
-            return False
-        executor = self.stages[-1][1]
-        return executor.supports_batching and self.per_device_batch > 1
-
-    def _process_sequential(self, records: list[SampleRecord]) -> None:
-        for record in records:
-            self._set_active_sample(record.index)
-            sample = self.loader.load(record)
-            aux_payload: dict[str, Any] = {}
-            intermediate_sample = None
-            permutations = None
-            scale_factors = None
-
-            for idx, (name, executor) in enumerate(self.stages):
-                last_stage = idx == len(self.stages) - 1
-                result = executor.process_single(record, sample)
-                sample = result.sample
-                if result.aux:
-                    aux_payload[name] = result.aux
-                if name == "normalize":
-                    scale_factors = result.artifacts.get("scale_factors")
-                if name == "rebasin":
-                    permutations = result.artifacts.get("permutations")
-                if self.save_intermediate and not last_stage:
-                    intermediate_sample = sample
-
-            self._emit_commit(
-                record,
-                sample,
-                permutations=permutations,
-                scale_factors=scale_factors,
-                aux=aux_payload,
-                intermediate_sample=intermediate_sample,
-            )
-
-    def _process_batched(self, records: list[SampleRecord]) -> None:
-        from .loaders import (
-            PrefetchingLoader,
-        )  # Imported lazily to respect device visibility
-
-        rebasin_executor = self.stages[-1][1]
-        batch_size = self.per_device_batch
-        prefetch_loader = PrefetchingLoader(self.loader, prefetch_count=batch_size)
-
-        for batch_start in range(0, len(records), batch_size):
-            batch_records = records[batch_start : batch_start + batch_size]
-            next_start = batch_start + batch_size
-            if next_start < len(records):
-                prefetch_loader.prefetch(records[next_start : next_start + batch_size])
-
-            sample_batch = []
-            meta: list[dict[str, Any]] = []
-            for record in batch_records:
-                self._set_active_sample(record.index)
-                sample = prefetch_loader.get(record)
-                current = sample
-                aux_payload: dict[str, Any] = {}
-                scale_factors = None
-                intermediate_sample = None
-
-                for idx, (name, executor) in enumerate(self.stages):
-                    last_stage = idx == len(self.stages) - 1
-                    if name == "rebasin" and last_stage:
-                        break
-                    result = executor.process_single(record, current)
-                    current = result.sample
-                    if result.aux:
-                        aux_payload[name] = result.aux
-                    if name == "normalize":
-                        scale_factors = result.artifacts.get("scale_factors")
-                    if self.save_intermediate and not last_stage:
-                        intermediate_sample = current
-
-                sample_batch.append(current)
-                meta.append(
-                    {
-                        "record": record,
-                        "aux": aux_payload,
-                        "scale_factors": scale_factors,
-                        "intermediate": intermediate_sample,
-                    }
-                )
-
-            batch_results: list[Any] = rebasin_executor.process_batch(
-                batch_records, sample_batch
-            )
-            for meta_entry, reb_result in zip(meta, batch_results, strict=True):
-                aux_payload = dict(meta_entry["aux"])
-                if reb_result.aux:
-                    aux_payload["rebasin"] = reb_result.aux
-                self._emit_commit(
-                    meta_entry["record"],
-                    reb_result.sample,
-                    permutations=reb_result.artifacts.get("permutations"),
-                    scale_factors=meta_entry["scale_factors"],
-                    aux=aux_payload,
-                    intermediate_sample=meta_entry["intermediate"],
-                )
-
-        prefetch_loader.clear()
 
     def _emit_commit(
         self,

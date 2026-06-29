@@ -1,5 +1,7 @@
 """AlignRunner with modular stage executors and parallel support."""
 
+from __future__ import annotations
+
 import json
 import logging
 import shutil
@@ -20,12 +22,38 @@ from .common import (
     _WORKER_HEARTBEAT_TIMEOUT,
     available_cpu_count,
 )
-from .loaders import PrefetchingLoader, SampleLoader
+from .loaders import SampleLoader
 from .loggers import AlignLogger
 from .parallel import WorkerPool
+from .pipeline import PipelineOutput, StagePipeline
 from .stages import NormalizeExecutor, RebasinExecutor, StageExecutor
 
 _LOG = logging.getLogger(__name__)
+
+
+class _RunnerPipelineSink:
+    """Write pipeline outputs through ``AlignLogger`` and update run progress."""
+
+    def __init__(self, runner: AlignRunner, bar) -> None:
+        self.runner = runner
+        self.bar = bar
+
+    def write(self, output: PipelineOutput) -> None:
+        record = output.record
+        logger = self.runner.logger
+        if output.scale_factors is not None:
+            logger.write_scale_factors(record, output.scale_factors)
+        if output.permutations is not None and self.runner.config.rebasin:
+            logger.write_permutations(record, output.permutations)
+        if self.runner.save_intermediate and output.intermediate_sample is not None:
+            logger.write_intermediate(record, output.intermediate_sample)
+
+        logger.write_sample(record, output.sample)
+        logger.write_aux(record, output.aux)
+        self.runner.run_manifest.record_progress(record=record)
+        self.runner._maybe_persist_state()
+        self.bar.update(label=record.label)
+        self.runner._maybe_log_progress(record.label)
 
 
 class AlignRunner:
@@ -241,7 +269,11 @@ class AlignRunner:
         self, pending: list[SampleRecord], loader: SampleLoader, processed_initial: int
     ) -> float:
         start = time.time()
-        use_batched = self._can_batch_rebasin()
+        pipeline = StagePipeline(
+            self._stage_executors,
+            save_intermediate=self.save_intermediate,
+        )
+        use_batched = pipeline.can_batch_rebasin(self.per_device_batch)
         batch_size = self.per_device_batch if use_batched else 1
 
         try:
@@ -254,145 +286,17 @@ class AlignRunner:
                     self.progress_logger.info(
                         "Using batched rebasin with batch_size=%d", batch_size
                     )
-                    self._execute_batched(pending, loader, batch_size, bar)
-                else:
-                    self._execute_sequential(pending, loader, bar)
+                pipeline.run_records(
+                    pending,
+                    loader,
+                    _RunnerPipelineSink(self, bar),
+                    batch_size=batch_size,
+                )
         finally:
             self._progress_bar_uses_tqdm = False
 
         self._maybe_persist_state(force=True)
         return time.time() - start
-
-    def _execute_sequential(
-        self, pending: list[SampleRecord], loader: SampleLoader, bar
-    ) -> None:
-        for record in pending:
-            sample = loader.load(record)
-            aux_payload: dict[str, Any] = {}
-            current = sample
-
-            for idx, (stage, executor) in enumerate(self._stage_executors):
-                last_stage = idx == len(self._stage_executors) - 1
-                result = executor.process_single(record, current)
-                current = result.sample
-
-                if result.aux:
-                    aux_payload[stage] = result.aux
-                if stage == "normalize":
-                    scale_factors = result.artifacts.get("scale_factors")
-                    if scale_factors is not None:
-                        self.logger.write_scale_factors(record, scale_factors)
-                elif stage == "rebasin":
-                    perms = result.artifacts.get("permutations")
-                    if perms is not None and self.config.rebasin:
-                        self.logger.write_permutations(record, perms)
-
-                if self.save_intermediate and not last_stage:
-                    self.logger.write_intermediate(record, current)
-
-            self.logger.write_sample(record, current)
-            self.logger.write_aux(record, aux_payload)
-            self.run_manifest.record_progress(record=record)
-            self._maybe_persist_state()
-            bar.update(label=record.label)
-            self._maybe_log_progress(record.label)
-
-    def _execute_batched(
-        self,
-        pending: list[SampleRecord],
-        loader: SampleLoader,
-        batch_size: int,
-        bar,
-    ) -> None:
-        rebasin_executor = self._get_stage_executor("rebasin")
-        if rebasin_executor is None:
-            raise ValueError(
-                "Batched execution requested but no rebasin stage configured."
-            )
-
-        prefetch_loader = PrefetchingLoader(loader, prefetch_count=batch_size)
-
-        for batch_start in range(0, len(pending), batch_size):
-            batch_records = pending[batch_start : batch_start + batch_size]
-
-            next_start = batch_start + batch_size
-            if next_start < len(pending):
-                prefetch_loader.prefetch(pending[next_start : next_start + batch_size])
-
-            sample_batch = []
-            stage_meta: list[dict[str, Any]] = []
-            for record in batch_records:
-                sample = prefetch_loader.get(record)
-                current = sample
-                aux_payload: dict[str, Any] = {}
-                scale_factors = None
-                intermediate_params = None
-
-                for idx, (stage, executor) in enumerate(self._stage_executors):
-                    last_stage = idx == len(self._stage_executors) - 1
-                    if stage == "rebasin" and last_stage:
-                        break
-                    result = executor.process_single(record, current)
-                    current = result.sample
-                    if result.aux:
-                        aux_payload[stage] = result.aux
-                    if stage == "normalize":
-                        scale_factors = result.artifacts.get("scale_factors")
-                    if self.save_intermediate and not last_stage:
-                        intermediate_params = current
-
-                sample_batch.append(current)
-                stage_meta.append(
-                    {
-                        "record": record,
-                        "aux": aux_payload,
-                        "scale_factors": scale_factors,
-                        "intermediate": intermediate_params,
-                    }
-                )
-
-            rebasin_results = rebasin_executor.process_batch(
-                batch_records, sample_batch
-            )
-            for meta_entry, reb_result in zip(stage_meta, rebasin_results, strict=True):
-                aux_payload = dict(meta_entry["aux"])
-                if reb_result.aux:
-                    aux_payload["rebasin"] = reb_result.aux
-                if (
-                    reb_result.artifacts.get("permutations") is not None
-                    and self.config.rebasin
-                ):
-                    self.logger.write_permutations(
-                        meta_entry["record"],
-                        reb_result.artifacts["permutations"],
-                    )
-                if meta_entry["scale_factors"] is not None:
-                    self.logger.write_scale_factors(
-                        meta_entry["record"], meta_entry["scale_factors"]
-                    )
-                if self.save_intermediate and meta_entry["intermediate"] is not None:
-                    self.logger.write_intermediate(
-                        meta_entry["record"], meta_entry["intermediate"]
-                    )
-
-                self.logger.write_sample(
-                    meta_entry["record"],
-                    reb_result.sample,
-                )
-                self.logger.write_aux(meta_entry["record"], aux_payload)
-                self.run_manifest.record_progress(record=meta_entry["record"])
-                bar.update(label=meta_entry["record"].label)
-                self._maybe_log_progress(meta_entry["record"].label)
-
-            self._maybe_persist_state()
-
-        prefetch_loader.clear()
-
-    def _can_batch_rebasin(self) -> bool:
-        if not self._stage_executors or self._stage_executors[-1][0] != "rebasin":
-            return False
-        rebasin_executor = self._stage_executors[-1][1]
-        return rebasin_executor.supports_batching and self.per_device_batch > 1
 
     def _run_parallel(
         self, pending: list[SampleRecord], processed_initial: int
