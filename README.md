@@ -9,23 +9,12 @@ The pinned JAX stack currently supports Python 3.11 or 3.12. The repo includes
 
 ```bash
 cd ~/projects/align
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -U pip
-python -m pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
 For CUDA 12 JAX wheels:
 
 ```bash
-python -m pip install -e ".[cuda,dev]"
-```
-
-With `uv`:
-
-```bash
-cd ~/projects/align
-uv sync --extra dev
 uv sync --extra cuda --extra dev  # CUDA 12 JAX wheels
 ```
 
@@ -94,14 +83,6 @@ uv run align configs/examples/align.yaml --output-dir results/example/align/lap
 - [docs/producer_artifact_contract.md](docs/producer_artifact_contract.md): expected sampler output layout
 
 ## Development
-
-```bash
-python -m pytest
-python -m ruff check .
-python -m ruff format --check .
-```
-
-With `uv`:
 
 ```bash
 uv run pytest

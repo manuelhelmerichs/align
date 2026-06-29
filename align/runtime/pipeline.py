@@ -68,22 +68,38 @@ class StagePipeline:
     ) -> PipelineOutput:
         """Run all stages for one record and return the completed output."""
 
+        indexed = [(idx, name, ex) for idx, (name, ex) in enumerate(self.stages)]
+        return self._run_stages(record, sample, indexed)
+
+    def _run_stages(
+        self,
+        record: SampleRecord,
+        sample: WeightSample,
+        stages: Sequence[tuple[int, str, StageExecutor]],
+    ) -> PipelineOutput:
+        """Thread ``sample`` through ``stages``, collecting artifacts and aux.
+
+        ``stages`` carries each executor's index within the full pipeline so the
+        ``save_intermediate`` (skip the final stage) bookkeeping is identical for
+        the single and batched paths.
+        """
+
         aux_payload: dict[str, Any] = {}
         current = sample
         permutations = None
         scale_factors = None
         intermediate_sample = None
 
-        for idx, (stage, executor) in enumerate(self.stages):
+        for idx, name, executor in stages:
             last_stage = idx == len(self.stages) - 1
             result = executor.process_single(record, current)
             current = result.sample
 
             if result.aux:
-                aux_payload[stage] = result.aux
-            if stage == "normalize":
+                aux_payload[name] = result.aux
+            if name == "normalize":
                 scale_factors = result.artifacts.get("scale_factors")
-            elif stage == "rebasin":
+            elif name == "rebasin":
                 permutations = result.artifacts.get("permutations")
 
             if self.save_intermediate and not last_stage:
@@ -111,52 +127,31 @@ class StagePipeline:
         rebasin_executor = self.stages[-1][1]
         if not rebasin_executor.supports_batching:
             raise ValueError("Final rebasin executor does not support batching.")
-        sample_batch = []
-        meta: list[dict[str, Any]] = []
 
-        for record, sample in zip(records, samples, strict=True):
-            current = sample
-            aux_payload: dict[str, Any] = {}
-            scale_factors = None
-            intermediate_sample = None
+        pre_stages = [
+            (idx, name, ex) for idx, (name, ex) in enumerate(self.stages[:-1])
+        ]
+        partials = [
+            self._run_stages(record, sample, pre_stages)
+            for record, sample in zip(records, samples, strict=True)
+        ]
 
-            for idx, (stage, executor) in enumerate(self.stages):
-                last_stage = idx == len(self.stages) - 1
-                if stage == "rebasin" and last_stage:
-                    break
-                result = executor.process_single(record, current)
-                current = result.sample
-                if result.aux:
-                    aux_payload[stage] = result.aux
-                if stage == "normalize":
-                    scale_factors = result.artifacts.get("scale_factors")
-                if self.save_intermediate and not last_stage:
-                    intermediate_sample = current
-
-            sample_batch.append(current)
-            meta.append(
-                {
-                    "record": record,
-                    "aux": aux_payload,
-                    "scale_factors": scale_factors,
-                    "intermediate_sample": intermediate_sample,
-                }
-            )
-
-        rebasin_results = rebasin_executor.process_batch(records, sample_batch)
+        rebasin_results = rebasin_executor.process_batch(
+            records, [partial.sample for partial in partials]
+        )
         outputs: list[PipelineOutput] = []
-        for meta_entry, reb_result in zip(meta, rebasin_results, strict=True):
-            aux_payload = dict(meta_entry["aux"])
+        for partial, reb_result in zip(partials, rebasin_results, strict=True):
+            aux_payload = dict(partial.aux)
             if reb_result.aux:
                 aux_payload["rebasin"] = reb_result.aux
             outputs.append(
                 PipelineOutput(
-                    record=meta_entry["record"],
+                    record=partial.record,
                     sample=reb_result.sample,
                     aux=aux_payload,
                     permutations=reb_result.artifacts.get("permutations"),
-                    scale_factors=meta_entry["scale_factors"],
-                    intermediate_sample=meta_entry["intermediate_sample"],
+                    scale_factors=partial.scale_factors,
+                    intermediate_sample=partial.intermediate_sample,
                 )
             )
         return outputs
@@ -213,8 +208,6 @@ class StagePipeline:
                     sample_batch.append(prefetch_loader.get(record))
 
                 for output in self.process_batch(batch_records, sample_batch):
-                    if on_record_start is not None:
-                        on_record_start(output.record)
                     sink.write(output)
         finally:
             prefetch_loader.clear()

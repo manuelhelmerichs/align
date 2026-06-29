@@ -541,25 +541,18 @@ class ArtifactChecksumStore:
         columns = max(1, len(self.kinds))
         mode = "r+" if self.path.exists() else "w+"
         if mode == "r+":
-            try:
-                self._buffer = np.memmap(
-                    self.path, dtype=np.uint64, mode=mode, shape=(self.total, columns)
+            item_size = np.dtype(np.uint64).itemsize
+            expected_size = self.total * columns * item_size
+            actual_size = self.path.stat().st_size
+            if actual_size != expected_size:
+                raise ValueError(
+                    f"Checksum store {self.path} has size {actual_size} bytes, "
+                    f"expected {expected_size} for {self.total} samples and "
+                    f"{columns} artifact kind(s)."
                 )
-            except ValueError:
-                size = self.path.stat().st_size
-                inferred_cols = max(
-                    1, size // (self.total * np.dtype(np.uint64).itemsize)
-                )
-                self._buffer = np.memmap(
-                    self.path,
-                    dtype=np.uint64,
-                    mode=mode,
-                    shape=(self.total, inferred_cols),
-                )
-                if inferred_cols != columns:
-                    self.kinds = tuple(self.kinds[:inferred_cols]) + tuple(
-                        f"col{idx}" for idx in range(len(self.kinds), inferred_cols)
-                    )
+            self._buffer = np.memmap(
+                self.path, dtype=np.uint64, mode=mode, shape=(self.total, columns)
+            )
         else:
             self._buffer = np.memmap(
                 self.path, dtype=np.uint64, mode=mode, shape=(self.total, columns)
@@ -609,7 +602,6 @@ class RunManifest:
     total_samples: int
     reference: Mapping[str, Any] = field(default_factory=dict)
     filters: Mapping[str, Any] = field(default_factory=dict)
-    stage_completion: dict[str, bool] = field(default_factory=dict)
     order: str | None = None
     tracker_path: Path | None = None
     runtime_settings: Mapping[str, Any] = field(default_factory=dict)
@@ -628,10 +620,6 @@ class RunManifest:
             self.tracker_path = self.state_dir / "processed_bitmap.bin"
         else:
             self.tracker_path = Path(self.tracker_path)
-        self.stage_completion = {
-            stage: bool(self.stage_completion.get(stage, False))
-            for stage in self.stages
-        }
         self._tracker: ProcessedTracker | None = None
 
     @property
@@ -647,7 +635,6 @@ class RunManifest:
             "config_digest": self.config_digest,
             "manifest_digest": self.manifest_digest,
             "stages": list(self.stages),
-            "stage_completion": dict(self.stage_completion),
             "order": self.order,
             "reference": dict(self.reference),
             "filters": dict(self.filters),
@@ -689,17 +676,8 @@ class RunManifest:
 
         self.updated_at = time.time()
 
-    def mark_stage_complete(self, stage: str) -> None:
-        if stage not in self.stage_completion:
-            self.stage_completion[stage] = True
-        else:
-            self.stage_completion[stage] = True
-        self.updated_at = time.time()
-
     def mark_complete(self) -> None:
         self.completed = True
-        for stage in self.stages:
-            self.stage_completion[stage] = True
         self.updated_at = time.time()
         if self._tracker is not None:
             self._tracker.flush()
@@ -736,7 +714,6 @@ class RunManifest:
             config_digest=payload["config_digest"],
             manifest_digest=payload["manifest_digest"],
             stages=list(payload.get("stages") or []),
-            stage_completion=payload.get("stage_completion", {}),
             order=payload.get("order"),
             reference=payload.get("reference", {}),
             filters=payload.get("filters", {}),

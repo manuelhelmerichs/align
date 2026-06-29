@@ -8,10 +8,7 @@ validation, the scale-normalization math kernel, and the graph-driven
 
 from .activations import SUPPORTED_ACTIVATIONS, validate_activation
 from .dense_layers import DenseLayer
-from .kernel import (
-    compute_incoming_norms,
-    normalize_layers,
-)
+from .kernel import compute_incoming_norms
 from .scale_normalizer import ScaleNormalizer
 from .scale_state import ScaleState
 
@@ -21,6 +18,5 @@ __all__ = [
     "ScaleState",
     "SUPPORTED_ACTIVATIONS",
     "compute_incoming_norms",
-    "normalize_layers",
     "validate_activation",
 ]

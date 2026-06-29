@@ -20,6 +20,12 @@ _SCHEDULE_FIELDS = frozenset(
 )
 
 
+def _require_bool(name: str, value: Any) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"{name} must be a boolean, got {type(value).__name__}.")
+    return value
+
+
 def _validate_schedule_fields(payload: dict[str, Any]) -> None:
     unknown = sorted(set(payload) - _SCHEDULE_FIELDS)
     if unknown:
@@ -57,8 +63,13 @@ class RebasinScheduleStep:
             lr=float(payload.get("lr", 1e-2)),
             n_sinkhorn_iters=int(payload.get("n_sinkhorn_iters", 50)),
             init_scale=float(payload.get("init_scale", 1e-2)),
-            record_loss_history=bool(payload.get("record_loss_history", False)),
-            harden=bool(payload.get("harden", True)),
+            record_loss_history=_require_bool(
+                "rebasin.schedule.record_loss_history",
+                payload.get("record_loss_history", False),
+            ),
+            harden=_require_bool(
+                "rebasin.schedule.harden", payload.get("harden", True)
+            ),
             groups=tuple(str(group) for group in groups)
             if groups is not None
             else None,

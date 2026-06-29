@@ -68,8 +68,12 @@ class StageExecutor(ABC):
     def reference_output(
         self, record: SampleRecord, sample: WeightSample
     ) -> WeightSample:
-        """Return reference params after applying this stage (default: no-op)."""
-        return sample
+        """Return the reference sample after applying this stage.
+
+        Each stage transforms the reference so the next stage prepares against
+        the already-aligned reference.
+        """
+        return self.process_single(record, sample).sample
 
 
 class NormalizeExecutor(StageExecutor):
@@ -110,7 +114,7 @@ class NormalizeExecutor(StageExecutor):
             num_classes=self.config.num_classes,
             **self.config.method_kwargs,
         )
-        aux_payload = dict(aux or {"method": self.config.method})
+        aux_payload = dict(aux or {})
         aux_payload["method"] = self.config.method
         return StageResult(
             sample=sample.with_params(normalized_params),
@@ -135,11 +139,6 @@ class NormalizeExecutor(StageExecutor):
     @property
     def prefers_gpu(self) -> bool:
         return False
-
-    def reference_output(
-        self, record: SampleRecord, sample: WeightSample
-    ) -> WeightSample:
-        return self.process_single(record, sample).sample
 
 
 class RebasinExecutor(StageExecutor):
@@ -303,11 +302,6 @@ class RebasinExecutor(StageExecutor):
         if self.scheduler is None:
             return any(step.solver == "sinkhorn" for step in self.config.schedule)
         return bool(self.scheduler.prefers_gpu)
-
-    def reference_output(
-        self, record: SampleRecord, sample: WeightSample
-    ) -> WeightSample:
-        return self.process_single(record, sample).sample
 
 
 __all__ = [

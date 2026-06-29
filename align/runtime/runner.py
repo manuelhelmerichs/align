@@ -75,9 +75,7 @@ class AlignRunner:
         self.config = config
         resolve_adapter_defaults(self.config)
         self.save_intermediate = bool(config.runtime.save_intermediate)
-        self.per_device_batch = max(
-            1, int(getattr(config.runtime, "per_device_batch", None) or 1)
-        )
+        self.per_device_batch = max(1, int(config.runtime.per_device_batch or 1))
         self.stage_order = config.active_stages()
         self.parallelism = self._compute_parallelism()
         self._stage_executors: list[tuple[str, StageExecutor]] = []
@@ -214,7 +212,7 @@ class AlignRunner:
 
     def _prepare_executors(self, ref_sample) -> list[tuple[str, StageExecutor]]:
         executors: dict[str, StageExecutor] = {}
-        adapter_kwargs = dict(getattr(self.config, "adapter", {}) or {})
+        adapter_kwargs = dict(self.config.adapter or {})
         if self.config.normalize and self.config.normalize.enabled:
             executors["normalize"] = NormalizeExecutor(
                 self.config.normalize,
@@ -527,7 +525,7 @@ class AlignRunner:
             "per_device_batch": self.per_device_batch,
             "save_intermediate": self.save_intermediate,
             "architecture": self.config.architecture,
-            "adapter_kwargs": dict(getattr(self.config, "adapter", {}) or {}),
+            "adapter_kwargs": dict(self.config.adapter or {}),
             "heartbeat_interval": _WORKER_HEARTBEAT_INTERVAL,
         }
 

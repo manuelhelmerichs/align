@@ -2,51 +2,72 @@
 
 The :class:`ScaleNormalizer` is the deterministic canonicalization counterpart of
 the rebasin solver stack: it reads producer/consumer axis roles off an
-:class:`~align.alignment.AlignmentProblem` and reuses the
-:func:`align.normalization.normalize_layers` math kernel so its output matches the
-former adapter-specific normalization byte-for-byte.
+:class:`~align.alignment.AlignmentProblem`, computes positive per-group scale
+vectors, and applies the symmetry through
+:meth:`align.alignment.AlignmentProblem.apply_scales`. Degenerate-neuron cleanup
+and optional classification-head rescaling remain explicit post-passes because
+they are not positive scale symmetries.
 
 It supports the linear ReLU-MLP class of graphs (each permutation group has a
 single ``out``-role producer kernel, kernels are 2-D, and the groups form a
 single chain feeding one output head). Residual ties and branches give a group
-multiple ``out``-role producers and are rejected pending issue #14; convolutional
-kernels are rejected as non-dense. This preserves the previous "ResNet normalize
-unsupported" behaviour with a clearer message.
+multiple ``out``-role producers and are rejected; convolutional kernels are
+rejected as non-dense.
 """
 
 from __future__ import annotations
 
 import copy
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import jax.numpy as jnp
+import numpy as np
 from flax.core import frozen_dict
 
-from ..alignment import AlignmentProblem
+from ..alignment import AlignmentProblem, AxisBinding, binding_axis_interval
 from ..alignment.tensor_ops import _descend, _set_path
+from .activations import validate_activation
 from .dense_layers import DenseLayer
+from .kernel import (
+    _canonicalize_degenerate,
+    _outgoing_scale_factors,
+    _require_bool,
+    _validate_degenerate_handling,
+    compute_degenerate_mask,
+    compute_incoming_norms,
+    normalize_last_layer_classification,
+)
+from .scale_state import ScaleState
 
 ParamTree = Mapping[str, Any]
-_LayerPaths = tuple[tuple[str, ...], tuple[str, ...]]
 
 
-def _scale_chain(problem: AlignmentProblem) -> list[_LayerPaths]:
-    """Return ordered ``(kernel_path, bias_path)`` pairs for the dense chain.
+@dataclass(frozen=True)
+class _DenseScaleSite:
+    group_id: str
+    kernel_path: tuple[str, ...]
+    bias_path: tuple[str, ...]
+    in_binding: AxisBinding | None
 
-    The chain is ``[producer(g0), producer(g1), ..., producer(g_last), head]``
-    where each ``producer`` is a group's single ``out``-role dense kernel (plus
-    bias) and ``head`` is the lone ungrouped output kernel that consumes the last
-    group. Raises with an actionable message when the graph is outside the
-    supported linear ReLU-MLP class.
-    """
+
+@dataclass(frozen=True)
+class _DenseScalePlan:
+    sites: tuple[_DenseScaleSite, ...]
+    head_kernel_path: tuple[str, ...]
+    head_bias_path: tuple[str, ...]
+
+
+def _dense_scale_plan(problem: AlignmentProblem) -> _DenseScalePlan:
+    """Validate and summarize the supported linear dense scale graph."""
 
     tensors = problem.tensors
     if not problem.group_order:
         raise ValueError(
             "Scale normalization requires at least one hidden permutation group."
         )
-    chain: list[_LayerPaths] = []
+    sites: list[_DenseScaleSite] = []
     producer_kernel_ids: set[str] = set()
     previous_group: str | None = None
 
@@ -79,9 +100,8 @@ def _scale_chain(problem: AlignmentProblem) -> list[_LayerPaths]:
             raise ValueError(
                 f"Scale normalization is undefined for group {group_id!r}: it has "
                 f"{len(kernel_ids)} out-role producers ({', '.join(kernel_ids)}). "
-                "Residual ties and branches need shared-scale semantics that are "
-                "deferred to issue #14; disable the normalize stage for this "
-                "architecture."
+                "Residual ties and branches need explicit shared-scale semantics; "
+                "disable the normalize stage for this architecture."
             )
         kernel_id = kernel_ids[0]
         kernel_shape = tensors[kernel_id].shape
@@ -92,25 +112,71 @@ def _scale_chain(problem: AlignmentProblem) -> list[_LayerPaths]:
                 f"{kernel_shape}. Convolutional / non-dense architectures are "
                 "unsupported; disable the normalize stage."
             )
+        kernel_out_bindings = [
+            binding for binding in out_bindings if binding.tensor_id == kernel_id
+        ]
+        if len(kernel_out_bindings) != 1:
+            raise ValueError(
+                f"Scale normalization requires group {group_id!r} to bind exactly "
+                f"one producer output axis on {kernel_id}, found "
+                f"{len(kernel_out_bindings)}."
+            )
+        out_axis, _, _ = binding_axis_interval(kernel_shape, kernel_out_bindings[0])
+        if out_axis != 1:
+            raise ValueError(
+                "Scale normalization expects dense producer kernels with the "
+                f"group on axis 1, but {kernel_id} binds group {group_id!r} on "
+                f"axis {out_axis}."
+            )
         if len(bias_ids) != 1:
             raise ValueError(
                 f"Scale normalization requires exactly one out-role bias for group "
                 f"{group_id!r}, found {len(bias_ids)}."
             )
+        bias_id = bias_ids[0]
+        bias_bindings = [
+            binding for binding in out_bindings if binding.tensor_id == bias_id
+        ]
+        if len(bias_bindings) != 1:
+            raise ValueError(
+                f"Scale normalization requires group {group_id!r} to bind exactly "
+                f"one producer bias axis on {bias_id}, found {len(bias_bindings)}."
+            )
+        in_bindings = [
+            binding
+            for binding in problem.bindings_for_tensor(kernel_id)
+            if binding.role == "in"
+        ]
+        in_binding: AxisBinding | None = None
         if previous_group is not None:
-            consumed_groups = {
-                binding.group
-                for binding in problem.bindings_for_tensor(kernel_id)
-                if binding.role == "in"
-            }
-            if previous_group not in consumed_groups:
+            if len(in_bindings) != 1 or in_bindings[0].group != previous_group:
                 raise ValueError(
                     "Scale normalization requires a single linear chain, but the "
                     f"producer for group {group_id!r} does not consume the previous "
                     f"group {previous_group!r}."
                 )
+            in_axis, _, _ = binding_axis_interval(kernel_shape, in_bindings[0])
+            if in_axis != 0:
+                raise ValueError(
+                    "Scale normalization expects dense producer kernels with the "
+                    f"previous group on axis 0, but {kernel_id} binds group "
+                    f"{previous_group!r} on axis {in_axis}."
+                )
+            in_binding = in_bindings[0]
+        elif in_bindings:
+            raise ValueError(
+                "Scale normalization requires a single linear chain, but the first "
+                f"producer for group {group_id!r} consumes another hidden group."
+            )
         producer_kernel_ids.add(kernel_id)
-        chain.append((tensors[kernel_id].path, tensors[bias_ids[0]].path))
+        sites.append(
+            _DenseScaleSite(
+                group_id=group_id,
+                kernel_path=tensors[kernel_id].path,
+                bias_path=tensors[bias_id].path,
+                in_binding=in_binding,
+            )
+        )
         previous_group = group_id
 
     last_group = problem.group_order[-1]
@@ -129,21 +195,157 @@ def _scale_chain(problem: AlignmentProblem) -> list[_LayerPaths]:
             f"last group {last_group!r}, found {len(head_ids)}: {head_ids}."
         )
     head_path = tensors[head_ids[0]].path
-    chain.append((head_path, (*head_path[:-1], "bias")))
-    return chain
+    return _DenseScalePlan(
+        sites=tuple(sites),
+        head_kernel_path=head_path,
+        head_bias_path=(*head_path[:-1], "bias"),
+    )
 
 
-def _inject(
+def _replace_paths(
     params: ParamTree,
-    chain: Sequence[_LayerPaths],
-    layers: Sequence[DenseLayer],
+    replacements: Sequence[tuple[tuple[str, ...], Any]],
 ) -> ParamTree:
     is_frozen = isinstance(params, frozen_dict.FrozenDict)
     mutable = frozen_dict.unfreeze(params) if is_frozen else copy.deepcopy(params)
-    for (kernel_path, bias_path), layer in zip(chain, layers, strict=True):
-        _set_path(mutable, kernel_path, layer.kernel)
-        _set_path(mutable, bias_path, layer.bias)
+    for path, value in replacements:
+        _set_path(mutable, path, value)
     return frozen_dict.freeze(mutable) if is_frozen else mutable
+
+
+def _multiply_axis(tensor: Any, factors: Any, *, axis: int) -> Any:
+    xp = jnp if isinstance(tensor, jnp.ndarray) else np
+    factor = xp.asarray(factors)
+    broadcast_shape = [1] * xp.ndim(tensor)
+    broadcast_shape[axis] = factor.shape[0]
+    return tensor * factor.reshape(broadcast_shape)
+
+
+def _has_degenerate(mask: Any) -> bool:
+    return bool(np.any(np.asarray(mask)))
+
+
+def _group_scales(
+    params: ParamTree,
+    plan: _DenseScalePlan,
+    *,
+    epsilon: float,
+    degenerate_handling: str,
+    normalize_biases: bool,
+) -> tuple[dict[str, Any], list[Any], dict[str, Any]]:
+    """Derive per-group scales by folding each group's scale into the next kernel.
+
+    The action scale for a group is the incoming norm of its producer *after* the
+    previous group's outgoing scale has been folded into the kernel, so the chain
+    must be walked in order. ``action_scales`` (degenerate neurons clamped to 1)
+    drive the positive :meth:`apply_scales` symmetry; ``outgoing_scales`` (which
+    may be 0 for degenerate neurons) are the consumer-side factors propagated
+    forward and later realised by the degenerate post-passes.
+    """
+
+    action_scales: dict[str, Any] = {}
+    outgoing_scales: dict[str, Any] = {}
+    reported_scales: list[Any] = []
+    degenerate_masks: dict[str, Any] = {}
+
+    for site in plan.sites:
+        kernel = jnp.asarray(_descend(params, site.kernel_path))
+        bias = jnp.asarray(_descend(params, site.bias_path))
+        if site.in_binding is not None:
+            in_axis, _, _ = binding_axis_interval(kernel.shape, site.in_binding)
+            kernel = _multiply_axis(
+                kernel,
+                outgoing_scales[site.in_binding.group],
+                axis=in_axis,
+            )
+
+        layer = DenseLayer(kernel=kernel, bias=bias)
+        norms = compute_incoming_norms(
+            layer, epsilon=epsilon, normalize_biases=normalize_biases
+        )
+        mask = compute_degenerate_mask(
+            layer, epsilon=epsilon, normalize_biases=normalize_biases
+        )
+
+        action_scales[site.group_id] = _outgoing_scale_factors(
+            norms, mask, degenerate_handling="preserve"
+        )
+        outgoing_scales[site.group_id] = _outgoing_scale_factors(
+            norms, mask, degenerate_handling=degenerate_handling
+        )
+        reported_scales.append(norms)
+        degenerate_masks[site.group_id] = mask
+
+    return action_scales, reported_scales, degenerate_masks
+
+
+def _zero_degenerate_consumers(
+    problem: AlignmentProblem,
+    params: ParamTree,
+    degenerate_masks: Mapping[str, Any],
+) -> ParamTree:
+    active_masks = {
+        group_id: jnp.where(mask, 0.0, 1.0)
+        for group_id, mask in degenerate_masks.items()
+        if _has_degenerate(mask)
+    }
+    if not active_masks:
+        return params
+
+    def _mask(segment, axis, binding):
+        # Zero scales are cleanup, not a valid positive ScaleState action.
+        if binding.role != "in" or binding.group not in active_masks:
+            return segment
+        return _multiply_axis(segment, active_masks[binding.group], axis=axis)
+
+    return problem._transform_bound_tensors(params, _mask)
+
+
+def _canonicalize_degenerate_producers(
+    params: ParamTree,
+    plan: _DenseScalePlan,
+    degenerate_masks: Mapping[str, Any],
+) -> ParamTree:
+    replacements: list[tuple[tuple[str, ...], Any]] = []
+    for site in plan.sites:
+        mask = degenerate_masks[site.group_id]
+        if not _has_degenerate(mask):
+            continue
+        mask = jnp.asarray(mask, dtype=bool)
+        kernel = jnp.asarray(_descend(params, site.kernel_path))
+        bias = jnp.asarray(_descend(params, site.bias_path))
+        kernel, bias = _canonicalize_degenerate(kernel, bias, mask)
+        replacements.append((site.kernel_path, kernel))
+        replacements.append((site.bias_path, bias))
+    return _replace_paths(params, replacements) if replacements else params
+
+
+def _rescale_classification_head(
+    params: ParamTree,
+    plan: _DenseScalePlan,
+    *,
+    num_classes: int,
+    epsilon: float,
+) -> tuple[ParamTree, Any]:
+    head = DenseLayer(
+        kernel=jnp.asarray(_descend(params, plan.head_kernel_path)),
+        bias=jnp.asarray(_descend(params, plan.head_bias_path)),
+    )
+    normalized_head, gamma = normalize_last_layer_classification(
+        head,
+        int(num_classes),
+        epsilon=epsilon,
+    )
+    return (
+        _replace_paths(
+            params,
+            (
+                (plan.head_kernel_path, normalized_head.kernel),
+                (plan.head_bias_path, normalized_head.bias),
+            ),
+        ),
+        gamma,
+    )
 
 
 class ScaleNormalizer:
@@ -160,23 +362,78 @@ class ScaleNormalizer:
     ) -> tuple[ParamTree, list[Any], dict[str, Any]]:
         """Return ``(normalized_params, scale_factors, aux)`` for ``params``."""
 
-        from .kernel import normalize_layers
-
-        chain = _scale_chain(problem)
-        layers = [
-            DenseLayer(
-                kernel=jnp.asarray(_descend(params, kernel_path)),
-                bias=jnp.asarray(_descend(params, bias_path)),
-            )
-            for kernel_path, bias_path in chain
-        ]
-        normalized_layers, scale_factors, aux = normalize_layers(
-            layers,
-            task_type=task_type,
-            num_classes=num_classes,
-            **method_kwargs,
+        method_kwargs = dict(method_kwargs)
+        epsilon = float(method_kwargs.pop("epsilon", 1e-8))
+        degenerate_handling = _validate_degenerate_handling(
+            method_kwargs.pop("degenerate_handling", "preserve")
         )
-        normalized_params = _inject(params, chain, normalized_layers)
+        normalize_biases = _require_bool(
+            "normalize_biases", method_kwargs.pop("normalize_biases", True)
+        )
+        activation = validate_activation(
+            method_kwargs.pop("activation", "relu"),
+            method_kwargs.pop("activation_kwargs", None),
+        )
+        classification_head_rescale = _require_bool(
+            "classification_head_rescale",
+            method_kwargs.pop("classification_head_rescale", False),
+        )
+        if method_kwargs:
+            unexpected = next(iter(method_kwargs))
+            raise TypeError(
+                "ScaleNormalizer.normalize() got an unexpected keyword argument "
+                f"{unexpected!r}"
+            )
+
+        task = (task_type or "regression").lower()
+        if task not in ("regression", "classification"):
+            raise ValueError("task_type must be 'regression' or 'classification'")
+        if task == "classification" and classification_head_rescale:
+            if num_classes is None:
+                raise ValueError(
+                    "num_classes required when classification_head_rescale is enabled"
+                )
+
+        plan = _dense_scale_plan(problem)
+        action_scales, scale_factors, degenerate_masks = _group_scales(
+            params,
+            plan,
+            epsilon=epsilon,
+            degenerate_handling=degenerate_handling,
+            normalize_biases=normalize_biases,
+        )
+        normalized_params = problem.apply_scales(
+            params,
+            ScaleState.from_scales(problem, action_scales, backend="jax"),
+        )
+
+        if degenerate_handling in ("zero_outgoing", "canonical_vector"):
+            normalized_params = _zero_degenerate_consumers(
+                problem, normalized_params, degenerate_masks
+            )
+        if degenerate_handling == "canonical_vector":
+            normalized_params = _canonicalize_degenerate_producers(
+                normalized_params, plan, degenerate_masks
+            )
+
+        aux: dict[str, Any] = {
+            "task_type": task,
+            "epsilon": epsilon,
+            "degenerate_handling": degenerate_handling,
+            "normalize_biases": normalize_biases,
+            "activation": activation,
+            "classification_head_rescale": classification_head_rescale,
+        }
+        if task == "classification" and classification_head_rescale:
+            normalized_params, gamma = _rescale_classification_head(
+                normalized_params,
+                plan,
+                num_classes=int(num_classes),
+                epsilon=epsilon,
+            )
+            aux["last_layer_gamma"] = gamma
+            aux["num_classes"] = int(num_classes)
+
         return normalized_params, scale_factors, aux
 
 

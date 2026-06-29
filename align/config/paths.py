@@ -8,7 +8,17 @@ from pathlib import Path
 from typing import Any
 
 from ..sample_formats import DEFAULT_SAMPLE_FORMAT, normalize_sample_format
-from ._utils import _to_path
+from ._utils import _to_path, _validate_fields
+
+_PATH_FIELDS = frozenset(
+    {
+        "experiment_root",
+        "samples_dir",
+        "tree_path",
+        "output_dir",
+        "sample_format",
+    }
+)
 
 
 @dataclass
@@ -26,6 +36,7 @@ class PathConfig:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> PathConfig:
+        _validate_fields("paths", payload, _PATH_FIELDS)
         return cls(
             experiment_root=_to_path(payload.get("experiment_root")),
             samples_dir=_to_path(payload.get("samples_dir")),

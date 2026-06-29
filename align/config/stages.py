@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..options import RebasinScheduleStep
-from ._utils import _maybe_int
+from ._utils import _maybe_int, _require_bool, _validate_fields
 
 _REBASIN_FIELDS = frozenset(
     {
@@ -45,20 +45,6 @@ _VALID_DEGENERATE_HANDLING = frozenset(
 _VALID_NORMALIZATION_METHODS = frozenset({"scale_normalize"})
 _VALID_TASK_TYPES = frozenset({"regression", "classification"})
 _VALID_ACTIVATIONS = frozenset({"relu", "leaky_relu"})
-
-
-def _validate_config_fields(
-    section: str, payload: Mapping[str, Any], allowed: frozenset[str]
-) -> None:
-    unknown = sorted(set(payload) - allowed)
-    if unknown:
-        raise ValueError(f"Unknown {section} config option(s): " + ", ".join(unknown))
-
-
-def _require_bool(name: str, value: Any) -> bool:
-    if type(value) is not bool:
-        raise ValueError(f"{name} must be a boolean, got {type(value).__name__}.")
-    return value
 
 
 def _validate_choice(name: str, value: str, valid: frozenset[str]) -> str:
@@ -152,11 +138,11 @@ class NormalizeConfig:
         if not isinstance(payload, Mapping):
             raise ValueError("normalize section must be a mapping, boolean, or null.")
 
-        _validate_config_fields("normalize", payload, _NORMALIZE_FIELDS)
+        _validate_fields("normalize", payload, _NORMALIZE_FIELDS)
         scale_opts = payload.get("scale_normalize", {})
         if not isinstance(scale_opts, Mapping):
             raise ValueError("normalize.scale_normalize must be a mapping.")
-        _validate_config_fields(
+        _validate_fields(
             "normalize.scale_normalize", scale_opts, _SCALE_NORMALIZE_FIELDS
         )
         return cls(
@@ -221,7 +207,7 @@ class RebasinConfig:
         if not isinstance(payload, Mapping):
             raise ValueError("rebasin section must be a mapping, boolean, or null.")
 
-        _validate_config_fields("rebasin", payload, _REBASIN_FIELDS)
+        _validate_fields("rebasin", payload, _REBASIN_FIELDS)
         raw_schedule = payload.get("schedule")
         if raw_schedule is None:
             schedule = (RebasinScheduleStep(solver="lap"),)

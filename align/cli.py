@@ -10,8 +10,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 from ._jax_platforms import configure_jax_platforms
 from .config import (
     AlignConfig,
@@ -235,8 +233,6 @@ def run(args: argparse.Namespace) -> None:
         print("Validation successful. No alignment executed.")
         return
 
-    _prepare_rebasin_calibration(config)
-
     from .runtime import AlignLogger, AlignRunner
 
     align_logger = AlignLogger(
@@ -269,8 +265,8 @@ def main(argv: list[str] | None = None) -> None:
 
 def _configure_platform_preferences(config: AlignConfig) -> None:
     runtime_cfg = config.runtime
-    force_cpu = bool(getattr(runtime_cfg, "force_cpu", False))
-    force_gpu = bool(getattr(runtime_cfg, "force_gpu", False))
+    force_cpu = bool(runtime_cfg.force_cpu)
+    force_gpu = bool(runtime_cfg.force_gpu)
     if force_cpu and force_gpu:
         raise ValueError("--force-cpu and --force-gpu are mutually exclusive.")
 
@@ -514,18 +510,6 @@ def _load_or_create_run_manifest(
     )
     run_manifest.save()
     return run_manifest
-
-
-def _prepare_rebasin_calibration(config: AlignConfig) -> None:
-    rebasin_cfg = config.rebasin
-    if rebasin_cfg is None or not rebasin_cfg.enabled:
-        return
-    objective_kwargs = dict(rebasin_cfg.objective_kwargs)
-    calibration_path = objective_kwargs.get("calibration_data_path")
-    if calibration_path is not None:
-        objective_kwargs["calibration_data"] = np.load(calibration_path)
-        objective_kwargs.pop("calibration_data_path", None)
-        rebasin_cfg.objective_kwargs = objective_kwargs
 
 
 if __name__ == "__main__":  # pragma: no cover

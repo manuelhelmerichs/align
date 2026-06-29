@@ -6,7 +6,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from ._utils import _maybe_int, _parse_int_list
+from ._utils import _maybe_int, _parse_int_list, _validate_fields
+
+_SELECTION_FIELDS = frozenset(
+    {
+        "chain_indices",
+        "samples_per_chain",
+        "sample_step",
+        "max_total",
+        "ref_chain",
+        "ref_sample",
+    }
+)
 
 
 @dataclass
@@ -22,6 +33,7 @@ class SelectionConfig:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> SelectionConfig:
+        _validate_fields("selection", payload, _SELECTION_FIELDS)
         chain_indices = payload.get("chain_indices")
         if isinstance(chain_indices, str):
             chain_indices = _parse_int_list(chain_indices)

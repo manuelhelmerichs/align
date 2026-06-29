@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from ..sample_formats import normalize_sample_format
-from ._utils import _merge_dicts
+from ._utils import _merge_dicts, _validate_fields
 from .paths import PathConfig, path_to_dict
 from .runtime import RuntimeConfig
 from .selection import SelectionConfig
@@ -19,6 +19,19 @@ from .stages import NormalizeConfig, RebasinConfig
 
 if TYPE_CHECKING:
     from ..state import SampleManifest
+
+_ALIGN_CONFIG_FIELDS = frozenset(
+    {
+        "paths",
+        "architecture",
+        "adapter",
+        "selection",
+        "order",
+        "normalize",
+        "rebasin",
+        "runtime",
+    }
+)
 
 
 @dataclass
@@ -36,6 +49,7 @@ class AlignConfig:
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> AlignConfig:
+        _validate_fields("top-level", payload, _ALIGN_CONFIG_FIELDS)
         normalize_cfg = (
             NormalizeConfig.from_mapping(payload.get("normalize"))
             if "normalize" in payload
@@ -159,7 +173,7 @@ def resolve_adapter_defaults(config: AlignConfig) -> None:
     root = config.paths.experiment_root
     if root is None:
         return
-    adapter_kwargs = dict(getattr(config, "adapter", {}) or {})
+    adapter_kwargs = dict(config.adapter or {})
     if adapter_kwargs.get("module_graph") is not None:
         return
     module_graph_path = Path(root) / "module_graph.json"

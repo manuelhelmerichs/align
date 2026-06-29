@@ -9,7 +9,7 @@ from pathlib import Path
 from queue import Empty
 from typing import Any
 
-from .common import _WORKER_HEARTBEAT_INTERVAL, _WORKER_HEARTBEAT_TIMEOUT
+from .common import _WORKER_HEARTBEAT_INTERVAL
 
 
 def worker_process_main(job: dict[str, object], command_queue, progress_queue) -> None:
@@ -219,5 +219,4 @@ __all__ = [
     "WorkerPool",
     "worker_process_main",
     "_WORKER_HEARTBEAT_INTERVAL",
-    "_WORKER_HEARTBEAT_TIMEOUT",
 ]
