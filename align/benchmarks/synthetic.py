@@ -612,25 +612,83 @@ def run_alignment_benchmark(
     )
 
 
-def run_lap_robustness_sweep(
+@dataclass(frozen=True)
+class RobustnessRecord:
+    """One (case, schedule, seed) cell of a robustness sweep."""
+
+    case_name: str
+    schedule_name: str
+    seed: int
+    metrics: AlignmentBenchmarkMetrics
+
+
+def default_schedule_grid(
+    *,
+    lap_max_sweeps: int = 25,
+    sinkhorn_max_steps: int = 150,
+    sinkhorn_lr: float = 0.1,
+    sinkhorn_tau: float = 0.3,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return the named solver schedules exercised by robustness sweeps."""
+
+    lap_step = {"solver": "lap", "max_sweeps": lap_max_sweeps, "tol": 0.0}
+    sinkhorn_step = {
+        "solver": "sinkhorn",
+        "max_steps": sinkhorn_max_steps,
+        "lr": sinkhorn_lr,
+        "tau": sinkhorn_tau,
+        "n_sinkhorn_iters": 20,
+        "init_scale": 0.01,
+        "tol": 0.0,
+    }
+    return {
+        "lap": [dict(lap_step)],
+        "sinkhorn": [dict(sinkhorn_step)],
+        "lap_sinkhorn_lap": [
+            dict(lap_step),
+            dict(sinkhorn_step),
+            {"solver": "lap", "max_sweeps": 5, "tol": 0.0},
+        ],
+    }
+
+
+def run_robustness_sweep(
     *,
     seeds: Sequence[int],
-    max_sweeps_values: Sequence[int],
-) -> list[tuple[int, int, AlignmentBenchmarkMetrics]]:
-    """Sweep dense exact-orbit seeds and LAP sweep budgets."""
+    schedules: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    case_factory: Callable[..., SyntheticOrbitCase] = make_dense_mlp_orbit_case,
+    objective: str = "l2_weight",
+    objective_kwargs: Mapping[str, Any] | None = None,
+    normalize: bool = True,
+) -> list[RobustnessRecord]:
+    """Sweep exact-orbit seeds against named solver schedules.
 
-    results: list[tuple[int, int, AlignmentBenchmarkMetrics]] = []
+    Covers LAP, pure Sinkhorn, and mixed schedules by default so solver
+    robustness is measured for every scheduling mode the pipeline supports.
+    """
+
+    schedules = schedules or default_schedule_grid()
+    records: list[RobustnessRecord] = []
     for seed in seeds:
-        case = make_dense_mlp_orbit_case(seed=seed)
-        for max_sweeps in max_sweeps_values:
+        case = case_factory(seed=seed)
+        for schedule_name, schedule in schedules.items():
             result = run_alignment_benchmark(
                 case,
-                schedule=[{"solver": "lap", "max_sweeps": int(max_sweeps), "tol": 0.0}],
-                normalize=True,
+                objective=objective,
+                objective_kwargs=objective_kwargs,
+                schedule=schedule,
+                normalize=normalize,
                 rng_seed=seed,
             )
-            results.append((seed, int(max_sweeps), result.metrics))
-    return results
+            records.append(
+                RobustnessRecord(
+                    case_name=case.name,
+                    schedule_name=schedule_name,
+                    seed=seed,
+                    metrics=result.metrics,
+                )
+            )
+    return records
 
 
 def measure_rebasin_performance(
