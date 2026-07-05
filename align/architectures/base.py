@@ -1,9 +1,13 @@
-"""Architecture adapter framework: the adapter contract and registry.
+"""Architecture recipe framework: the recipe contract and registry.
 
-An :class:`ArchitectureAdapter` emits a single graph-native
-:class:`~align.alignment.AlignmentProblem` per parameter tree, consumed by both
-the rebasin (permutation) and normalization (scale) stages. Concrete adapters
-live alongside this module under ``align.architectures``.
+An :class:`ArchitectureAdapter` is a thin *recipe*: it discovers where blocks
+live in a parameter tree and composes
+:class:`~align.architectures.blocks.BlockAdapter` instances, which perform all
+problem construction through a shared
+:class:`~align.architectures.builder.ProblemBuilder`. The resulting
+:class:`~align.alignment.AlignmentProblem` is consumed by both the rebasin
+(permutation) and normalization (scale) stages. Concrete recipes live
+alongside this module under ``align.architectures``.
 """
 
 import importlib
@@ -13,11 +17,11 @@ from typing import Any
 
 
 class ArchitectureAdapter(ABC):
-    """Interface for architecture-aware alignment.
+    """Discovery + composition recipe for one architecture family.
 
-    Adapters emit a single graph-native :class:`~align.alignment.AlignmentProblem`
-    per parameter tree. Both stages consume it: rebasin via permutation actions
-    and normalization via the scale action.
+    Implementations locate block instances (dense stacks, attention modules,
+    conv stacks, the residual stream) in a parameter tree and delegate
+    construction to block adapters. Config and CLI select recipes by ``name``.
     """
 
     name: str
@@ -31,6 +35,7 @@ _ADAPTERS: dict[str, type[ArchitectureAdapter]] = {}
 _BUILTIN_ADAPTERS: dict[str, tuple[str, str]] = {
     "dense_mlp": ("align.architectures.dense_mlp", "DenseMLPAdapter"),
     "resnet": ("align.architectures.resnet", "ResNetAdapter"),
+    "transformer": ("align.architectures.transformer", "TransformerAdapter"),
 }
 
 

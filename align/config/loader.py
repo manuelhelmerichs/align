@@ -199,10 +199,14 @@ def validate_method(config: AlignConfig) -> None:
         config.rebasin.validate_method()
     if config.normalize is not None:
         config.normalize.validate_method()
-        if config.normalize.enabled and config.architecture == "resnet":
+        if config.normalize.enabled and config.architecture in (
+            "resnet",
+            "transformer",
+        ):
             raise ValueError(
-                "Normalization is not supported for architecture 'resnet'. "
-                "Disable normalize or use architecture 'dense_mlp'."
+                f"Normalization is not supported for architecture "
+                f"'{config.architecture}'. Disable normalize or use "
+                "architecture 'dense_mlp'."
             )
     from ..architectures import available_adapters
 

@@ -1,24 +1,20 @@
-"""ResNet-style architecture adapter (conv + FRN/BN)."""
+"""ResNet-style architecture recipe (conv + FRN/BN) over one conv-stack block."""
 
 import dataclasses
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import yaml
 
-from ..alignment import (
-    AlignmentProblem,
-    AxisBinding,
-    GraphConstraint,
-    PermutationGroup,
-    TensorSpec,
-)
+from ..alignment import AlignmentProblem, GraphConstraint
 from ..alignment.tensor_ops import _canonical_axis, _descend, _maybe_descend
 from .base import ArchitectureAdapter, register_adapter
+from .blocks import BlockAdapter
+from .builder import ProblemBuilder
 
 
 def _natural_key(value: str) -> list[int | str]:
@@ -269,12 +265,19 @@ def _infer_residual_groups(
     return _sort_groups(merged, order_index)
 
 
-@register_adapter
 @dataclass
-class ResNetAdapter(ArchitectureAdapter):
-    """Adapter for ResNet-style conv nets (conv + FRN/BN)."""
+class ConvStackBlockAdapter(BlockAdapter):
+    """One residual conv stack: conv channel groups tied by residual adds.
 
-    name: str = "resnet"
+    Groups are union-find roots over conv output channels (residual adds merge
+    the participating convs); FRN/BatchNorm parameters and BN running stats
+    follow their conv's group, and trailing ``Dense_*`` heads consume the last
+    conv group. Emitted as a single ``conv_stack`` block.
+    """
+
+    kind: ClassVar[str] = "conv_stack"
+
+    block_id: str = "conv_stack"
     layer_root: str = "core"
     batch_stats_root: str | None = "batch_stats"
     module_graph: Mapping[str, Any] | Sequence[Any] | str | None = None
@@ -331,9 +334,8 @@ class ResNetAdapter(ArchitectureAdapter):
         candidate = "/".join(parts)
         return candidate if candidate in available else None
 
-    def build_problem(self, params: Mapping[str, Any]) -> AlignmentProblem:
-        """Derive the graph-native alignment problem directly from the modules."""
-
+    def build(self, builder: ProblemBuilder) -> None:
+        params = builder.params
         layer_root_path = tuple(self.layer_root.split("."))
         subtree = _maybe_descend(params, layer_root_path)
         if subtree is None:
@@ -386,65 +388,40 @@ class ResNetAdapter(ArchitectureAdapter):
             unions.union(left, right)
 
         group_map = {name: unions.find(name) for name in conv_names}
-        groups: dict[str, PermutationGroup] = {
-            root: PermutationGroup(id=root, size=size)
-            for root, size in unions.roots().items()
-        }
+        group_sizes = unions.roots()
 
-        tensors: dict[str, TensorSpec] = {}
-
-        def _walk(node: Any, prefix: tuple[str, ...]) -> None:
+        # Register every parameter tensor so the objective measures the whole
+        # tree, not only bound axes.
+        def _walk_all(node: Any, prefix: tuple[str, ...]) -> None:
             if isinstance(node, Mapping):
                 for name, value in node.items():
-                    _walk(value, prefix + (str(name),))
+                    _walk_all(value, prefix + (str(name),))
                 return
-            shape = tuple(int(dim) for dim in np.shape(node))
-            if not shape:
-                return
-            tensor_id = "/".join(prefix)
-            tensors[tensor_id] = TensorSpec(
-                id=tensor_id,
-                path=prefix,
-                shape=shape,
-                metadata={"architecture": self.name},
-            )
+            if np.shape(node):
+                builder.tensor(prefix)
 
-        _walk(params, ())
+        _walk_all(params, ())
 
-        bindings: list[AxisBinding] = []
         seen_bindings: set[tuple[str, int, str]] = set()
 
         def _bind(path: tuple[str, ...], axis: int, group_id: str, role: str) -> str:
             tensor_id = "/".join(path)
-            if tensor_id not in tensors:
-                value = _descend(params, path)
-                tensors[tensor_id] = TensorSpec(
-                    id=tensor_id,
-                    path=path,
-                    shape=tuple(int(dim) for dim in np.shape(value)),
-                    metadata={"architecture": self.name},
-                )
             key = (tensor_id, axis, group_id)
             if key not in seen_bindings:
                 seen_bindings.add(key)
-                bindings.append(
-                    AxisBinding(
-                        tensor_id=tensor_id, axis=axis, group=group_id, role=role
-                    )
-                )
+                builder.bind(path, axis, group_id, role=role)
             return tensor_id
 
-        group_order: list[str] = []
         conv_to_group: dict[str, str] = {}
         conv_to_out_tensors: dict[str, list[str]] = {}
 
         for idx, conv_name in enumerate(conv_names):
             group_id = group_map[conv_name]
             conv_to_group[conv_name] = group_id
-            if group_id not in group_order:
-                group_order.append(group_id)
+            if group_id not in builder.groups:
+                builder.add_group(group_id, group_sizes[group_id])
             conv_path = conv_paths[conv_name]
-            group_size = groups[group_id].size
+            group_size = builder.groups[group_id].size
             kernel_path = (*conv_path, "kernel")
             _validate_channel_size(
                 kernel_path, _descend(params, kernel_path), group_size
@@ -498,14 +475,12 @@ class ResNetAdapter(ArchitectureAdapter):
             dense_path = (*dense_paths[dense_name], "kernel")
             kernel = _descend(params, dense_path)
             in_size = int(kernel.shape[0])
-            if groups[last_group].size != in_size:
+            if builder.groups[last_group].size != in_size:
                 raise ValueError(
-                    f"Dense layer {dense_name} expects input {in_size}, "
-                    f"but last conv group {last_group} has {groups[last_group].size}."
+                    f"Dense layer {dense_name} expects input {in_size}, but last "
+                    f"conv group {last_group} has {builder.groups[last_group].size}."
                 )
             _bind(dense_path, 0, last_group, "in")
-
-        constraints: list[GraphConstraint] = []
 
         def _residual_tie(members: tuple[str, ...], source: str) -> GraphConstraint:
             tie_groups = tuple(
@@ -527,26 +502,19 @@ class ResNetAdapter(ArchitectureAdapter):
 
         for group in residual_groups:
             members = tuple(sorted(group, key=order_index.__getitem__))
-            constraints.append(_residual_tie(members, "module_graph"))
+            builder.add_constraint(_residual_tie(members, "module_graph"))
         for left, right in self.residual_joins:
-            constraints.append(_residual_tie((left, right), "manual"))
+            builder.add_constraint(_residual_tie((left, right), "manual"))
 
-        problem = AlignmentProblem(
-            groups=groups,
-            tensors=tensors,
-            axis_bindings=tuple(bindings),
-            constraints=tuple(constraints),
-            metadata={
-                "architecture": self.name,
+        builder.add_block(self.block_id, self.kind, tuple(builder.group_order))
+        builder.metadata.update(
+            {
                 "conv_names": conv_names,
                 "dense_heads": dense_candidates,
-                "group_order": group_order,
                 "residual_groups": [sorted(group) for group in residual_groups],
                 "manual_residual_joins": list(self.residual_joins),
-            },
+            }
         )
-        problem.validate(params)
-        return problem
 
     def _attach_frn_bindings(
         self,
@@ -606,3 +574,25 @@ class ResNetAdapter(ArchitectureAdapter):
                     full_path, _descend(params, full_path), group_size
                 )
                 out_tensors.append(bind(full_path, -1, group_id, "out"))
+
+
+@register_adapter
+@dataclass
+class ResNetAdapter(ArchitectureAdapter):
+    """Recipe for ResNet-style conv nets: one conv-stack block."""
+
+    name: str = "resnet"
+    layer_root: str = "core"
+    batch_stats_root: str | None = "batch_stats"
+    module_graph: Mapping[str, Any] | Sequence[Any] | str | None = None
+    residual_joins: Sequence[tuple[str, str]] = dataclasses.field(default_factory=list)
+
+    def build_problem(self, params: Mapping[str, Any]) -> AlignmentProblem:
+        builder = ProblemBuilder(params, architecture=self.name)
+        ConvStackBlockAdapter(
+            layer_root=self.layer_root,
+            batch_stats_root=self.batch_stats_root,
+            module_graph=self.module_graph,
+            residual_joins=self.residual_joins,
+        ).build(builder)
+        return builder.finish()

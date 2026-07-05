@@ -10,6 +10,7 @@ from .api import (
     build_scheduler,
     default_lap_schedule,
     rebasin_batch,
+    rebasin_block_across,
     rebasin_single_sample,
 )
 from .objectives import (
@@ -50,6 +51,7 @@ __all__ = [
     "default_lap_schedule",
     "get_objective",
     "rebasin_batch",
+    "rebasin_block_across",
     "rebasin_single_sample",
     "register_objective",
     "sinkhorn_operator",

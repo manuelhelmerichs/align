@@ -62,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--list-samples", action="store_true")
+    parser.add_argument(
+        "--list-problems",
+        action="store_true",
+        help="List the alignment problem blocks derived from the reference sample.",
+    )
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--print-config", action="store_true")
     parser.add_argument(
@@ -117,6 +122,8 @@ def _cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
         runtime["dry_run"] = True
     if args.list_samples:
         runtime["list_samples"] = True
+    if args.list_problems:
+        runtime["list_problems"] = True
     if args.validate_only:
         runtime["validate_only"] = True
     if args.save_intermediate:
@@ -199,6 +206,7 @@ def run(args: argparse.Namespace) -> None:
         if not (
             config.runtime.dry_run
             or config.runtime.list_samples
+            or config.runtime.list_problems
             or config.runtime.validate_only
         ):
             return
@@ -227,6 +235,10 @@ def run(args: argparse.Namespace) -> None:
     if config.runtime.list_samples:
         for record in manifest.records:
             print(f"{record.index:05d} | {record.label} | {record.relative_path}")
+        return
+
+    if config.runtime.list_problems:
+        print(_problem_listing(config, manifest))
         return
 
     if config.runtime.validate_only:
@@ -261,6 +273,27 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     run(args)
+
+
+def _problem_listing(config: AlignConfig, manifest: SampleManifest) -> str:
+    """Build the block listing for the reference sample's alignment problem."""
+
+    from .alignment import format_problem_listing
+    from .architectures import get_adapter
+    from .runtime.loaders import SampleLoader
+
+    adapter_kwargs = dict(config.adapter or {})
+    layer_root = None
+    if config.rebasin and config.rebasin.enabled and config.rebasin.layer_root:
+        layer_root = config.rebasin.layer_root
+    elif config.normalize and config.normalize.enabled and config.normalize.layer_root:
+        layer_root = config.normalize.layer_root
+    if layer_root:
+        adapter_kwargs.setdefault("layer_root", layer_root)
+    adapter = get_adapter(config.architecture, **adapter_kwargs)
+    ref_sample = SampleLoader(manifest).load_reference()
+    problem = adapter.build_problem(ref_sample.params)
+    return format_problem_listing(problem)
 
 
 def _configure_platform_preferences(config: AlignConfig) -> None:

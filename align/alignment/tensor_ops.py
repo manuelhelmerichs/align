@@ -74,11 +74,83 @@ def binding_axis_interval(shape: Sequence[int], binding: Any) -> tuple[int, int,
     return axis, start, stop
 
 
+def binding_selector(shape: Sequence[int], binding: Any) -> tuple[tuple[int, int], ...]:
+    """Return canonical ``((axis, index), ...)`` selector coordinates.
+
+    A selector restricts a binding to a fixed index on other axes (e.g. one
+    attention head slot). Coordinates are canonicalized against ``shape`` and
+    sorted by axis.
+    """
+
+    raw = tuple(getattr(binding, "selector", ()) or ())
+    canonical: list[tuple[int, int]] = []
+    seen: set[int] = set()
+    for sel_axis, sel_index in raw:
+        axis = _canonical_axis(len(shape), int(sel_axis))
+        index = int(sel_index)
+        if index < 0:
+            index += int(shape[axis])
+        if index < 0 or index >= int(shape[axis]):
+            raise ValueError(
+                f"Axis binding for tensor {binding.tensor_id!r} uses selector "
+                f"index {sel_index} out of range for axis {sel_axis} "
+                f"(size {shape[axis]})."
+            )
+        if axis in seen:
+            raise ValueError(
+                f"Axis binding for tensor {binding.tensor_id!r} repeats selector "
+                f"axis {sel_axis}."
+            )
+        seen.add(axis)
+        canonical.append((axis, index))
+    return tuple(sorted(canonical))
+
+
+def binding_sort_key(shape: Sequence[int], binding: Any) -> tuple[int, int, str]:
+    """Deterministic application order for one tensor's bindings.
+
+    Selector-free bindings apply first (in axis order), selector-carrying
+    bindings afterwards. This fixes the composition convention: a selector
+    coordinate refers to the axis position *after* the selector-free bindings
+    (e.g. the head permutation) have been applied, i.e. reference-slot space.
+    """
+
+    selector = tuple(getattr(binding, "selector", ()) or ())
+    return (
+        1 if selector else 0,
+        _canonical_axis(len(shape), binding.axis),
+        binding.group,
+    )
+
+
 def axis_slice(ndim: int, axis: int, start: int, stop: int) -> tuple[slice, ...]:
     """Return an index tuple selecting ``[start, stop)`` along one axis."""
 
     indexer = [slice(None)] * ndim
     indexer[axis] = slice(start, stop)
+    return tuple(indexer)
+
+
+def binding_indexer(
+    ndim: int,
+    axis: int,
+    start: int,
+    stop: int,
+    selector: Sequence[tuple[int, int]] = (),
+    *,
+    offset: int = 0,
+) -> tuple[slice, ...]:
+    """Index tuple selecting a binding's sub-slice, preserving dimensionality.
+
+    Selector axes use length-1 slices so axis numbering inside the selected
+    segment matches the full tensor. ``offset`` shifts all axes (for a leading
+    batch dimension).
+    """
+
+    indexer = [slice(None)] * ndim
+    indexer[axis + offset] = slice(start, stop)
+    for sel_axis, sel_index in selector:
+        indexer[sel_axis + offset] = slice(sel_index, sel_index + 1)
     return tuple(indexer)
 
 
@@ -99,4 +171,11 @@ def apply_perm_to_axis(tensor: Any, perm: Any, *, axis: int):
     return xp.moveaxis(permuted, 0, axis)
 
 
-__all__ = ["apply_perm_to_axis", "axis_slice", "binding_axis_interval"]
+__all__ = [
+    "apply_perm_to_axis",
+    "axis_slice",
+    "binding_axis_interval",
+    "binding_indexer",
+    "binding_selector",
+    "binding_sort_key",
+]

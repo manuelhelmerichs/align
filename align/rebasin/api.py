@@ -7,7 +7,7 @@ from typing import Any
 
 import jax
 
-from ..alignment import AlignmentProblem
+from ..alignment import AlignmentProblem, extract_block_problem, match_block_tensors
 from ..samples import ParamTree
 from .objectives import get_objective
 from .permutation_state import PermutationState
@@ -116,9 +116,62 @@ def rebasin_batch(
     return results
 
 
+def rebasin_block_across(
+    ref_problem: AlignmentProblem,
+    ref_params: ParamTree,
+    ref_block: str,
+    target_problem: AlignmentProblem,
+    target_params: ParamTree,
+    target_block: str,
+    *,
+    scheduler: SolverScheduler | None = None,
+    objective: str = "l2_weight",
+    objective_kwargs: Mapping[str, Any] | None = None,
+    schedule: Sequence[SolverScheduleStep | Mapping[str, Any]] | None = None,
+    rng_key: jax.Array | None = None,
+) -> tuple[ParamTree, Mapping[str, Any], dict[str, Any] | None]:
+    """Align one block of ``target_params`` against the same block of another net.
+
+    The two blocks may come from different architectures; they only need
+    structurally identical block sub-problems (see
+    :func:`align.alignment.match_block_tensors`). Only the target block's groups
+    are permuted, so the returned tree is function-equivalent to
+    ``target_params``.
+    """
+
+    ref_sub = extract_block_problem(ref_problem, [ref_block])
+    target_sub = extract_block_problem(target_problem, [target_block])
+    tensor_map, group_map = match_block_tensors(
+        ref_sub, ref_block, target_sub, target_block
+    )
+
+    scheduler = scheduler or build_scheduler(
+        objective=objective,
+        objective_kwargs=objective_kwargs,
+        schedule=schedule,
+    )
+    backend = scheduler.backend
+    ref_data_own = ref_sub.materialize(ref_params, backend=backend, cache=True)
+    ref_data = {tensor_map[ref_id]: ref_data_own[ref_id] for ref_id in ref_sub.tensors}
+    target_data = target_sub.materialize(target_params, backend=backend, cache=False)
+    state, aux_info = scheduler.solve(
+        target_sub,
+        ref_data,
+        target_data,
+        rng_key=rng_key,
+    )
+    aligned_params = target_sub.apply(target_params, state)
+    aux_payload = dict(aux_info or {})
+    aux_payload["ref_block"] = ref_block
+    aux_payload["target_block"] = target_block
+    aux_payload["group_map"] = dict(group_map)
+    return aligned_params, state.to_artifacts(), aux_payload
+
+
 __all__ = [
     "build_scheduler",
     "default_lap_schedule",
     "rebasin_batch",
+    "rebasin_block_across",
     "rebasin_single_sample",
 ]
