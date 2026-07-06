@@ -12,12 +12,13 @@ import numpy as np
 from flax.core import frozen_dict
 
 from .tensor_ops import (
-    _canonical_axis,
     _descend,
     _set_path,
     apply_perm_to_axis,
-    axis_slice,
     binding_axis_interval,
+    binding_indexer,
+    binding_selector,
+    binding_sort_key,
 )
 
 
@@ -49,6 +50,13 @@ class AxisBinding:
     attached bias) and is divided by the group's scale, while an ``"in"`` axis
     consumes the channel (the next tensor's input axis) and is multiplied by it.
     Permutation actions are role-independent and ignore this field.
+
+    ``selector`` restricts the binding to a fixed index on *other* axes as
+    ``((axis, index), ...)`` pairs, e.g. one attention head slot: the intra-head
+    group of slot ``i`` binds the head-dim axis with ``selector=((head_axis,
+    i),)``. Selector coordinates live in reference-slot space: selector-free
+    bindings of the same tensor (such as the head permutation) are applied
+    first (see :func:`align.alignment.tensor_ops.binding_sort_key`).
     """
 
     tensor_id: str
@@ -57,6 +65,7 @@ class AxisBinding:
     start: int | None = None
     stop: int | None = None
     role: Literal["out", "in"] = "out"
+    selector: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -66,6 +75,22 @@ class GraphConstraint:
     kind: str
     groups: tuple[str, ...] = ()
     tensors: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class BlockSpec:
+    """A named sub-problem: a set of permutation groups solved as one unit.
+
+    Blocks partition the problem's groups (each group belongs to exactly one
+    block). Tensors are not listed explicitly; a block's tensors are derived
+    from the bindings of its groups and may be shared with other blocks (e.g.
+    attention kernels carry both stream and head bindings).
+    """
+
+    id: str
+    kind: str
+    groups: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -148,6 +173,7 @@ class AlignmentProblem:
     tensors: dict[str, TensorSpec]
     axis_bindings: tuple[AxisBinding, ...] = ()
     constraints: tuple[GraphConstraint, ...] = ()
+    blocks: dict[str, BlockSpec] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -155,6 +181,7 @@ class AlignmentProblem:
         self.tensors = dict(self.tensors)
         self.axis_bindings = tuple(self.axis_bindings)
         self.constraints = tuple(self.constraints)
+        self.blocks = dict(self.blocks)
         self.metadata = dict(self.metadata)
 
     @property
@@ -170,6 +197,20 @@ class AlignmentProblem:
                 )
             return ordered
         return tuple(self.groups)
+
+    @property
+    def block_order(self) -> tuple[str, ...]:
+        """Stable block order (declaration order)."""
+
+        return tuple(self.blocks)
+
+    def block_for_group(self, group_id: str) -> str | None:
+        """Return the id of the block owning ``group_id``, if blocks exist."""
+
+        for block in self.blocks.values():
+            if group_id in block.groups:
+                return block.id
+        return None
 
     def bindings_for_tensor(self, tensor_id: str) -> tuple[AxisBinding, ...]:
         return tuple(
@@ -242,7 +283,10 @@ class AlignmentProblem:
                         f"{actual_shape}, expected {tensor.shape}."
                     )
 
-        bound_segments: dict[tuple[str, int], list[tuple[int, int, str]]] = {}
+        Segment = tuple[int, int, str, tuple[tuple[int, int], ...]]
+        bound_segments: dict[tuple[str, int], list[Segment]] = {}
+        selector_axes: dict[str, set[int]] = {}
+        selector_bound_axes: dict[str, set[int]] = {}
         for binding in self.axis_bindings:
             if binding.tensor_id not in self.tensors:
                 raise ValueError(
@@ -259,18 +303,41 @@ class AlignmentProblem:
                 )
             tensor = self.tensors[binding.tensor_id]
             axis, start, stop = binding_axis_interval(tensor.shape, binding)
+            selector = binding_selector(tensor.shape, binding)
+            if any(sel_axis == axis for sel_axis, _ in selector):
+                raise ValueError(
+                    f"Axis binding for tensor {binding.tensor_id!r} uses its own "
+                    f"bound axis {binding.axis} as a selector axis."
+                )
+            if selector:
+                selector_axes.setdefault(binding.tensor_id, set()).update(
+                    sel_axis for sel_axis, _ in selector
+                )
+                selector_bound_axes.setdefault(binding.tensor_id, set()).add(axis)
             axis_key = (binding.tensor_id, axis)
-            for prev_start, prev_stop, previous_group in bound_segments.get(
-                axis_key, []
-            ):
-                if max(start, prev_start) < min(stop, prev_stop):
+            for (
+                prev_start,
+                prev_stop,
+                previous_group,
+                prev_selector,
+            ) in bound_segments.get(axis_key, []):
+                if max(start, prev_start) >= min(stop, prev_stop):
+                    continue
+                prev_coords = dict(prev_selector)
+                disjoint = any(
+                    prev_coords.get(sel_axis, sel_index) != sel_index
+                    for sel_axis, sel_index in selector
+                )
+                if not disjoint:
                     raise ValueError(
                         f"Tensor {binding.tensor_id!r} axis {binding.axis} interval "
                         f"[{start}, {stop}) overlaps an existing binding to group "
                         f"{previous_group!r}; cannot also bind it to group "
                         f"{binding.group!r}."
                     )
-            bound_segments.setdefault(axis_key, []).append((start, stop, binding.group))
+            bound_segments.setdefault(axis_key, []).append(
+                (start, stop, binding.group, selector)
+            )
             group = self.groups[binding.group]
             interval_size = stop - start
             if interval_size != int(group.size):
@@ -278,6 +345,43 @@ class AlignmentProblem:
                     f"Tensor {binding.tensor_id!r} axis {binding.axis} interval "
                     f"[{start}, {stop}) has size {interval_size}, expected group "
                     f"{binding.group!r} size {group.size}."
+                )
+
+        for tensor_id, axes in selector_axes.items():
+            tangled = axes & selector_bound_axes.get(tensor_id, set())
+            if tangled:
+                raise ValueError(
+                    f"Tensor {tensor_id!r} uses axis(es) {sorted(tangled)} both as "
+                    "selector coordinates and as selector-restricted bound axes; "
+                    "selector axes may only carry selector-free bindings."
+                )
+
+        if self.blocks:
+            owner: dict[str, str] = {}
+            for block_id, block in self.blocks.items():
+                if block.id != block_id:
+                    raise ValueError(
+                        f"Block mapping key {block_id!r} does not match id "
+                        f"{block.id!r}."
+                    )
+                if not block.groups:
+                    raise ValueError(f"Block {block_id!r} declares no groups.")
+                for group_id in block.groups:
+                    if group_id not in self.groups:
+                        raise ValueError(
+                            f"Block {block_id!r} references unknown group {group_id!r}."
+                        )
+                    if group_id in owner:
+                        raise ValueError(
+                            f"Group {group_id!r} belongs to blocks "
+                            f"{owner[group_id]!r} and {block_id!r}; blocks must "
+                            "partition the groups."
+                        )
+                    owner[group_id] = block_id
+            uncovered = sorted(set(self.groups) - set(owner))
+            if uncovered:
+                raise ValueError(
+                    "Blocks must cover every group; missing: " + ", ".join(uncovered)
                 )
 
         for constraint in self.constraints:
@@ -299,8 +403,58 @@ class AlignmentProblem:
                         "residual_tie constraints must be canonicalized to exactly "
                         "one shared group."
                     )
+            if constraint.kind == "attention_block":
+                self._validate_attention_constraint(constraint)
 
         _ = self.group_order
+
+    def _validate_attention_constraint(self, constraint: GraphConstraint) -> None:
+        """Check head/intra group structure of one ``attention_block`` constraint."""
+
+        metadata = constraint.metadata
+        head_group = metadata.get("head_group")
+        if head_group not in self.groups:
+            raise ValueError(
+                f"attention_block constraint references unknown head group "
+                f"{head_group!r}."
+            )
+        num_heads = int(self.groups[head_group].size)
+        qk_groups = tuple(metadata.get("qk_groups", ()))
+        vo_groups = tuple(metadata.get("vo_groups", ()))
+        for label, slot_groups in (("qk", qk_groups), ("vo", vo_groups)):
+            if len(slot_groups) != num_heads:
+                raise ValueError(
+                    f"attention_block constraint lists {len(slot_groups)} "
+                    f"{label} groups for {num_heads} heads."
+                )
+            for group_id in slot_groups:
+                if group_id not in self.groups:
+                    raise ValueError(
+                        f"attention_block constraint references unknown {label} "
+                        f"group {group_id!r}."
+                    )
+        head_dims = {
+            int(self.groups[group_id].size) for group_id in (*qk_groups, *vo_groups)
+        }
+        if len(head_dims) != 1:
+            raise ValueError(
+                "attention_block intra-head groups must share one head_dim; got "
+                f"sizes {sorted(head_dims)}."
+            )
+        tensor_roles = dict(metadata.get("tensors", {}))
+        for role in ("query", "key", "value", "out"):
+            tensor_id = tensor_roles.get(role)
+            if tensor_id not in self.tensors:
+                raise ValueError(
+                    f"attention_block constraint is missing a valid {role!r} "
+                    f"tensor (got {tensor_id!r})."
+                )
+        expected_groups = {head_group, *qk_groups, *vo_groups}
+        if set(constraint.groups) != expected_groups:
+            raise ValueError(
+                "attention_block constraint groups must list exactly the head "
+                "and intra-head groups."
+            )
 
     def _transform_bound_tensors(
         self,
@@ -325,16 +479,14 @@ class AlignmentProblem:
             updated = _descend(mutable, tensor.path)
             for binding in sorted(
                 bindings,
-                key=lambda item: (
-                    _canonical_axis(len(tensor.shape), item.axis),
-                    item.group,
-                ),
+                key=lambda item: binding_sort_key(tensor.shape, item),
             ):
                 axis, start, stop = binding_axis_interval(tensor.shape, binding)
-                if start == 0 and stop == int(tensor.shape[axis]):
+                selector = binding_selector(tensor.shape, binding)
+                if not selector and start == 0 and stop == int(tensor.shape[axis]):
                     updated = transform(updated, axis, binding)
                     continue
-                indexer = axis_slice(np.ndim(updated), axis, start, stop)
+                indexer = binding_indexer(np.ndim(updated), axis, start, stop, selector)
                 segment = updated[indexer]
                 transformed = transform(segment, axis, binding)
                 updated = _set_axis_slice(updated, indexer, transformed)
@@ -401,6 +553,7 @@ def materialize_many(
 __all__ = [
     "AlignmentProblem",
     "AxisBinding",
+    "BlockSpec",
     "GraphConstraint",
     "MaterializedTensors",
     "TensorSpec",

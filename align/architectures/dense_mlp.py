@@ -1,21 +1,25 @@
-"""Dense MLP architecture adapter."""
+"""Dense MLP architecture recipe: one dense-stack block."""
 
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-import jax.numpy as jnp
-
-from ..alignment import AlignmentProblem, AxisBinding, PermutationGroup, TensorSpec
-from ..normalization import DenseLayer
+from ..alignment import AlignmentProblem
 from .base import ArchitectureAdapter, register_adapter
+from .blocks import DenseStackBlockAdapter
+from .builder import ProblemBuilder
 
 
 @register_adapter
 @dataclass
 class DenseMLPAdapter(ArchitectureAdapter):
-    """Adapter for simple dense MLP parameter trees."""
+    """Recipe for simple dense MLP parameter trees.
+
+    Discovers the layer chain under ``layer_root`` and delegates construction
+    to :class:`~align.architectures.blocks.DenseStackBlockAdapter` (block
+    ``fcn``, hidden groups ``fcn/h{j}``).
+    """
 
     name: str = "dense_mlp"
     layer_root: str = "params.fcn"
@@ -53,87 +57,11 @@ class DenseMLPAdapter(ArchitectureAdapter):
             raise ValueError(f"No dense layers discovered under '{self.layer_root}'.")
         return [(root + (name,)) for name in layer_names]
 
-    def _extract_layers(
-        self, params: Mapping[str, Any], layer_paths: list[tuple[str, ...]]
-    ) -> list[DenseLayer]:
-        layers: list[DenseLayer] = []
-        for path in layer_paths:
-            layer_dict = self._descend(params, path)
-            if not isinstance(layer_dict, Mapping):
-                raise TypeError(f"Layer at {path} is not a mapping")
-            try:
-                kernel = jnp.asarray(layer_dict["kernel"])
-                bias = jnp.asarray(layer_dict["bias"])
-            except KeyError as exc:
-                raise KeyError(
-                    f"Layer at {path} must contain 'kernel' and 'bias'."
-                ) from exc
-            layers.append(DenseLayer(kernel=kernel, bias=bias))
-        return layers
-
     def build_problem(self, params: Mapping[str, Any]) -> AlignmentProblem:
         layer_paths = self._infer_layer_paths(params)
-        layers = self._extract_layers(params, layer_paths)
-
-        groups: dict[str, PermutationGroup] = {
-            f"layer_{idx}": PermutationGroup(
-                id=f"layer_{idx}", size=int(layer.kernel.shape[1])
-            )
-            for idx, layer in enumerate(layers[:-1])
-        }
-        tensors: dict[str, TensorSpec] = {}
-        bindings: list[AxisBinding] = []
-
-        def _tensor_id(path: tuple[str, ...]) -> str:
-            return "/".join(path)
-
-        for idx, (layer, layer_path) in enumerate(
-            zip(layers, layer_paths, strict=True)
-        ):
-            kernel_path = (*layer_path, "kernel")
-            bias_path = (*layer_path, "bias")
-            kernel_id = _tensor_id(kernel_path)
-            bias_id = _tensor_id(bias_path)
-            tensors[kernel_id] = TensorSpec(
-                id=kernel_id,
-                path=kernel_path,
-                shape=tuple(int(dim) for dim in layer.kernel.shape),
-                metadata={"layer_index": idx, "kind": "kernel"},
-            )
-            tensors[bias_id] = TensorSpec(
-                id=bias_id,
-                path=bias_path,
-                shape=tuple(int(dim) for dim in layer.bias.shape),
-                metadata={"layer_index": idx, "kind": "bias"},
-            )
-
-            if idx > 0:
-                bindings.append(
-                    AxisBinding(
-                        tensor_id=kernel_id,
-                        axis=0,
-                        group=f"layer_{idx - 1}",
-                        role="in",
-                    )
-                )
-            if idx < len(layers) - 1:
-                group_id = f"layer_{idx}"
-                bindings.append(
-                    AxisBinding(tensor_id=kernel_id, axis=1, group=group_id, role="out")
-                )
-                bindings.append(
-                    AxisBinding(tensor_id=bias_id, axis=0, group=group_id, role="out")
-                )
-
-        problem = AlignmentProblem(
-            groups=groups,
-            tensors=tensors,
-            axis_bindings=tuple(bindings),
-            metadata={
-                "layer_paths": layer_paths,
-                "group_order": [f"layer_{idx}" for idx in range(len(groups))],
-                "architecture": self.name,
-            },
+        builder = ProblemBuilder(params, architecture=self.name)
+        DenseStackBlockAdapter(block_id="fcn", layer_paths=tuple(layer_paths)).build(
+            builder
         )
-        problem.validate(params)
-        return problem
+        builder.metadata["layer_paths"] = layer_paths
+        return builder.finish()

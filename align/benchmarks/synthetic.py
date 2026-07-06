@@ -27,6 +27,7 @@ from align.architectures import (
     ArchitectureAdapter,
     DenseMLPAdapter,
     ResNetAdapter,
+    TransformerAdapter,
 )
 from align.normalization import ScaleNormalizer, ScaleState
 from align.rebasin import (
@@ -214,6 +215,228 @@ def _split_concat_conv_apply(params: ParamTree, x: jax.Array) -> jax.Array:
     return pooled @ jnp.asarray(dense["kernel"]) + jnp.asarray(dense["bias"])
 
 
+def _layer_norm(x: jax.Array, module: Mapping[str, Any]) -> jax.Array:
+    """Flax-compatible LayerNorm (eps 1e-6, biased variance, optional bias)."""
+
+    mean = jnp.mean(x, axis=-1, keepdims=True)
+    var = jnp.mean(jnp.square(x - mean), axis=-1, keepdims=True)
+    normed = (x - mean) / jnp.sqrt(var + 1e-6)
+    normed = normed * jnp.asarray(module["scale"])
+    if "bias" in module:
+        normed = normed + jnp.asarray(module["bias"])
+    return normed
+
+
+def mhdpa_apply(
+    module: Mapping[str, Any], x: jax.Array, *, causal: bool = False
+) -> jax.Array:
+    """Flax MultiHeadDotProductAttention forward on ``(B, T, d)`` inputs.
+
+    Kernels are head-structured: q/k/v ``(d, H, dk)``, out ``(H, dk, d)``.
+    """
+
+    def _project(name: str) -> jax.Array:
+        proj = jnp.einsum("btd,dhk->bthk", x, jnp.asarray(module[name]["kernel"]))
+        if "bias" in module[name]:
+            proj = proj + jnp.asarray(module[name]["bias"])
+        return proj
+
+    query, key, value = _project("query"), _project("key"), _project("value")
+    head_dim = query.shape[-1]
+    query = query / jnp.sqrt(jnp.asarray(head_dim, dtype=query.dtype))
+    scores = jnp.einsum("bqhk,bshk->bhqs", query, key)
+    if causal:
+        seq_len = x.shape[1]
+        mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=bool))
+        scores = jnp.where(mask[None, None], scores, jnp.finfo(scores.dtype).min)
+    weights = jax.nn.softmax(scores, axis=-1)
+    context = jnp.einsum("bhqs,bshk->bqhk", weights, value)
+    out = jnp.einsum("bqhk,hkd->bqd", context, jnp.asarray(module["out"]["kernel"]))
+    if "bias" in module["out"]:
+        out = out + jnp.asarray(module["out"]["bias"])
+    return out
+
+
+def gpt_transformer_apply(params: ParamTree, tokens: jax.Array) -> jax.Array:
+    """Forward pass matching the bayesmates GPT layout and semantics.
+
+    Note the bayesmates block is not standard pre-LN: each LayerNorm *replaces*
+    the stream (``x = LN(x); x = x + attn(x)``).
+    """
+
+    embedding = params["TokenEmbedding_0"]  # type: ignore[index]
+    x = jnp.asarray(embedding["Embedding"]["embedding"])[tokens]
+    positions = jnp.asarray(embedding["PositionEmbedding"]["embedding"])
+    x = x + positions[: tokens.shape[1]][None, :, :]
+
+    block_names = sorted(
+        (name for name in params if str(name).startswith("Block_")),
+        key=_natural_key,
+    )
+    for name in block_names:
+        block = params[name]  # type: ignore[index]
+        x = _layer_norm(x, block["LayerNorm_0"])
+        attention = block["MaskedMultiHeadSelfAttention_0"][
+            "MultiHeadDotProductAttention_0"
+        ]
+        x = x + mhdpa_apply(attention, x, causal=True)
+        x = _layer_norm(x, block["LayerNorm_1"])
+        ffn = block["FullyConnected_0"]
+        hidden = jax.nn.gelu(
+            x @ jnp.asarray(ffn["FFN_layer0"]["kernel"])
+            + jnp.asarray(ffn["FFN_layer0"]["bias"])
+        )
+        x = x + (
+            hidden @ jnp.asarray(ffn["FFN_layer1"]["kernel"])
+            + jnp.asarray(ffn["FFN_layer1"]["bias"])
+        )
+
+    x = _layer_norm(x, params["LayerNorm_0"])  # type: ignore[index]
+    return x @ jnp.asarray(params["DenseLogits"]["kernel"])  # type: ignore[index]
+
+
+def make_gpt_style_params(
+    *,
+    key: jax.Array,
+    vocab_size: int = 7,
+    context_len: int = 5,
+    d_model: int = 8,
+    num_heads: int = 2,
+    num_blocks: int = 2,
+    ffn_dim: int = 12,
+) -> dict[str, Any]:
+    """Random parameters in the bayesmates GPT tree layout."""
+
+    if d_model % num_heads:
+        raise ValueError("d_model must be divisible by num_heads.")
+    head_dim = d_model // num_heads
+
+    def _normal(rng_key: jax.Array, shape: tuple[int, ...], scale: float) -> jax.Array:
+        return scale * jax.random.normal(rng_key, shape, dtype=jnp.float32)
+
+    keys = iter(jax.random.split(key, 16 * num_blocks + 8))
+    params: dict[str, Any] = {
+        "TokenEmbedding_0": {
+            "Embedding": {"embedding": _normal(next(keys), (vocab_size, d_model), 0.5)},
+            "PositionEmbedding": {
+                "embedding": _normal(next(keys), (context_len, d_model), 0.5)
+            },
+        },
+        "LayerNorm_0": {
+            "scale": 1.0 + _normal(next(keys), (d_model,), 0.1),
+            "bias": _normal(next(keys), (d_model,), 0.1),
+        },
+    }
+    for block_index in range(num_blocks):
+        params[f"Block_{block_index}"] = {
+            "LayerNorm_0": {
+                "scale": 1.0 + _normal(next(keys), (d_model,), 0.1),
+                "bias": _normal(next(keys), (d_model,), 0.1),
+            },
+            "LayerNorm_1": {
+                "scale": 1.0 + _normal(next(keys), (d_model,), 0.1),
+                "bias": _normal(next(keys), (d_model,), 0.1),
+            },
+            "MaskedMultiHeadSelfAttention_0": {
+                "MultiHeadDotProductAttention_0": {
+                    "query": {
+                        "kernel": _normal(
+                            next(keys), (d_model, num_heads, head_dim), 0.6
+                        ),
+                        "bias": _normal(next(keys), (num_heads, head_dim), 0.1),
+                    },
+                    "key": {
+                        "kernel": _normal(
+                            next(keys), (d_model, num_heads, head_dim), 0.6
+                        ),
+                        "bias": _normal(next(keys), (num_heads, head_dim), 0.1),
+                    },
+                    "value": {
+                        "kernel": _normal(
+                            next(keys), (d_model, num_heads, head_dim), 0.6
+                        ),
+                        "bias": _normal(next(keys), (num_heads, head_dim), 0.1),
+                    },
+                    "out": {
+                        "kernel": _normal(
+                            next(keys), (num_heads, head_dim, d_model), 0.6
+                        ),
+                        "bias": _normal(next(keys), (d_model,), 0.1),
+                    },
+                }
+            },
+            "FullyConnected_0": {
+                "FFN_layer0": {
+                    "kernel": _normal(next(keys), (d_model, ffn_dim), 0.6),
+                    "bias": _normal(next(keys), (ffn_dim,), 0.1),
+                },
+                "FFN_layer1": {
+                    "kernel": _normal(next(keys), (ffn_dim, d_model), 0.6),
+                    "bias": _normal(next(keys), (d_model,), 0.1),
+                },
+            },
+        }
+    params["DenseLogits"] = {"kernel": _normal(next(keys), (d_model, vocab_size), 0.6)}
+    return params
+
+
+def make_transformer_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+    """GPT-style case whose target is a known symmetry copy of the reference.
+
+    The forward permutations cover the residual stream, per-block head
+    permutations, per-slot qk/vo intra-head permutations, and FFN hidden
+    permutations. Expected aligning permutations are the wreath-product
+    inverse: intra expectations are transposed *and* re-indexed by the head
+    permutation (the aligning intra for reference slot ``j`` inverts the
+    forward intra of the slot the head permutation moved to ``j``).
+    """
+
+    key = jax.random.PRNGKey(seed)
+    param_key, input_key, perm_key = jax.random.split(key, 3)
+    reference = make_gpt_style_params(key=param_key)
+    adapter = TransformerAdapter()
+    problem = adapter.build_problem(reference)
+
+    rng = np.random.default_rng(int(jax.random.randint(perm_key, (), 0, 2**31 - 1)))
+    forward_perms = {
+        group_id: permutation_matrix(rng.permutation(group.size))
+        for group_id, group in problem.groups.items()
+    }
+    target = problem.apply(
+        reference, PermutationState.from_perms(problem, forward_perms)
+    )
+
+    expected: dict[str, np.ndarray] = {}
+    attention_blocks = {
+        constraint.metadata["head_group"]: constraint.metadata
+        for constraint in problem.constraints
+        if constraint.kind == "attention_block"
+    }
+    intra_reindex: dict[str, str] = {}
+    for metadata in attention_blocks.values():
+        head_matrix = np.asarray(forward_perms[metadata["head_group"]])
+        sigma = np.argmax(head_matrix, axis=1)  # new slot i took old head sigma[i]
+        sigma_inv = np.argsort(sigma)
+        for slot_groups in (metadata["qk_groups"], metadata["vo_groups"]):
+            for slot, group_id in enumerate(slot_groups):
+                intra_reindex[group_id] = slot_groups[int(sigma_inv[slot])]
+    for group_id in forward_perms:
+        source = intra_reindex.get(group_id, group_id)
+        expected[group_id] = np.asarray(forward_perms[source]).T
+
+    tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
+    return SyntheticOrbitCase(
+        name=f"transformer_exact_orbit_seed_{seed}",
+        adapter=adapter,
+        problem=problem,
+        reference=reference,
+        target=target,
+        inputs=tokens,
+        apply_fn=gpt_transformer_apply,
+        expected_permutations=expected,
+    )
+
+
 def _make_dense_params(
     *,
     key: jax.Array,
@@ -258,12 +481,12 @@ def make_dense_mlp_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
     problem = adapter.build_problem(reference)
 
     scales = {
-        "layer_0": np.array([1.7, 0.6, 2.3, 1.1, 0.8], dtype=np.float32),
-        "layer_1": np.array([0.7, 1.6, 1.2, 2.1], dtype=np.float32),
+        "fcn/h0": np.array([1.7, 0.6, 2.3, 1.1, 0.8], dtype=np.float32),
+        "fcn/h1": np.array([0.7, 1.6, 1.2, 2.1], dtype=np.float32),
     }
     forward_perms = {
-        "layer_0": permutation_matrix([2, 4, 1, 0, 3]),
-        "layer_1": permutation_matrix([3, 1, 0, 2]),
+        "fcn/h0": permutation_matrix([2, 4, 1, 0, 3]),
+        "fcn/h1": permutation_matrix([3, 1, 0, 2]),
     }
     scaled = problem.apply_scales(reference, _scale_state(problem, scales))
     target = problem.apply(scaled, PermutationState.from_perms(problem, forward_perms))

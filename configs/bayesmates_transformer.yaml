@@ -1,0 +1,66 @@
+# Transformer alignment example (bayesmates GPT layout).
+#
+# Inspect the block decomposition first:
+#   uv run align configs/examples/bayesmates_transformer.yaml --list-problems
+#
+# The schedule below demonstrates per-block solver configuration (issue #12):
+# attention blocks and the residual stream run first, FFN blocks afterwards,
+# then a final sweep over everything. A single `- solver: lap` step over all
+# groups is equally valid; `lap` routes attention head groups through the
+# structured circuit-cost update automatically.
+
+paths:
+  experiment_root: /Users/manuel/Projects/align/data/bayesmates_module_graph_samples/bayesmates_gpt_tiny
+  samples_dir: null
+  tree_path: null
+  output_dir: null
+  sample_format: pytree_npz
+
+architecture: transformer
+adapter:
+  layer_root: ""  # GPT blocks sit at the tree root; use "core" for ViT.
+
+selection:
+  chain_indices: null
+  samples_per_chain: null
+  sample_step: 1
+  max_total: null
+  ref_chain: 0
+  ref_sample: 0
+
+normalize:
+  enabled: false  # GELU has no scale symmetry; transformers reject normalize.
+
+rebasin:
+  enabled: true
+  objective: l2_weight
+  objective_kwargs: {}
+  layer_root: null
+  seed: 0
+  schedule:
+    - solver: lap
+      max_sweeps: 5
+      tol: 0.0
+      blocks: ["stream", "*/attention"]
+    - solver: lap
+      max_sweeps: 5
+      tol: 0.0
+      blocks: ["*/ffn"]
+    - solver: lap
+      max_sweeps: 10
+      tol: 0.0
+
+runtime:
+  resume: false
+  dry_run: false
+  list_samples: false
+  list_problems: false
+  validate_only: false
+  force_cpu: true
+  force_gpu: false
+  parallelism: null
+  device_ids: null
+  per_device_batch: 1
+  verbosity: info
+  validate_artifacts_on_resume: true
+  save_intermediate: false

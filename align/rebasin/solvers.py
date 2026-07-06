@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+from ..alignment import groups_for_blocks
 from ..options import RebasinScheduleStep as SolverScheduleStep
 from .objectives import UnsupportedGroupLinearization
 from .permutation_state import (
@@ -20,6 +21,8 @@ from .permutation_state import (
 
 
 def _scheduled_groups(problem, step: SolverScheduleStep) -> tuple[str, ...]:
+    if step.blocks is not None:
+        return groups_for_blocks(problem, step.blocks)
     groups = step.groups or problem.group_order
     unknown = sorted(set(groups) - set(problem.groups))
     if unknown:

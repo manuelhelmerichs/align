@@ -38,6 +38,7 @@ from .synthetic import (
     make_dense_mlp_orbit_case,
     make_residual_conv_orbit_case,
     make_split_concat_conv_orbit_case,
+    make_transformer_orbit_case,
     measure_rebasin_performance,
     run_alignment_benchmark,
 )
@@ -49,6 +50,7 @@ ORBIT_CASE_FACTORIES: dict[str, CaseFactory] = {
     "dense_mlp": make_dense_mlp_orbit_case,
     "residual_conv": make_residual_conv_orbit_case,
     "split_concat": make_split_concat_conv_orbit_case,
+    "transformer": make_transformer_orbit_case,
 }
 
 # Cases whose scale symmetry the dense normalizer can remove before rebasin.
@@ -265,6 +267,18 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
                 seed=0,
             )
         )
+    for seed in orbit_seeds:
+        records.append(
+            _orbit_record(
+                case_name="transformer",
+                schedule_name="lap",
+                schedule=schedules["lap"],
+                objective="l2_weight",
+                objective_kwargs=None,
+                normalize=False,
+                seed=seed,
+            )
+        )
 
     posterior_case = make_synthetic_mlp_posterior_case(
         seed=0, n_chains=3 if fast else 4, n_samples=6 if fast else 8
@@ -316,6 +330,10 @@ DEFAULT_THRESHOLDS: dict[str, dict[str, dict[str, float]]] = {
         "optimality_gap": {"max": 1e-4},
     },
     "orbit/split_concat/sinkhorn/*": {
+        "optimality_gap": {"max": 1e-4},
+    },
+    "orbit/transformer/*": {
+        "recovered_permutation_error": {"max": 0.0},
         "optimality_gap": {"max": 1e-4},
     },
     "posterior/synthetic_mlp/*": {

@@ -16,6 +16,7 @@ _SCHEDULE_FIELDS = frozenset(
         "record_loss_history",
         "harden",
         "groups",
+        "blocks",
     }
 )
 
@@ -47,6 +48,13 @@ class RebasinScheduleStep:
     record_loss_history: bool = False
     harden: bool = True
     groups: tuple[str, ...] | None = None
+    blocks: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.groups is not None and self.blocks is not None:
+            raise ValueError(
+                "A rebasin schedule step may set 'groups' or 'blocks', not both."
+            )
 
     @classmethod
     def from_mapping(cls, payload: dict[str, Any]) -> "RebasinScheduleStep":
@@ -54,6 +62,7 @@ class RebasinScheduleStep:
         if "solver" not in payload:
             raise ValueError("Each rebasin schedule entry must define 'solver'.")
         groups = payload.get("groups")
+        blocks = payload.get("blocks")
         return cls(
             solver=str(payload["solver"]).lower(),
             max_sweeps=int(payload.get("max_sweeps", 25)),
@@ -72,6 +81,9 @@ class RebasinScheduleStep:
             ),
             groups=tuple(str(group) for group in groups)
             if groups is not None
+            else None,
+            blocks=tuple(str(block) for block in blocks)
+            if blocks is not None
             else None,
         )
 
@@ -96,6 +108,8 @@ class RebasinScheduleStep:
             )
         if self.groups is not None:
             payload["groups"] = list(self.groups)
+        if self.blocks is not None:
+            payload["blocks"] = list(self.blocks)
         return payload
 
 

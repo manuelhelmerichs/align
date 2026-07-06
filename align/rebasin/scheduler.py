@@ -9,6 +9,7 @@ import jax
 import numpy as np
 
 from ..alignment import materialize_many
+from .attention import attention_module_specs, update_attention_module
 from .permutation_state import PermutationState
 from .solvers import (
     LAPGroupSolver,
@@ -169,6 +170,20 @@ class SolverScheduler:
 
     def _run_lap_step(self, problem, ref_data, target_data, state, step):
         groups = _scheduled_groups(problem, step)
+        scheduled = set(groups)
+        module_by_head = {
+            spec.head_group: spec
+            for spec in attention_module_specs(problem)
+            if spec.head_group in scheduled
+        }
+        # Intra groups of a scheduled head group are updated inside the
+        # structured module update, not as standalone LAP groups.
+        structured_intras = {
+            group_id
+            for spec in module_by_head.values()
+            for group_id in (*spec.qk_groups, *spec.vo_groups)
+            if group_id in scheduled
+        }
         solver = LAPGroupSolver(self.objective)
         sweeps = 0
         max_delta = 0.0
@@ -176,9 +191,22 @@ class SolverScheduler:
             sweeps += 1
             sweep_delta = 0.0
             for group_id in groups:
-                state, update_aux = solver.update(
-                    problem, ref_data, target_data, state, group_id
-                )
+                if group_id in structured_intras:
+                    continue
+                if group_id in module_by_head:
+                    state, update_aux = update_attention_module(
+                        problem,
+                        self.objective,
+                        ref_data,
+                        target_data,
+                        state,
+                        module_by_head[group_id],
+                        scheduled_groups=scheduled,
+                    )
+                else:
+                    state, update_aux = solver.update(
+                        problem, ref_data, target_data, state, group_id
+                    )
                 sweep_delta = max(sweep_delta, float(update_aux["delta"]))
             max_delta = sweep_delta
             if sweep_delta <= step.tol:

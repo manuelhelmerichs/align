@@ -8,7 +8,8 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 
-from ..alignment import apply_perm_to_axis, axis_slice, binding_axis_interval
+from ..alignment import apply_perm_to_axis, binding_axis_interval
+from ..alignment.tensor_ops import binding_indexer, binding_selector, binding_sort_key
 
 
 class Objective(ABC):
@@ -93,21 +94,30 @@ def _apply_matrix_axis(tensor, matrix, *, axis: int, tensor_is_batched: bool):
     return jnp.moveaxis(out, 1, axis)
 
 
+def _sorted_bindings(problem, tensor_id: str):
+    shape = problem.tensors[tensor_id].shape
+    return sorted(
+        problem.bindings_for_tensor(tensor_id),
+        key=lambda binding: binding_sort_key(shape, binding),
+    )
+
+
 def _apply_state_to_tensor(problem, tensor_id: str, tensor, state):
     updated = jnp.asarray(tensor)
-    for binding in problem.bindings_for_tensor(tensor_id):
+    shape = problem.tensors[tensor_id].shape
+    for binding in _sorted_bindings(problem, tensor_id):
         tensor_is_batched = _is_batched_tensor(problem, tensor_id, updated)
         matrix = state.hard[binding.group]
         matrix_arr = jnp.asarray(matrix)
         if matrix_arr.ndim == 3 and not tensor_is_batched:
             updated = jnp.broadcast_to(updated, (matrix_arr.shape[0], *updated.shape))
             tensor_is_batched = True
-        spec_axis, start, stop = binding_axis_interval(
-            problem.tensors[tensor_id].shape, binding
-        )
-        axis = spec_axis + 1 if tensor_is_batched else spec_axis
+        spec_axis, start, stop = binding_axis_interval(shape, binding)
+        selector = binding_selector(shape, binding)
+        offset = 1 if tensor_is_batched else 0
+        axis = spec_axis + offset
         axis_size = int(updated.shape[axis])
-        if start == 0 and stop == axis_size:
+        if not selector and start == 0 and stop == axis_size:
             updated = _apply_matrix_axis(
                 updated,
                 matrix,
@@ -115,7 +125,9 @@ def _apply_state_to_tensor(problem, tensor_id: str, tensor, state):
                 tensor_is_batched=tensor_is_batched,
             )
             continue
-        indexer = axis_slice(updated.ndim, axis, start, stop)
+        indexer = binding_indexer(
+            updated.ndim, spec_axis, start, stop, selector, offset=offset
+        )
         segment = updated[indexer]
         transformed = _apply_matrix_axis(
             segment,
@@ -127,22 +139,26 @@ def _apply_state_to_tensor(problem, tensor_id: str, tensor, state):
     return updated
 
 
-def _apply_other_groups_hard(problem, tensor_id: str, tensor, state, group_id: str):
+def _apply_other_groups_hard(
+    problem, tensor_id: str, tensor, state, skip_groups: frozenset[str] | set[str]
+):
+    """Apply all hard group actions except ``skip_groups`` to one tensor."""
+
     updated = np.asarray(tensor)
-    for binding in problem.bindings_for_tensor(tensor_id):
-        if binding.group == group_id:
+    shape = problem.tensors[tensor_id].shape
+    for binding in _sorted_bindings(problem, tensor_id):
+        if binding.group in skip_groups:
             continue
-        axis, start, stop = binding_axis_interval(
-            problem.tensors[tensor_id].shape, binding
-        )
-        if start == 0 and stop == int(updated.shape[axis]):
+        axis, start, stop = binding_axis_interval(shape, binding)
+        selector = binding_selector(shape, binding)
+        if not selector and start == 0 and stop == int(updated.shape[axis]):
             updated = apply_perm_to_axis(
                 updated,
                 np.asarray(state.hard[binding.group]),
                 axis=axis,
             )
             continue
-        indexer = axis_slice(updated.ndim, axis, start, stop)
+        indexer = binding_indexer(updated.ndim, axis, start, stop, selector)
         segment = updated[indexer]
         transformed = apply_perm_to_axis(
             segment,
@@ -187,6 +203,19 @@ class L2WeightObjective(Objective):
         return loss
 
     def linearize_group(self, problem, ref_data, target_data, state, group_id: str):
+        for constraint in problem.constraints:
+            if (
+                constraint.kind == "attention_block"
+                and constraint.metadata.get("head_group") == group_id
+            ):
+                raise UnsupportedGroupLinearization(
+                    f"Group {group_id!r} is an attention head group; its generic "
+                    "LAP linearization is inexact once intra-head permutations "
+                    "are non-identity. Use the structured attention update "
+                    "(lap schedules do this automatically) or a Sinkhorn "
+                    "schedule."
+                )
+
         repeated = problem.repeated_group_terms().get(group_id, ())
         if repeated:
             joined = ", ".join(repeated)
@@ -209,14 +238,14 @@ class L2WeightObjective(Objective):
             if len(bindings) > 1:  # Defensive; repeated check above should catch this.
                 raise UnsupportedGroupLinearization(group_id)
             binding = bindings[0]
+            shape = problem.tensors[tensor_id].shape
             ref = np.asarray(ref_data[tensor_id])
             target = _apply_other_groups_hard(
-                problem, tensor_id, target_data[tensor_id], state, group_id
+                problem, tensor_id, target_data[tensor_id], state, {group_id}
             )
-            axis, start, stop = binding_axis_interval(
-                problem.tensors[tensor_id].shape, binding
-            )
-            indexer = axis_slice(ref.ndim, axis, start, stop)
+            axis, start, stop = binding_axis_interval(shape, binding)
+            selector = binding_selector(shape, binding)
+            indexer = binding_indexer(ref.ndim, axis, start, stop, selector)
             ref_mat = np.moveaxis(ref[indexer], axis, 0).reshape(group.size, -1)
             target_mat = np.moveaxis(target[indexer], axis, 0).reshape(group.size, -1)
             cost += ref_mat @ target_mat.T
