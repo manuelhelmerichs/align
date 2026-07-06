@@ -63,10 +63,5 @@ class DenseMLPAdapter(ArchitectureAdapter):
         DenseStackBlockAdapter(block_id="fcn", layer_paths=tuple(layer_paths)).build(
             builder
         )
-        # Register boundary tensors (input-side kernel, head bias) too so the
-        # objective measures the complete layer stack.
-        for path in layer_paths:
-            builder.tensor((*path, "kernel"))
-            builder.tensor((*path, "bias"))
         builder.metadata["layer_paths"] = layer_paths
         return builder.finish()

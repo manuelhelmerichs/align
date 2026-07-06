@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--architecture",
-        help="Override architecture adapter (e.g., dense_mlp, resnet).",
+        help="Override architecture adapter (e.g., dense_mlp, resnet, transformer).",
     )
 
     parser.add_argument(

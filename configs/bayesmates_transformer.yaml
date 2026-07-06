@@ -54,6 +54,7 @@ runtime:
   resume: false
   dry_run: false
   list_samples: false
+  list_problems: false
   validate_only: false
   force_cpu: true
   force_gpu: false

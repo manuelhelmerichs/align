@@ -109,6 +109,9 @@ class DenseStackBlockAdapter(BlockAdapter):
                     f"must be 2-D, got shape {kernel_shape}."
                 )
             layers.append((path, kernel_shape[0], kernel_shape[1], "bias" in module))
+            builder.tensor((*path, "kernel"))
+            if "bias" in module:
+                builder.tensor((*path, "bias"))
         for (prev_path, _, prev_out, _), (path, din, _, _) in zip(
             layers, layers[1:], strict=False
         ):

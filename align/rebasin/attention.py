@@ -4,8 +4,8 @@ Attention symmetries form a wreath product: an inter-head permutation shared by
 q/k/v/out plus per-slot intra-head permutations (qk and vo circuits). The head
 group's generic LAP linearization is inexact once intra permutations are
 non-identity, so head matching uses QK/OV circuit costs, which are invariant to
-intra-head permutations (docs/theory_transformer.md sections 12/14). Intra
-groups are then updated with the generic exact LAP linearization.
+intra-head permutations (see the Transformer subsection in docs/theory.md).
+Intra groups are then updated with the generic exact LAP linearization.
 """
 
 from __future__ import annotations

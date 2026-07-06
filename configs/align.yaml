@@ -58,6 +58,7 @@ runtime:
   resume: false            # Reuse manifests/outputs inside output_dir and continue unfinished runs.
   dry_run: false           # Build manifests, validate configuration, and exit without aligning samples.
   list_samples: false      # Emit the manifest ordering to stdout and exit (debugging aid).
+  list_problems: false     # Emit the alignment problem block decomposition and exit.
   validate_only: false     # Validate configuration + filesystem, then exit before running.
   force_cpu: false         # Leave false so Sinkhorn auto-selects GPUs; set true when benchmarking CPU-only.
   force_gpu: false         # Optional override to insist on GPUs even if JAX can't auto-detect them.
