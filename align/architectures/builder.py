@@ -64,6 +64,7 @@ class ProblemBuilder:
         group: str,
         *,
         role: str = "out",
+        scale_power: float = 1.0,
         selector: tuple[tuple[int, int], ...] = (),
     ) -> str:
         """Bind one axis of the tensor at ``path`` to ``group``."""
@@ -75,6 +76,7 @@ class ProblemBuilder:
                 axis=axis,
                 group=group,
                 role=role,
+                scale_power=scale_power,
                 selector=selector,
             )
         )

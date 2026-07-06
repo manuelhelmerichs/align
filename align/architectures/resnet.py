@@ -404,12 +404,18 @@ class ConvStackBlockAdapter(BlockAdapter):
 
         seen_bindings: set[tuple[str, int, str]] = set()
 
-        def _bind(path: tuple[str, ...], axis: int, group_id: str, role: str) -> str:
+        def _bind(
+            path: tuple[str, ...],
+            axis: int,
+            group_id: str,
+            role: str,
+            scale_power: float = 1.0,
+        ) -> str:
             tensor_id = "/".join(path)
             key = (tensor_id, axis, group_id)
             if key not in seen_bindings:
                 seen_bindings.add(key)
-                builder.bind(path, axis, group_id, role=role)
+                builder.bind(path, axis, group_id, role=role, scale_power=scale_power)
             return tensor_id
 
         conv_to_group: dict[str, str] = {}
@@ -427,11 +433,6 @@ class ConvStackBlockAdapter(BlockAdapter):
                 kernel_path, _descend(params, kernel_path), group_size
             )
 
-            out_tensors: list[str] = [
-                _bind(kernel_path, -1, group_id, "out"),
-                _bind((*conv_path, "bias"), 0, group_id, "out"),
-            ]
-
             frn_name = self._frn_name_for(conv_name, frn_ids)
             bn_name = self._bn_name_for(conv_name, bn_ids)
             if frn_name and bn_name:
@@ -439,6 +440,15 @@ class ConvStackBlockAdapter(BlockAdapter):
                     f"Conv '{conv_name}' has both FRN ({frn_name}) and "
                     f"BatchNorm ({bn_name}) modules."
                 )
+
+            # A following normalization layer absorbs pre-norm scales only in
+            # the eps->0 limit, so an exact scale action must leave the conv
+            # untouched; the norm's affine parameters carry the symmetry.
+            conv_scale_power = 0.0 if (frn_name or bn_name) else 1.0
+            out_tensors: list[str] = [
+                _bind(kernel_path, -1, group_id, "out", conv_scale_power),
+                _bind((*conv_path, "bias"), 0, group_id, "out", conv_scale_power),
+            ]
             if frn_name:
                 self._attach_frn_bindings(
                     params,
@@ -537,7 +547,10 @@ class ConvStackBlockAdapter(BlockAdapter):
             eps_path = (*frn_path, "eps")
             eps_value = _descend(params, eps_path)
             if int(np.prod(np.shape(eps_value))) == group_size:
-                out_tensors.append(bind(eps_path, -1, group_id, "out"))
+                # eps sits inside the pre-affine sqrt; the post-norm affine
+                # symmetry must not touch it (it would need power 2 under the
+                # pre-norm gauge, which is not an exact symmetry here).
+                out_tensors.append(bind(eps_path, -1, group_id, "out", 0.0))
 
     def _attach_batchnorm_bindings(
         self,
@@ -573,7 +586,9 @@ class ConvStackBlockAdapter(BlockAdapter):
                 _validate_channel_size(
                     full_path, _descend(params, full_path), group_size
                 )
-                out_tensors.append(bind(full_path, -1, group_id, "out"))
+                # Running stats describe the pre-norm activations; the
+                # post-norm affine symmetry leaves them untouched.
+                out_tensors.append(bind(full_path, -1, group_id, "out", 0.0))
 
 
 @register_adapter

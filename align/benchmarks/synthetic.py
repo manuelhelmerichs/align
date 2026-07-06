@@ -188,6 +188,145 @@ def _residual_conv_apply(params: ParamTree, x: jax.Array) -> jax.Array:
     return pooled @ jnp.asarray(dense["kernel"]) + jnp.asarray(dense["bias"])
 
 
+def _frn(x: jax.Array, module: Mapping[str, Any]) -> jax.Array:
+    """Filter Response Normalization over spatial axes, with learned eps."""
+
+    nu2 = jnp.mean(jnp.square(x), axis=(1, 2), keepdims=True)
+    eps = jnp.abs(jnp.asarray(module["eps"]))
+    normed = x / jnp.sqrt(nu2 + eps)
+    return jnp.asarray(module["gamma"]) * normed + jnp.asarray(module["beta"])
+
+
+def _tlu(x: jax.Array, tau: jax.Array) -> jax.Array:
+    return jnp.maximum(x, jnp.asarray(tau))
+
+
+def _frn_residual_conv_apply(params: ParamTree, x: jax.Array) -> jax.Array:
+    """FRN/TLU residual stack: Conv+FRN+TLU, branch, post-add TLU, dense head."""
+
+    core = params["core"]  # type: ignore[index]
+    h0 = _conv1x1(
+        x,
+        jnp.asarray(core["Conv_0"]["kernel"]),
+        jnp.asarray(core["Conv_0"]["bias"]),
+    )
+    h0 = _tlu(_frn(h0, core["FRN_0"]), core["FRN_0"]["tau"])
+    h1 = _conv1x1(
+        h0,
+        jnp.asarray(core["Conv_1"]["kernel"]),
+        jnp.asarray(core["Conv_1"]["bias"]),
+    )
+    h1 = _tlu(_frn(h1, core["FRN_1"]), core["FRN_1"]["tau"])
+    h2 = _conv1x1(
+        h1,
+        jnp.asarray(core["Conv_2"]["kernel"]),
+        jnp.asarray(core["Conv_2"]["bias"]),
+    )
+    h2 = _frn(h2, core["FRN_2"])
+    h = _tlu(h0 + h2, core["FRN_2"]["tau"])
+    pooled = jnp.mean(h, axis=(1, 2))
+    dense = core["Dense_0"]
+    return pooled @ jnp.asarray(dense["kernel"]) + jnp.asarray(dense["bias"])
+
+
+def make_frn_residual_conv_params(
+    key: jax.Array,
+    *,
+    input_channels: int = 2,
+    residual_channels: int = 4,
+    branch_channels: int = 3,
+    output_channels: int = 2,
+) -> dict[str, Any]:
+    """Random parameters in the SMILE-style Conv_*/FRN_* tree layout."""
+
+    def _frn_module(rng_key: jax.Array, size: int) -> dict[str, jax.Array]:
+        g_key, b_key, t_key = jax.random.split(rng_key, 3)
+        return {
+            "gamma": 1.0 + 0.3 * jax.random.normal(g_key, (size,), dtype=jnp.float32),
+            "beta": 0.3 * jax.random.normal(b_key, (size,), dtype=jnp.float32),
+            "tau": 0.3 * jax.random.normal(t_key, (size,), dtype=jnp.float32),
+            "eps": 1e-6 * jnp.ones((size,), dtype=jnp.float32),
+        }
+
+    k0, k1, k2, kd, f0, f1, f2 = jax.random.split(key, 7)
+
+    def _conv(rng_key: jax.Array, cin: int, cout: int) -> dict[str, jax.Array]:
+        return {
+            "kernel": jax.random.normal(rng_key, (1, 1, cin, cout), dtype=jnp.float32),
+            "bias": 0.1 * jax.random.normal(rng_key, (cout,), dtype=jnp.float32),
+        }
+
+    return {
+        "core": {
+            "Conv_0": _conv(k0, input_channels, residual_channels),
+            "FRN_0": _frn_module(f0, residual_channels),
+            "Conv_1": _conv(k1, residual_channels, branch_channels),
+            "FRN_1": _frn_module(f1, branch_channels),
+            "Conv_2": _conv(k2, branch_channels, residual_channels),
+            "FRN_2": _frn_module(f2, residual_channels),
+            "Dense_0": {
+                "kernel": jax.random.normal(
+                    kd, (residual_channels, output_channels), dtype=jnp.float32
+                ),
+                "bias": 0.1
+                * jax.random.normal(kd, (output_channels,), dtype=jnp.float32),
+            },
+        }
+    }
+
+
+def make_frn_residual_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+    """FRN/TLU residual case whose target carries known affine scales + perms.
+
+    The forward transform composes random positive per-channel scales on both
+    channel groups (the exact post-norm affine symmetry: FRN gamma/beta/tau
+    divided, consumers multiplied, conv kernels and eps untouched) with random
+    channel permutations. ``known_optimum_distance`` of 0 presumes
+    ``normalize=True``: permutation-only rebasin cannot remove the affine
+    scales.
+    """
+
+    key = jax.random.PRNGKey(seed)
+    param_key, input_key = jax.random.split(key)
+    reference = make_frn_residual_conv_params(param_key)
+    module_graph = {
+        "nodes": [
+            {
+                "name": "residual_add",
+                "type": "add",
+                "inputs": ["core/Conv_0", "core/Conv_2"],
+            }
+        ]
+    }
+    adapter = ResNetAdapter(layer_root="core", module_graph=module_graph)
+    problem = adapter.build_problem(reference)
+
+    rng = np.random.default_rng(seed + 977)
+    scales = {
+        group_id: np.exp(rng.uniform(-1.0, 1.0, size=group.size)).astype(np.float32)
+        for group_id, group in problem.groups.items()
+    }
+    forward_perms = {
+        group_id: permutation_matrix(rng.permutation(group.size))
+        for group_id, group in problem.groups.items()
+    }
+    scaled = problem.apply_scales(reference, _scale_state(problem, scales))
+    target = problem.apply(scaled, PermutationState.from_perms(problem, forward_perms))
+    inputs = jax.random.normal(input_key, (7, 3, 3, 2), dtype=jnp.float32)
+
+    return SyntheticOrbitCase(
+        name=f"frn_residual_conv_orbit_seed_{seed}",
+        adapter=adapter,
+        problem=problem,
+        reference=reference,
+        target=target,
+        inputs=inputs,
+        apply_fn=_frn_residual_conv_apply,
+        expected_permutations=_inverse_permutations(forward_perms),
+        expected_residual_ties=(("core/Conv_0", "core/Conv_2"),),
+    )
+
+
 def _split_concat_conv_apply(params: ParamTree, x: jax.Array) -> jax.Array:
     core = params["core"]  # type: ignore[index]
     stem = _conv1x1(
@@ -434,6 +573,47 @@ def make_transformer_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
         inputs=tokens,
         apply_fn=gpt_transformer_apply,
         expected_permutations=expected,
+    )
+
+
+def make_transformer_scaled_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+    """Transformer orbit whose target also carries qk/vo circuit scales.
+
+    The target composes the known permutation copy with random positive
+    diagonal scales on every intra-head qk/vo group (the exact attention
+    circuit symmetry). Permutation-only rebasin cannot reach the reference;
+    balancing normalization removes the scales first, after which the
+    expected permutations are those of the pure-permutation case.
+    ``known_optimum_distance`` of 0 therefore presumes ``normalize=True``.
+    """
+
+    case = make_transformer_orbit_case(seed=seed)
+    rng = np.random.default_rng(seed + 977)
+    intra_groups = [
+        group_id
+        for constraint in case.problem.constraints
+        if constraint.kind == "attention_block"
+        for group_id in (
+            *constraint.metadata["qk_groups"],
+            *constraint.metadata["vo_groups"],
+        )
+    ]
+    scales = {
+        group_id: np.exp(
+            rng.uniform(-1.5, 1.5, size=case.problem.groups[group_id].size)
+        ).astype(np.float32)
+        for group_id in intra_groups
+    }
+    target = case.problem.apply_scales(case.target, _scale_state(case.problem, scales))
+    return SyntheticOrbitCase(
+        name=f"transformer_scaled_orbit_seed_{seed}",
+        adapter=case.adapter,
+        problem=case.problem,
+        reference=case.reference,
+        target=target,
+        inputs=case.inputs,
+        apply_fn=case.apply_fn,
+        expected_permutations=case.expected_permutations,
     )
 
 

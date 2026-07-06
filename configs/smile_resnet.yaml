@@ -21,7 +21,13 @@ selection:
   ref_sample: 0
 
 normalize:
-  enabled: false
+  enabled: true
+  method: scale_normalize
+  scale_normalize:
+    # FRN/TLU (and BN/ReLU) stacks carry the exact post-normalization
+    # affine scale symmetry: gamma/beta/tau are canonicalized to unit
+    # joint energy per channel group, consumers absorb the factors.
+    activation: tlu
 
 rebasin:
   enabled: true

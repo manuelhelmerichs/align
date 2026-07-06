@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from align.alignment import AlignmentProblem
@@ -32,6 +33,8 @@ from .synthetic import (
     ParamTree,
     _make_dense_params,
     dense_mlp_apply,
+    gpt_transformer_apply,
+    make_gpt_style_params,
     permutation_matrix,
 )
 
@@ -279,6 +282,102 @@ def make_synthetic_mlp_posterior_case(
     )
 
 
+def make_synthetic_transformer_posterior_case(
+    *,
+    seed: int = 0,
+    n_chains: int = 3,
+    n_samples: int = 6,
+    noise_scale: float = 0.01,
+    scale_jitter: float = 0.5,
+) -> PosteriorBenchmarkCase:
+    """Build a single-mode GPT posterior whose chains sit in symmetry copies.
+
+    Every non-reference chain applies one fixed random symmetry of a shared
+    base mode: permutations on all groups (stream, heads, intra-head, FFN)
+    composed with positive diagonal scales on the qk/vo intra-head groups (the
+    exact attention circuit symmetry), then i.i.d. Gaussian weight noise per
+    sample. Rebasin alone cannot remove the circuit scales, so full collapse
+    requires balancing normalization first.
+    """
+
+    if n_chains < 2:
+        raise ValueError("Posterior cases require at least two chains.")
+    if n_samples < 4:
+        raise ValueError("Posterior cases require at least four samples per chain.")
+
+    key = jax.random.PRNGKey(seed)
+    param_key, input_key = jax.random.split(key)
+    base = make_gpt_style_params(key=param_key)
+    adapter = get_adapter("transformer")
+    problem = adapter.build_problem(base)
+    intra_groups = [
+        group_id
+        for constraint in problem.constraints
+        if constraint.kind == "attention_block"
+        for group_id in (
+            *constraint.metadata["qk_groups"],
+            *constraint.metadata["vo_groups"],
+        )
+    ]
+
+    rng = np.random.default_rng(seed)
+    chains: list[tuple[ParamTree, ...]] = []
+    chain_transforms: list[dict[str, Any]] = []
+    for chain_idx in range(n_chains):
+        if chain_idx == 0:
+            transformed = base
+            perms: dict[str, np.ndarray] = {}
+            scales: dict[str, np.ndarray] = {}
+        else:
+            perms = {
+                gid: permutation_matrix(rng.permutation(group.size))
+                for gid, group in problem.groups.items()
+            }
+            scales = {
+                gid: np.exp(
+                    rng.uniform(
+                        -scale_jitter, scale_jitter, size=problem.groups[gid].size
+                    )
+                ).astype(np.float32)
+                for gid in intra_groups
+            }
+            scaled = problem.apply_scales(base, ScaleState.from_scales(problem, scales))
+            transformed = problem.apply(
+                scaled, PermutationState.from_perms(problem, perms)
+            )
+        chain_transforms.append({"perms": perms, "scales": scales})
+
+        samples = []
+        for _ in range(n_samples):
+            noisy = jax.tree_util.tree_map(
+                lambda leaf: (
+                    np.asarray(leaf)
+                    + noise_scale
+                    * rng.standard_normal(np.shape(leaf)).astype(np.asarray(leaf).dtype)
+                ),
+                transformed,
+            )
+            samples.append(noisy)
+        chains.append(tuple(samples))
+
+    tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
+    return PosteriorBenchmarkCase(
+        name=f"synthetic_transformer_posterior_seed_{seed}",
+        problem=problem,
+        chains=tuple(chains),
+        apply_fn=gpt_transformer_apply,
+        inputs=tokens,
+        metadata={
+            "seed": seed,
+            "n_chains": n_chains,
+            "n_samples": n_samples,
+            "noise_scale": noise_scale,
+            "scale_jitter": scale_jitter,
+            "chain_transforms": chain_transforms,
+        },
+    )
+
+
 def _detect_tree_path(experiment_root: Path) -> Path:
     for candidate in ("tree_sampling", "tree"):
         path = experiment_root / candidate
@@ -461,6 +560,7 @@ __all__ = [
     "evaluate_posterior_metrics",
     "load_experiment_posterior_case",
     "make_synthetic_mlp_posterior_case",
+    "make_synthetic_transformer_posterior_case",
     "run_posterior_benchmark",
     "split_rhat",
 ]

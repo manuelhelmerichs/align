@@ -44,7 +44,7 @@ _VALID_DEGENERATE_HANDLING = frozenset(
 )
 _VALID_NORMALIZATION_METHODS = frozenset({"scale_normalize"})
 _VALID_TASK_TYPES = frozenset({"regression", "classification"})
-_VALID_ACTIVATIONS = frozenset({"relu", "leaky_relu"})
+_VALID_ACTIVATIONS = frozenset({"relu", "leaky_relu", "tlu", "gelu"})
 
 
 def _validate_choice(name: str, value: str, valid: frozenset[str]) -> str:

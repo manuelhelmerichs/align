@@ -30,15 +30,18 @@ from align.rebasin.objectives import UnsupportedGroupLinearization
 from .posterior import (
     PosteriorBenchmarkCase,
     make_synthetic_mlp_posterior_case,
+    make_synthetic_transformer_posterior_case,
     run_posterior_benchmark,
 )
 from .synthetic import (
     SyntheticOrbitCase,
     default_schedule_grid,
     make_dense_mlp_orbit_case,
+    make_frn_residual_conv_orbit_case,
     make_residual_conv_orbit_case,
     make_split_concat_conv_orbit_case,
     make_transformer_orbit_case,
+    make_transformer_scaled_orbit_case,
     measure_rebasin_performance,
     run_alignment_benchmark,
 )
@@ -49,12 +52,16 @@ CaseFactory = Callable[..., SyntheticOrbitCase]
 ORBIT_CASE_FACTORIES: dict[str, CaseFactory] = {
     "dense_mlp": make_dense_mlp_orbit_case,
     "residual_conv": make_residual_conv_orbit_case,
+    "frn_residual_conv": make_frn_residual_conv_orbit_case,
     "split_concat": make_split_concat_conv_orbit_case,
     "transformer": make_transformer_orbit_case,
+    "transformer_scaled": make_transformer_scaled_orbit_case,
 }
 
-# Cases whose scale symmetry the dense normalizer can remove before rebasin.
-_NORMALIZABLE_CASES = frozenset({"dense_mlp"})
+# Cases whose scale symmetry the normalizer can remove before rebasin.
+_NORMALIZABLE_CASES = frozenset(
+    {"dense_mlp", "frn_residual_conv", "transformer_scaled"}
+)
 
 
 @dataclass
@@ -255,6 +262,21 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
             seed=0,
         )
     )
+    # The FRN case's residual cycle couples its groups; plain LAP coordinate
+    # descent can stall on some seeds, so the regression pin uses the mixed
+    # schedule.
+    for seed in orbit_seeds:
+        records.append(
+            _orbit_record(
+                case_name="frn_residual_conv",
+                schedule_name="lap_sinkhorn_lap",
+                schedule=schedules["lap_sinkhorn_lap"],
+                objective="l2_weight",
+                objective_kwargs=None,
+                normalize=True,
+                seed=seed,
+            )
+        )
     for schedule_name in ("lap", "sinkhorn"):
         records.append(
             _orbit_record(
@@ -279,6 +301,18 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
                 seed=seed,
             )
         )
+    for seed in orbit_seeds:
+        records.append(
+            _orbit_record(
+                case_name="transformer_scaled",
+                schedule_name="lap",
+                schedule=schedules["lap"],
+                objective="l2_weight",
+                objective_kwargs=None,
+                normalize=True,
+                seed=seed,
+            )
+        )
 
     posterior_case = make_synthetic_mlp_posterior_case(
         seed=0, n_chains=3 if fast else 4, n_samples=6 if fast else 8
@@ -287,6 +321,20 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
         _posterior_record(
             case=posterior_case,
             case_label="synthetic_mlp",
+            schedule_name="lap",
+            schedule=schedules["lap"],
+            objective="l2_weight",
+            objective_kwargs=None,
+            normalize=True,
+        )
+    )
+    transformer_posterior_case = make_synthetic_transformer_posterior_case(
+        seed=0, n_chains=2 if fast else 3, n_samples=6 if fast else 8
+    )
+    records.append(
+        _posterior_record(
+            case=transformer_posterior_case,
+            case_label="synthetic_transformer",
             schedule_name="lap",
             schedule=schedules["lap"],
             objective="l2_weight",
@@ -325,6 +373,10 @@ DEFAULT_THRESHOLDS: dict[str, dict[str, dict[str, float]]] = {
         "recovered_permutation_error": {"max": 0.0},
         "optimality_gap": {"max": 1e-4},
     },
+    "orbit/frn_residual_conv/*": {
+        "recovered_permutation_error": {"max": 0.0},
+        "optimality_gap": {"max": 1e-4},
+    },
     "orbit/split_concat/lap/*": {
         "recovered_permutation_error": {"max": 0.0},
         "optimality_gap": {"max": 1e-4},
@@ -336,12 +388,27 @@ DEFAULT_THRESHOLDS: dict[str, dict[str, dict[str, float]]] = {
         "recovered_permutation_error": {"max": 0.0},
         "optimality_gap": {"max": 1e-4},
     },
+    "orbit/transformer_scaled/*": {
+        "recovered_permutation_error": {"max": 0.0},
+        "optimality_gap": {"max": 1e-4},
+    },
     "posterior/synthetic_mlp/*": {
         "before_split_rhat_max": {"min": 3.0},
         "after_split_rhat_max": {"max": 2.0},
         "before_weight_averaging_gap": {"min": 0.2},
         "after_weight_averaging_gap": {"max": 0.05},
         "function_drift_max": {"max": 1e-4},
+    },
+    # The transformer case has ~1.2k parameters, so the *max* split R-hat is
+    # dominated by order statistics of the noise floor; the mean is the
+    # collapse signal (goes from >10 to ~1 only when circuit scales are
+    # normalized before rebasin).
+    "posterior/synthetic_transformer/*": {
+        "before_split_rhat_mean": {"min": 10.0},
+        "after_split_rhat_mean": {"max": 1.2},
+        "before_weight_averaging_gap": {"min": 0.2},
+        "after_weight_averaging_gap": {"max": 0.15},
+        "function_drift_max": {"max": 1e-3},
     },
 }
 

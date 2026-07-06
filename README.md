@@ -77,9 +77,10 @@ uv run align configs/examples/align.yaml --output-dir results/example/align/lap
 
 ## Documentation
 
-- [docs/align.md](docs/align.md): alignment background and objective/schedule configuration
-- [docs/developer_reference_align.md](docs/developer_reference_align.md): CLI, config schema, runtime, and artifact layout
+- [docs/theory.md](docs/theory.md): the symmetry model (scale + permutation) and objective/schedule background
+- [docs/developer_reference.md](docs/developer_reference.md): CLI, config schema, runtime, and artifact layout
 - [docs/producer_artifact_contract.md](docs/producer_artifact_contract.md): expected sampler output layout
+- [docs/symmetry_coverage.md](docs/symmetry_coverage.md): symmetry × architecture coverage matrix, gap analysis, and work log
 
 ## Development
 

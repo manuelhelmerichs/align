@@ -234,7 +234,15 @@ def _binding_profile(
             )
         )
         entries.append(
-            (axis, start, stop, binding.role, group_index[binding.group], selector)
+            (
+                axis,
+                start,
+                stop,
+                binding.role,
+                binding.scale_power,
+                group_index[binding.group],
+                selector,
+            )
         )
     return (tuple(tensor.shape), tuple(sorted(entries)))
 

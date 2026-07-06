@@ -29,7 +29,14 @@ selection:
   ref_sample: 0
 
 normalize:
-  enabled: false  # GELU has no scale symmetry; transformers reject normalize.
+  enabled: true
+  method: scale_normalize
+  scale_normalize:
+    # Attention circuits carry an exact diagonal scale symmetry per
+    # intra-head dimension (qk and vo); normalization balances the
+    # query/key and value/out energies. GELU FFN hidden units have no
+    # scale symmetry and stay untouched.
+    activation: gelu
 
 rebasin:
   enabled: true

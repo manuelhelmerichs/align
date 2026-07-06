@@ -51,6 +51,13 @@ class AxisBinding:
     consumes the channel (the next tensor's input axis) and is multiplied by it.
     Permutation actions are role-independent and ignore this field.
 
+    ``scale_power`` is the exponent of the group scale applied to this axis
+    (``factor = scale ** scale_power``); permutations ignore it. ``0.0`` marks
+    axes that permute with the group but do not participate in its scale
+    symmetry — e.g. a conv kernel feeding a normalization layer (the norm
+    absorbs pre-norm scales only in the ε→0 limit, so an exact action must not
+    touch it), FRN's learned ``eps``, or BatchNorm running statistics.
+
     ``selector`` restricts the binding to a fixed index on *other* axes as
     ``((axis, index), ...)`` pairs, e.g. one attention head slot: the intra-head
     group of slot ``i`` binds the head-dim axis with ``selector=((head_axis,
@@ -65,6 +72,7 @@ class AxisBinding:
     start: int | None = None
     stop: int | None = None
     role: Literal["out", "in"] = "out"
+    scale_power: float = 1.0
     selector: tuple[tuple[int, int], ...] = ()
 
 
@@ -106,11 +114,15 @@ def _set_axis_slice(tensor: Any, indexer: tuple[slice, ...], value: Any):
     return updated
 
 
-def _scale_axis(tensor: Any, scale: Any, *, axis: int, divide: bool) -> Any:
-    """Multiply or divide ``tensor`` along ``axis`` by a per-channel ``scale``."""
+def _scale_axis(
+    tensor: Any, scale: Any, *, axis: int, divide: bool, power: float = 1.0
+) -> Any:
+    """Multiply or divide ``tensor`` along ``axis`` by ``scale ** power``."""
 
     xp = jnp if isinstance(tensor, jnp.ndarray) else np
     factor = xp.asarray(scale)
+    if power != 1.0:
+        factor = factor**power
     broadcast_shape = [1] * xp.ndim(tensor)
     broadcast_shape[axis] = factor.shape[0]
     factor = factor.reshape(broadcast_shape)
@@ -300,6 +312,12 @@ class AlignmentProblem:
                 raise ValueError(
                     f"Axis binding for tensor {binding.tensor_id!r} has invalid role "
                     f"{binding.role!r}; expected 'out' or 'in'."
+                )
+            if not np.isfinite(binding.scale_power) or binding.scale_power < 0.0:
+                raise ValueError(
+                    f"Axis binding for tensor {binding.tensor_id!r} has invalid "
+                    f"scale_power {binding.scale_power!r}; expected a finite "
+                    "non-negative float."
                 )
             tensor = self.tensors[binding.tensor_id]
             axis, start, stop = binding_axis_interval(tensor.shape, binding)
@@ -511,19 +529,23 @@ class AlignmentProblem:
         """Apply a per-group positive scale to all bound tensor axes.
 
         ``out``-role axes (the channel producer kernel and its bias) are divided
-        by the group's scale; ``in``-role axes (consumer input axes) are
-        multiplied by it. For ReLU-style positive-homogeneous activations this is
-        an exact function-preserving symmetry.
+        by the group's scale raised to the binding's ``scale_power``;
+        ``in``-role axes (consumer input axes) are multiplied by it. Bindings
+        with ``scale_power == 0`` permute with the group but are exempt from
+        its scale action.
         """
 
         scale_state.validate(self)
 
         def _scale(segment, axis, binding):
+            if binding.scale_power == 0.0:
+                return segment
             return _scale_axis(
                 segment,
                 scale_state.scales[binding.group],
                 axis=axis,
                 divide=binding.role == "out",
+                power=binding.scale_power,
             )
 
         return self._transform_bound_tensors(params, _scale)

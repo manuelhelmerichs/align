@@ -161,6 +161,12 @@ class AttentionBlockAdapter(BlockAdapter):
     qk intra group per head slot (selector bindings on q and k), one vo intra
     group per slot (v and out), the stream in/out bindings, and the
     ``attention_block`` constraint consumed by the structured LAP update.
+
+    Intra-head binding roles encode the exact diagonal circuit symmetry for
+    the scale action: query/value carry ``out`` (divided by the group scale)
+    while key and the out kernel carry ``in`` (multiplied), so
+    ``apply_scales`` preserves ``q·k`` scores and the value/out contraction
+    exactly. Permutations ignore roles, so rebasin is unaffected.
     """
 
     kind: ClassVar[str] = "attention"
@@ -220,10 +226,10 @@ class AttentionBlockAdapter(BlockAdapter):
             vo_groups.append(builder.add_group(f"{self.block_id}/vo{slot}", head_dim))
 
         role_tensor_ids: dict[str, str] = {}
-        for name, intra_groups in (
-            ("query", qk_groups),
-            ("key", qk_groups),
-            ("value", vo_groups),
+        for name, intra_groups, intra_role in (
+            ("query", qk_groups, "out"),
+            ("key", qk_groups, "in"),
+            ("value", vo_groups, "out"),
         ):
             kernel_path = (*self.module_path, name, "kernel")
             role_tensor_ids[name] = builder.bind(
@@ -231,16 +237,24 @@ class AttentionBlockAdapter(BlockAdapter):
             )
             builder.bind(kernel_path, 1, heads_group)
             for slot, intra_group in enumerate(intra_groups):
-                builder.bind(kernel_path, 2, intra_group, selector=((1, slot),))
+                builder.bind(
+                    kernel_path, 2, intra_group, role=intra_role, selector=((1, slot),)
+                )
             if "bias" in module[name]:
                 bias_path = (*self.module_path, name, "bias")
                 builder.bind(bias_path, 0, heads_group)
                 for slot, intra_group in enumerate(intra_groups):
-                    builder.bind(bias_path, 1, intra_group, selector=((0, slot),))
+                    builder.bind(
+                        bias_path,
+                        1,
+                        intra_group,
+                        role=intra_role,
+                        selector=((0, slot),),
+                    )
         out_kernel_path = (*self.module_path, "out", "kernel")
         role_tensor_ids["out"] = builder.bind(out_kernel_path, 0, heads_group)
         for slot, vo_group in enumerate(vo_groups):
-            builder.bind(out_kernel_path, 1, vo_group, selector=((0, slot),))
+            builder.bind(out_kernel_path, 1, vo_group, role="in", selector=((0, slot),))
         builder.bind(out_kernel_path, 2, self.stream_group, role="out")
         if "bias" in module["out"]:
             builder.bind(
