@@ -34,6 +34,7 @@ from align.rebasin import (
     PermutationState,
     default_lap_schedule,
     rebasin_single_sample,
+    resolve_calibration_kwargs,
 )
 
 ParamTree = Mapping[str, Any]
@@ -975,12 +976,19 @@ def run_alignment_benchmark(
 
     reference = _normalize_if_requested(case, case.reference, normalize)
     target = _normalize_if_requested(case, case.target, normalize)
+    resolved_kwargs = resolve_calibration_kwargs(
+        objective_kwargs,
+        problem=case.problem,
+        params=reference,
+        apply_fn=case.apply_fn,
+        inputs=case.inputs,
+    )
     aligned, perms, aux = rebasin_single_sample(
         case.problem,
         reference,
         target,
         objective=objective,
-        objective_kwargs=dict(objective_kwargs or {}),
+        objective_kwargs=resolved_kwargs,
         schedule=schedule or default_lap_schedule(),
         rng_key=jax.random.PRNGKey(rng_seed),
     )

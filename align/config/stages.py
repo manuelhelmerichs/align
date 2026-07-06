@@ -232,7 +232,7 @@ class RebasinConfig:
     def validate_method(self) -> None:
         """Validate objective and solver names without importing JAX."""
 
-        valid_objectives = {"l2_weight"}
+        valid_objectives = {"l2_weight", "fisher_l2"}
         if self.objective.lower() not in valid_objectives:
             raise ValueError(
                 f"Unknown rebasin objective '{self.objective}'. "

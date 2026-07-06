@@ -328,6 +328,27 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
             normalize=True,
         )
     )
+    # Laplace-shaped (inverse-Fisher) noise: the regime where the Fisher
+    # metric beats plain L2. The after-gap threshold of 0.2 encodes that
+    # advantage: l2_weight scores ~0.36 on the full-mode cell.
+    anisotropic_case = make_synthetic_mlp_posterior_case(
+        seed=0,
+        noise_mode="inverse_fisher",
+        noise_scale=0.3,
+        n_chains=3 if fast else 4,
+        n_samples=6 if fast else 8,
+    )
+    records.append(
+        _posterior_record(
+            case=anisotropic_case,
+            case_label="synthetic_mlp_anisotropic",
+            schedule_name="lap",
+            schedule=schedules["lap"],
+            objective="fisher_l2",
+            objective_kwargs={"calibration": "fisher"},
+            normalize=True,
+        )
+    )
     transformer_posterior_case = make_synthetic_transformer_posterior_case(
         seed=0, n_chains=2 if fast else 3, n_samples=6 if fast else 8
     )
@@ -397,6 +418,13 @@ DEFAULT_THRESHOLDS: dict[str, dict[str, dict[str, float]]] = {
         "after_split_rhat_max": {"max": 2.0},
         "before_weight_averaging_gap": {"min": 0.2},
         "after_weight_averaging_gap": {"max": 0.05},
+        "function_drift_max": {"max": 1e-4},
+    },
+    "posterior/synthetic_mlp_anisotropic/*": {
+        "before_split_rhat_max": {"min": 10.0},
+        "after_split_rhat_max": {"max": 2.0},
+        "before_weight_averaging_gap": {"min": 0.5},
+        "after_weight_averaging_gap": {"max": 0.2},
         "function_drift_max": {"max": 1e-4},
     },
     # The transformer case has ~1.2k parameters, so the *max* split R-hat is

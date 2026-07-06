@@ -27,7 +27,13 @@ import numpy as np
 from align.alignment import AlignmentProblem
 from align.architectures import get_adapter
 from align.normalization import ScaleNormalizer, ScaleState
-from align.rebasin import PermutationState, build_scheduler, rebasin_single_sample
+from align.rebasin import (
+    PermutationState,
+    build_scheduler,
+    estimate_diag_fisher_tree,
+    rebasin_single_sample,
+    resolve_calibration_kwargs,
+)
 
 from .synthetic import (
     ParamTree,
@@ -195,6 +201,54 @@ def evaluate_posterior_metrics(
     )
 
 
+def _noise_std_tree(
+    transformed: ParamTree,
+    *,
+    noise_mode: str,
+    noise_scale: float,
+    apply_fn: ApplyFn,
+    inputs: jax.Array,
+    fisher_damping: float = 1e-3,
+) -> ParamTree:
+    """Per-leaf noise standard deviations for one chain mode.
+
+    ``isotropic`` reproduces i.i.d. noise. ``inverse_fisher`` shapes the noise
+    like a Laplace-approximate posterior: std proportional to
+    ``(F + damping)^(-1/2)`` with the diagonal Fisher ``F`` at the chain mode,
+    rescaled so the total noise energy matches the isotropic case. Flat
+    (function-irrelevant) directions then dominate weight-space distances,
+    which is the realistic failure regime for unweighted L2 matching.
+    """
+
+    if noise_mode == "isotropic":
+        return jax.tree_util.tree_map(
+            lambda leaf: np.full(np.shape(leaf), noise_scale, dtype=np.float64),
+            transformed,
+        )
+    if noise_mode != "inverse_fisher":
+        raise ValueError(
+            f"Unknown noise_mode {noise_mode!r}; expected 'isotropic' or "
+            "'inverse_fisher'."
+        )
+    fisher = estimate_diag_fisher_tree(transformed, apply_fn, inputs)
+    fisher_flat = np.concatenate(
+        [
+            np.ravel(np.asarray(leaf, dtype=np.float64))
+            for leaf in jax.tree_util.tree_leaves(fisher)
+        ]
+    )
+    floor = fisher_damping * float(np.mean(fisher_flat))
+    raw = jax.tree_util.tree_map(
+        lambda leaf: 1.0 / np.sqrt(np.asarray(leaf, dtype=np.float64) + floor),
+        fisher,
+    )
+    raw_flat = np.concatenate(
+        [np.ravel(leaf) for leaf in jax.tree_util.tree_leaves(raw)]
+    )
+    rms = float(np.sqrt(np.mean(np.square(raw_flat))))
+    return jax.tree_util.tree_map(lambda leaf: noise_scale * leaf / rms, raw)
+
+
 def make_synthetic_mlp_posterior_case(
     *,
     seed: int = 0,
@@ -204,15 +258,19 @@ def make_synthetic_mlp_posterior_case(
     noise_scale: float = 0.02,
     scale_jitter: float = 0.3,
     n_inputs: int = 16,
+    noise_mode: str = "isotropic",
 ) -> PosteriorBenchmarkCase:
     """Build a single-mode posterior whose chains sit in symmetry copies.
 
     Every chain applies one fixed random permutation and positive scale
     transformation of a shared base mode (function-preserving), then adds
-    i.i.d. Gaussian weight noise per sample (scale ``noise_scale``). Before
-    alignment, cross-chain R-hat is far above 1 because chain means differ by
-    symmetry actions; after normalization plus rebasin all chains should
-    collapse onto one basin and R-hat should approach 1.
+    Gaussian weight noise per sample (scale ``noise_scale``). ``noise_mode``
+    selects the within-chain noise shape: ``isotropic`` (i.i.d.) or
+    ``inverse_fisher`` (Laplace-like, std proportional to ``F^(-1/2)`` at each
+    chain's mode; see :func:`_noise_std_tree`). Before alignment, cross-chain
+    R-hat is far above 1 because chain means differ by symmetry actions; after
+    normalization plus rebasin all chains should collapse onto one basin and
+    R-hat should approach 1.
     """
 
     if n_chains < 2:
@@ -225,6 +283,7 @@ def make_synthetic_mlp_posterior_case(
     base = _make_dense_params(key=param_key, sizes=tuple(sizes))
     adapter = get_adapter("dense_mlp")
     problem = adapter.build_problem(base)
+    inputs = jax.random.normal(input_key, (n_inputs, int(sizes[0])))
 
     rng = np.random.default_rng(seed)
     chains: list[tuple[ParamTree, ...]] = []
@@ -251,22 +310,32 @@ def make_synthetic_mlp_posterior_case(
             )
         chain_transforms.append({"perms": perms, "scales": scales})
 
+        noise_std = _noise_std_tree(
+            transformed,
+            noise_mode=noise_mode,
+            noise_scale=noise_scale,
+            apply_fn=dense_mlp_apply,
+            inputs=inputs,
+        )
         samples = []
         for _ in range(n_samples):
             noisy = jax.tree_util.tree_map(
-                lambda leaf: (
+                lambda leaf, std: (
                     np.asarray(leaf)
-                    + noise_scale
-                    * rng.standard_normal(np.shape(leaf)).astype(np.asarray(leaf).dtype)
+                    + (std * rng.standard_normal(np.shape(leaf))).astype(
+                        np.asarray(leaf).dtype
+                    )
                 ),
                 transformed,
+                noise_std,
             )
             samples.append(noisy)
         chains.append(tuple(samples))
 
-    inputs = jax.random.normal(input_key, (n_inputs, int(sizes[0])))
     return PosteriorBenchmarkCase(
-        name=f"synthetic_mlp_posterior_seed_{seed}",
+        name=f"synthetic_mlp_posterior_{noise_mode}_seed_{seed}"
+        if noise_mode != "isotropic"
+        else f"synthetic_mlp_posterior_seed_{seed}",
         problem=problem,
         chains=tuple(chains),
         apply_fn=dense_mlp_apply,
@@ -277,6 +346,7 @@ def make_synthetic_mlp_posterior_case(
             "n_samples": n_samples,
             "noise_scale": noise_scale,
             "scale_jitter": scale_jitter,
+            "noise_mode": noise_mode,
             "chain_transforms": chain_transforms,
         },
     )
@@ -492,14 +562,20 @@ def run_posterior_benchmark(
 
     metrics_before = evaluate_posterior_metrics(case, case.chains)
 
-    scheduler = build_scheduler(
-        objective=objective,
-        objective_kwargs=dict(objective_kwargs or {}),
-        schedule=schedule,
-    )
     reference = case.reference
     if normalize:
         reference = _normalize_tree(case.problem, reference)
+    scheduler = build_scheduler(
+        objective=objective,
+        objective_kwargs=resolve_calibration_kwargs(
+            objective_kwargs,
+            problem=case.problem,
+            params=reference,
+            apply_fn=case.apply_fn,
+            inputs=case.inputs,
+        ),
+        schedule=schedule,
+    )
     ref_data = case.problem.materialize(
         reference, backend=scheduler.backend, cache=True
     )

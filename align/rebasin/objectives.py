@@ -170,6 +170,32 @@ def _apply_other_groups_hard(
     return updated
 
 
+def _require_lap_linearizable(problem, group_id: str) -> None:
+    """Reject groups whose exact hard update is not a linear assignment."""
+
+    for constraint in problem.constraints:
+        if (
+            constraint.kind == "attention_block"
+            and constraint.metadata.get("head_group") == group_id
+        ):
+            raise UnsupportedGroupLinearization(
+                f"Group {group_id!r} is an attention head group; its generic "
+                "LAP linearization is inexact once intra-head permutations "
+                "are non-identity. Use the structured attention update "
+                "(lap schedules do this automatically) or a Sinkhorn "
+                "schedule."
+            )
+
+    repeated = problem.repeated_group_terms().get(group_id, ())
+    if repeated:
+        joined = ", ".join(repeated)
+        raise UnsupportedGroupLinearization(
+            f"Group {group_id!r} appears multiple times in tensor term(s) "
+            f"{joined}. The exact hard update is a quadratic assignment "
+            "problem, not an LAP. Use a Sinkhorn schedule for this problem."
+        )
+
+
 @register_objective("l2_weight")
 class L2WeightObjective(Objective):
     """Sum of squared tensor differences after applying the alignment state."""
@@ -203,27 +229,7 @@ class L2WeightObjective(Objective):
         return loss
 
     def linearize_group(self, problem, ref_data, target_data, state, group_id: str):
-        for constraint in problem.constraints:
-            if (
-                constraint.kind == "attention_block"
-                and constraint.metadata.get("head_group") == group_id
-            ):
-                raise UnsupportedGroupLinearization(
-                    f"Group {group_id!r} is an attention head group; its generic "
-                    "LAP linearization is inexact once intra-head permutations "
-                    "are non-identity. Use the structured attention update "
-                    "(lap schedules do this automatically) or a Sinkhorn "
-                    "schedule."
-                )
-
-        repeated = problem.repeated_group_terms().get(group_id, ())
-        if repeated:
-            joined = ", ".join(repeated)
-            raise UnsupportedGroupLinearization(
-                f"Group {group_id!r} appears multiple times in tensor term(s) "
-                f"{joined}. The exact hard update is a quadratic assignment "
-                "problem, not an LAP. Use a Sinkhorn schedule for this problem."
-            )
+        _require_lap_linearizable(problem, group_id)
 
         group = problem.groups[group_id]
         cost = np.zeros((group.size, group.size), dtype=np.float64)
@@ -252,6 +258,113 @@ class L2WeightObjective(Objective):
         return cost
 
 
+@register_objective("fisher_l2")
+class FisherL2Objective(Objective):
+    """Diagonal Fisher-metric weight distance.
+
+    Scores ``sum_t sum_i M_t[i] * (ref_t[i] - aligned_t[i])^2`` with fixed
+    positive per-tensor weights ``M_t`` in *reference* coordinates -- the
+    squared Riemannian length of the residual under a diagonal metric
+    evaluated at the reference sample. With ``M_t`` the diagonal Gauss-Newton
+    Fisher (see :mod:`align.rebasin.fisher`) this pulls function-space L2
+    geometry back into weight space: matching prioritizes coordinates the
+    function is sensitive to and discounts flat directions.
+
+    Unlike plain L2, the target's self-energy ``sum M * aligned^2`` is not
+    permutation-invariant, so the exact LAP cost carries an extra self term.
+    """
+
+    name = "fisher_l2"
+
+    def __init__(self, tensor_weights=None, weights_path=None) -> None:
+        if (tensor_weights is None) == (weights_path is None):
+            raise ValueError(
+                "fisher_l2 requires exactly one of 'tensor_weights' (mapping "
+                "of tensor id to weight array) or 'weights_path' (npz file)."
+            )
+        if weights_path is not None:
+            from .fisher import load_tensor_weights_npz
+
+            tensor_weights = load_tensor_weights_npz(weights_path)
+        self.tensor_weights = {
+            str(tensor_id): np.asarray(value, dtype=np.float64)
+            for tensor_id, value in dict(tensor_weights).items()
+        }
+        for tensor_id, weight in self.tensor_weights.items():
+            if not np.all(weight >= 0.0):
+                raise ValueError(
+                    f"fisher_l2 weights for tensor {tensor_id!r} must be non-negative."
+                )
+
+    def _weight(self, problem, tensor_id: str) -> np.ndarray:
+        weight = self.tensor_weights.get(tensor_id)
+        if weight is None:
+            raise ValueError(
+                f"fisher_l2 has no weights for tensor {tensor_id!r}; weights "
+                "must cover every problem tensor."
+            )
+        expected = tuple(problem.tensors[tensor_id].shape)
+        if tuple(weight.shape) != expected:
+            raise ValueError(
+                f"fisher_l2 weights for tensor {tensor_id!r} have shape "
+                f"{weight.shape}, expected {expected}."
+            )
+        return weight
+
+    def value(self, problem, ref_data, target_data, state):
+        loss = None
+        for tensor_id in problem.tensors:
+            ref = jnp.asarray(ref_data[tensor_id])
+            target = jnp.asarray(target_data[tensor_id])
+            weight = jnp.asarray(self._weight(problem, tensor_id), dtype=ref.dtype)
+            aligned = _apply_state_to_tensor(problem, tensor_id, target, state)
+            if aligned.ndim == ref.ndim + 1:
+                diff = ref[None, ...] - aligned
+                axes = tuple(range(1, diff.ndim))
+            else:
+                diff = ref - aligned
+                axes = None
+            term = jnp.sum(weight * jnp.square(diff), axis=axes)
+            loss = term if loss is None else loss + term
+        if loss is None:
+            return jnp.asarray(0.0)
+        return loss
+
+    def linearize_group(self, problem, ref_data, target_data, state, group_id: str):
+        _require_lap_linearizable(problem, group_id)
+
+        group = problem.groups[group_id]
+        cost = np.zeros((group.size, group.size), dtype=np.float64)
+        for tensor_id in problem.tensors:
+            bindings = [
+                binding
+                for binding in problem.bindings_for_tensor(tensor_id)
+                if binding.group == group_id
+            ]
+            if not bindings:
+                continue
+            if len(bindings) > 1:  # Defensive; repeated check above should catch this.
+                raise UnsupportedGroupLinearization(group_id)
+            binding = bindings[0]
+            shape = problem.tensors[tensor_id].shape
+            ref = np.asarray(ref_data[tensor_id])
+            weight = self._weight(problem, tensor_id)
+            target = _apply_other_groups_hard(
+                problem, tensor_id, target_data[tensor_id], state, {group_id}
+            )
+            axis, start, stop = binding_axis_interval(shape, binding)
+            selector = binding_selector(shape, binding)
+            indexer = binding_indexer(ref.ndim, axis, start, stop, selector)
+            ref_mat = np.moveaxis(ref[indexer], axis, 0).reshape(group.size, -1)
+            weight_mat = np.moveaxis(weight[indexer], axis, 0).reshape(group.size, -1)
+            target_mat = np.moveaxis(target[indexer], axis, 0).reshape(group.size, -1)
+            # The weighted target self-energy depends on the assignment, so it
+            # enters the (maximization) cost alongside the cross term.
+            cost += (weight_mat * ref_mat) @ target_mat.T
+            cost -= 0.5 * weight_mat @ np.square(target_mat).T
+        return cost
+
+
 class UnsupportedGroupLinearization(ValueError):
     """Raised when an exact LAP update is mathematically invalid."""
 
@@ -259,6 +372,7 @@ class UnsupportedGroupLinearization(ValueError):
 __all__ = [
     "Objective",
     "L2WeightObjective",
+    "FisherL2Objective",
     "UnsupportedGroupLinearization",
     "register_objective",
     "get_objective",

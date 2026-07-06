@@ -13,7 +13,15 @@ from .api import (
     rebasin_block_across,
     rebasin_single_sample,
 )
+from .fisher import (
+    estimate_diag_fisher_tree,
+    estimate_diag_fisher_weights,
+    load_tensor_weights_npz,
+    resolve_calibration_kwargs,
+    save_tensor_weights_npz,
+)
 from .objectives import (
+    FisherL2Objective,
     L2WeightObjective,
     Objective,
     UnsupportedGroupLinearization,
@@ -36,6 +44,7 @@ from .solvers import (
 )
 
 __all__ = [
+    "FisherL2Objective",
     "L2WeightObjective",
     "LAPGroupSolver",
     "Objective",
@@ -49,11 +58,16 @@ __all__ = [
     "available_solvers",
     "build_scheduler",
     "default_lap_schedule",
+    "estimate_diag_fisher_tree",
+    "estimate_diag_fisher_weights",
     "get_objective",
+    "load_tensor_weights_npz",
     "rebasin_batch",
     "rebasin_block_across",
     "rebasin_single_sample",
     "register_objective",
+    "resolve_calibration_kwargs",
+    "save_tensor_weights_npz",
     "sinkhorn_operator",
     "solve_lap_maximize",
 ]

@@ -35,6 +35,13 @@ rebasin:
   enabled: true
   objective: l2_weight     # Complete graph objective over bound parameter tensors.
   objective_kwargs: {}
+  # Geometry-aware alternative: diagonal Fisher-metric weight distance.
+  # Weights are the diagonal Gauss-Newton Fisher at the reference sample,
+  # precomputed with align.rebasin.fisher and stored as an npz keyed by
+  # tensor id (see docs/theory.md, "Fisher-metric objective"):
+  # objective: fisher_l2
+  # objective_kwargs:
+  #   weights_path: results/example_experiment/fisher_weights.npz
   layer_root: params.fcn   # Dot path to the dense layer subtree in the PyTree.
   seed: 0                  # RNG seed ensures deterministic initialisation for stochastic methods.
   schedule:
