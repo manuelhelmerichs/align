@@ -14,20 +14,44 @@ from flax.core import frozen_dict
 from .tensor_ops import (
     _descend,
     _set_path,
-    apply_perm_to_axis,
+    apply_matrix_to_axis,
     binding_axis_interval,
     binding_indexer,
     binding_selector,
     binding_sort_key,
+    binding_transform_matrix,
+)
+
+GROUP_TRANSFORM_CLASSES = (
+    "permutation",
+    "signed_permutation",
+    "rotation_pairs",
+    "orthogonal",
 )
 
 
 @dataclass
 class PermutationGroup:
-    """A set of channels/units that must share a permutation."""
+    """A set of channels/units that must share one group transform.
+
+    ``transforms`` declares the *maximal exact symmetry class* of the group —
+    solvers never exceed it, but may match within a subgroup:
+
+    - ``"permutation"``: permutation matrices (the default).
+    - ``"signed_permutation"``: permutations with per-channel sign flips
+      (e.g. attention qk/vo intra-head dimensions, RMSNorm streams).
+    - ``"rotation_pairs"``: block-diagonal 2-D rotations over the half-split
+      pairs ``(p, p + n/2)`` — the RoPE qk symmetry. Contains *no*
+      non-trivial permutations, so such groups are excluded from
+      permutation-based solvers.
+    - ``"orthogonal"``: the full orthogonal group (RMSNorm streams). Plain
+      ``lap`` schedules match its signed-permutation subgroup; the
+      ``procrustes`` solver step performs the full orthogonal update.
+    """
 
     id: str
     size: int
+    transforms: str = "permutation"
 
 
 @dataclass(frozen=True)
@@ -64,6 +88,13 @@ class AxisBinding:
     i),)``. Selector coordinates live in reference-slot space: selector-free
     bindings of the same tensor (such as the head permutation) are applied
     first (see :func:`align.alignment.tensor_ops.binding_sort_key`).
+
+    ``transform_scope`` restricts which part of the group transform the axis
+    carries: ``"linear"`` (default) applies the full group matrix, while
+    ``"permute_only"`` applies only its permutation content — RMSNorm scale
+    vectors permute with the stream but are exempt from sign flips and
+    orthogonal maps, whose action the norm's consumers absorb (see
+    :func:`align.alignment.tensor_ops.binding_transform_matrix`).
     """
 
     tensor_id: str
@@ -74,6 +105,7 @@ class AxisBinding:
     role: Literal["out", "in"] = "out"
     scale_power: float = 1.0
     selector: tuple[tuple[int, int], ...] = ()
+    transform_scope: Literal["linear", "permute_only"] = "linear"
 
 
 @dataclass(frozen=True)
@@ -274,6 +306,17 @@ class AlignmentProblem:
                 )
             if int(group.size) <= 0:
                 raise ValueError(f"Group {group_id!r} has non-positive size.")
+            if group.transforms not in GROUP_TRANSFORM_CLASSES:
+                raise ValueError(
+                    f"Group {group_id!r} has unknown transform class "
+                    f"{group.transforms!r}; expected one of "
+                    f"{', '.join(GROUP_TRANSFORM_CLASSES)}."
+                )
+            if group.transforms == "rotation_pairs" and int(group.size) % 2:
+                raise ValueError(
+                    f"Group {group_id!r} is a rotation_pairs group of odd size "
+                    f"{group.size}; half-split pairs require an even size."
+                )
 
         for tensor_id, tensor in self.tensors.items():
             if tensor.id != tensor_id:
@@ -312,6 +355,22 @@ class AlignmentProblem:
                 raise ValueError(
                     f"Axis binding for tensor {binding.tensor_id!r} has invalid role "
                     f"{binding.role!r}; expected 'out' or 'in'."
+                )
+            if binding.transform_scope not in ("linear", "permute_only"):
+                raise ValueError(
+                    f"Axis binding for tensor {binding.tensor_id!r} has invalid "
+                    f"transform_scope {binding.transform_scope!r}; expected "
+                    "'linear' or 'permute_only'."
+                )
+            if (
+                binding.transform_scope == "permute_only"
+                and self.groups[binding.group].transforms == "rotation_pairs"
+            ):
+                raise ValueError(
+                    f"Axis binding for tensor {binding.tensor_id!r} uses "
+                    "transform_scope='permute_only' on rotation_pairs group "
+                    f"{binding.group!r}; rotation groups have no permutation "
+                    "content."
                 )
             if not np.isfinite(binding.scale_power) or binding.scale_power < 0.0:
                 raise ValueError(
@@ -423,6 +482,10 @@ class AlignmentProblem:
                     )
             if constraint.kind == "attention_block":
                 self._validate_attention_constraint(constraint)
+            if constraint.kind == "gqa_attention_block":
+                self._validate_gqa_attention_constraint(constraint)
+            if constraint.kind == "rms_norm":
+                self._validate_rms_norm_constraint(constraint)
 
         _ = self.group_order
 
@@ -474,6 +537,102 @@ class AlignmentProblem:
                 "and intra-head groups."
             )
 
+    def _validate_gqa_attention_constraint(self, constraint: GraphConstraint) -> None:
+        """Check the kv-group/query-head/vo structure of one GQA constraint."""
+
+        metadata = constraint.metadata
+        kv_group = metadata.get("kv_group")
+        if kv_group not in self.groups:
+            raise ValueError(
+                f"gqa_attention_block constraint references unknown kv group "
+                f"{kv_group!r}."
+            )
+        num_kv_groups = int(self.groups[kv_group].size)
+        query_head_groups = tuple(metadata.get("query_head_groups", ()))
+        qk_groups = tuple(metadata.get("qk_groups", ()))
+        vo_groups = tuple(metadata.get("vo_groups", ()))
+        for label, slot_groups, size_key in (
+            ("query_head", query_head_groups, "heads_per_group"),
+            ("qk", qk_groups, "head_dim"),
+            ("vo", vo_groups, "head_dim"),
+        ):
+            if len(slot_groups) != num_kv_groups:
+                raise ValueError(
+                    f"gqa_attention_block constraint lists {len(slot_groups)} "
+                    f"{label} groups for {num_kv_groups} kv groups."
+                )
+            expected_size = int(metadata.get(size_key, -1))
+            for group_id in slot_groups:
+                if group_id not in self.groups:
+                    raise ValueError(
+                        f"gqa_attention_block constraint references unknown "
+                        f"{label} group {group_id!r}."
+                    )
+                if int(self.groups[group_id].size) != expected_size:
+                    raise ValueError(
+                        f"gqa_attention_block {label} group {group_id!r} has "
+                        f"size {self.groups[group_id].size}, expected "
+                        f"{expected_size}."
+                    )
+        if int(metadata.get("head_dim", 0)) % 2:
+            raise ValueError(
+                "gqa_attention_block head_dim must be even for rotary pairs."
+            )
+        tensor_roles = dict(metadata.get("tensors", {}))
+        for role in ("query", "key", "value", "out"):
+            tensor_id = tensor_roles.get(role)
+            if tensor_id not in self.tensors:
+                raise ValueError(
+                    f"gqa_attention_block constraint is missing a valid {role!r} "
+                    f"tensor (got {tensor_id!r})."
+                )
+        for group_id in qk_groups:
+            if self.groups[group_id].transforms != "rotation_pairs":
+                raise ValueError(
+                    f"gqa_attention_block qk group {group_id!r} must declare "
+                    "the 'rotation_pairs' transform class (RoPE removes the "
+                    "qk permutation symmetry)."
+                )
+        expected_groups = {kv_group, *query_head_groups, *qk_groups, *vo_groups}
+        if set(constraint.groups) != expected_groups:
+            raise ValueError(
+                "gqa_attention_block constraint groups must list exactly the "
+                "kv and per-slot groups."
+            )
+
+    def _validate_rms_norm_constraint(self, constraint: GraphConstraint) -> None:
+        """Check the scale/consumer wiring of one ``rms_norm`` constraint."""
+
+        metadata = constraint.metadata
+        scale_id = metadata.get("scale")
+        if scale_id not in self.tensors:
+            raise ValueError(
+                f"rms_norm constraint references unknown scale tensor {scale_id!r}."
+            )
+        scale_shape = self.tensors[scale_id].shape
+        if len(scale_shape) != 1:
+            raise ValueError(
+                f"rms_norm scale tensor {scale_id!r} must be 1-D, got shape "
+                f"{scale_shape}."
+            )
+        consumers = tuple(metadata.get("consumers", ()))
+        if not consumers:
+            raise ValueError(
+                f"rms_norm constraint for {scale_id!r} lists no consumers."
+            )
+        for tensor_id, axis in consumers:
+            if tensor_id not in self.tensors:
+                raise ValueError(
+                    f"rms_norm constraint references unknown consumer tensor "
+                    f"{tensor_id!r}."
+                )
+            shape = self.tensors[tensor_id].shape
+            if int(shape[int(axis)]) != int(scale_shape[0]):
+                raise ValueError(
+                    f"rms_norm consumer {tensor_id!r} axis {axis} has size "
+                    f"{shape[int(axis)]}, expected {scale_shape[0]}."
+                )
+
     def _transform_bound_tensors(
         self,
         params: Mapping[str, Any],
@@ -512,18 +671,27 @@ class AlignmentProblem:
         return frozen_dict.freeze(mutable) if is_frozen else mutable
 
     def apply(self, params: Mapping[str, Any], state) -> Mapping[str, Any]:
-        """Apply a hard permutation state to all bound tensor axes."""
+        """Apply a hard group-transform state to all bound tensor axes.
+
+        Permutation matrices, signed permutations, rotation-pair blocks, and
+        orthogonal matrices all apply through the same role-independent axis
+        action (for orthogonal ``Q``, ``Q^{-T} = Q``). ``permute_only``
+        bindings receive only the transform's permutation content.
+        """
 
         state.validate(self, hard=True)
 
-        def _permute(segment, axis, binding):
-            return apply_perm_to_axis(
-                segment,
+        def _transform(segment, axis, binding):
+            matrix = binding_transform_matrix(
                 state.hard[binding.group],
-                axis=axis,
+                transforms=self.groups[binding.group].transforms,
+                scope=binding.transform_scope,
             )
+            if matrix is None:
+                return segment
+            return apply_matrix_to_axis(segment, matrix, axis=axis)
 
-        return self._transform_bound_tensors(params, _permute)
+        return self._transform_bound_tensors(params, _transform)
 
     def apply_scales(self, params: Mapping[str, Any], scale_state) -> Mapping[str, Any]:
         """Apply a per-group positive scale to all bound tensor axes.
@@ -576,6 +744,7 @@ __all__ = [
     "AlignmentProblem",
     "AxisBinding",
     "BlockSpec",
+    "GROUP_TRANSFORM_CLASSES",
     "GraphConstraint",
     "MaterializedTensors",
     "TensorSpec",

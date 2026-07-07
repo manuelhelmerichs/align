@@ -92,7 +92,7 @@ class RebasinScheduleStep:
             "solver": self.solver,
             "tol": self.tol,
         }
-        if self.solver == "lap":
+        if self.solver in ("lap", "procrustes"):
             payload["max_sweeps"] = self.max_sweeps
         elif self.solver == "sinkhorn":
             payload.update(

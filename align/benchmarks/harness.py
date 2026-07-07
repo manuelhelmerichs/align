@@ -30,6 +30,7 @@ from align.rebasin.objectives import UnsupportedGroupLinearization
 from .posterior import (
     PosteriorBenchmarkCase,
     make_synthetic_mlp_posterior_case,
+    make_synthetic_modern_transformer_posterior_case,
     make_synthetic_transformer_posterior_case,
     run_posterior_benchmark,
 )
@@ -38,6 +39,10 @@ from .synthetic import (
     default_schedule_grid,
     make_dense_mlp_orbit_case,
     make_frn_residual_conv_orbit_case,
+    make_modern_transformer_orbit_case,
+    make_modern_transformer_orthogonal_orbit_case,
+    make_modern_transformer_rotated_orbit_case,
+    make_modern_transformer_scaled_orbit_case,
     make_residual_conv_orbit_case,
     make_split_concat_conv_orbit_case,
     make_transformer_orbit_case,
@@ -56,6 +61,10 @@ ORBIT_CASE_FACTORIES: dict[str, CaseFactory] = {
     "split_concat": make_split_concat_conv_orbit_case,
     "transformer": make_transformer_orbit_case,
     "transformer_scaled": make_transformer_scaled_orbit_case,
+    "modern_transformer": make_modern_transformer_orbit_case,
+    "modern_transformer_scaled": make_modern_transformer_scaled_orbit_case,
+    "modern_transformer_rotated": make_modern_transformer_rotated_orbit_case,
+    "modern_transformer_orthogonal": make_modern_transformer_orthogonal_orbit_case,
 }
 
 # Cases whose scale symmetry the normalizer can remove before rebasin.
@@ -316,6 +325,62 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
                 seed=seed,
             )
         )
+    for seed in orbit_seeds:
+        records.append(
+            _orbit_record(
+                case_name="modern_transformer",
+                schedule_name="lap",
+                schedule=schedules["lap"],
+                objective="l2_weight",
+                objective_kwargs=None,
+                normalize=False,
+                seed=seed,
+            )
+        )
+    # As with the FRN residual case, plain LAP coordinate descent can stall
+    # on some seeds of the scaled modern-transformer orbit; the regression
+    # pin uses the mixed schedule.
+    for seed in orbit_seeds:
+        records.append(
+            _orbit_record(
+                case_name="modern_transformer_scaled",
+                schedule_name="lap_sinkhorn_lap",
+                schedule=schedules["lap_sinkhorn_lap"],
+                objective="l2_weight",
+                objective_kwargs=None,
+                normalize=True,
+                seed=seed,
+            )
+        )
+    # Full implemented symmetry: signed permutations, all diagonal scales,
+    # and per-pair qk rotations (recovered by the closed-form rotation
+    # projection inside lap sweeps, exact up to float32 trigonometry).
+    for seed in orbit_seeds:
+        records.append(
+            _orbit_record(
+                case_name="modern_transformer_rotated",
+                schedule_name="lap",
+                schedule=schedules["lap"],
+                objective="l2_weight",
+                objective_kwargs=None,
+                normalize=True,
+                seed=seed,
+            )
+        )
+    # Orthogonal stream copy of a gamma-folded reference, recovered in
+    # closed form by the procrustes solver step.
+    for seed in orbit_seeds:
+        records.append(
+            _orbit_record(
+                case_name="modern_transformer_orthogonal",
+                schedule_name="procrustes",
+                schedule=[{"solver": "procrustes", "max_sweeps": 5, "tol": 0.0}],
+                objective="l2_weight",
+                objective_kwargs=None,
+                normalize=True,
+                seed=seed,
+            )
+        )
 
     posterior_case = make_synthetic_mlp_posterior_case(
         seed=0, n_chains=3 if fast else 4, n_samples=6 if fast else 8
@@ -367,6 +432,21 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
         )
     )
 
+    modern_posterior_case = make_synthetic_modern_transformer_posterior_case(
+        seed=0, n_chains=2 if fast else 3, n_samples=6 if fast else 8
+    )
+    records.append(
+        _posterior_record(
+            case=modern_posterior_case,
+            case_label="synthetic_modern_transformer",
+            schedule_name="lap",
+            schedule=schedules["lap"],
+            objective="l2_weight",
+            objective_kwargs=None,
+            normalize=True,
+        )
+    )
+
     records.append(
         _performance_record(
             case_name="dense_mlp",
@@ -384,9 +464,11 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
 # names; each metric maps to {"max": ...} and/or {"min": ...}. Performance
 # metrics are reported but unbounded because they are machine-dependent.
 DEFAULT_THRESHOLDS: dict[str, dict[str, dict[str, float]]] = {
+    # Validity allows float32 orthogonality residuals from continuous
+    # (rotation/orthogonal) group transforms; discrete groups sit at 0.
     "orbit/*": {
         "function_drift_max": {"max": 1e-4},
-        "permutation_validity_error": {"max": 0.0},
+        "permutation_validity_error": {"max": 1e-5},
         "residual_constraint_violations": {"max": 0.0},
     },
     "orbit/dense_mlp/*": {
@@ -416,6 +498,22 @@ DEFAULT_THRESHOLDS: dict[str, dict[str, dict[str, float]]] = {
         "recovered_permutation_error": {"max": 0.0},
         "optimality_gap": {"max": 1e-4},
     },
+    "orbit/modern_transformer/*": {
+        "recovered_permutation_error": {"max": 0.0},
+        "optimality_gap": {"max": 1e-4},
+    },
+    "orbit/modern_transformer_scaled/*": {
+        "recovered_permutation_error": {"max": 0.0},
+        "optimality_gap": {"max": 1e-4},
+    },
+    "orbit/modern_transformer_rotated/*": {
+        "recovered_permutation_error": {"max": 1e-4},
+        "optimality_gap": {"max": 1e-4},
+    },
+    "orbit/modern_transformer_orthogonal/*": {
+        "recovered_permutation_error": {"max": 1e-4},
+        "optimality_gap": {"max": 1e-4},
+    },
     "posterior/synthetic_mlp/*": {
         "before_split_rhat_max": {"min": 3.0},
         "after_split_rhat_max": {"max": 2.0},
@@ -436,6 +534,13 @@ DEFAULT_THRESHOLDS: dict[str, dict[str, dict[str, float]]] = {
     # normalized before rebasin).
     "posterior/synthetic_transformer/*": {
         "before_split_rhat_mean": {"min": 10.0},
+        "after_split_rhat_mean": {"max": 1.2},
+        "before_weight_averaging_gap": {"min": 0.2},
+        "after_weight_averaging_gap": {"max": 0.15},
+        "function_drift_max": {"max": 1e-3},
+    },
+    "posterior/synthetic_modern_transformer/*": {
+        "before_split_rhat_mean": {"min": 5.0},
         "after_split_rhat_mean": {"max": 1.2},
         "before_weight_averaging_gap": {"min": 0.2},
         "after_weight_averaging_gap": {"max": 0.15},

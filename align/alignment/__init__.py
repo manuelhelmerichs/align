@@ -18,6 +18,7 @@ from .blocks import (
     tensors_for_block,
 )
 from .problem import (
+    GROUP_TRANSFORM_CLASSES,
     AlignmentProblem,
     AxisBinding,
     BlockSpec,
@@ -26,16 +27,25 @@ from .problem import (
     TensorSpec,
     materialize_many,
 )
-from .tensor_ops import apply_perm_to_axis, axis_slice, binding_axis_interval
+from .tensor_ops import (
+    apply_matrix_to_axis,
+    apply_perm_to_axis,
+    axis_slice,
+    binding_axis_interval,
+    binding_transform_matrix,
+)
 
 __all__ = [
     "AlignmentProblem",
     "AxisBinding",
     "BlockSpec",
     "GraphConstraint",
+    "GROUP_TRANSFORM_CLASSES",
     "PermutationGroup",
     "TensorSpec",
+    "apply_matrix_to_axis",
     "apply_perm_to_axis",
+    "binding_transform_matrix",
     "axis_slice",
     "binding_axis_interval",
     "block_signature",

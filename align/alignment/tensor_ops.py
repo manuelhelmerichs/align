@@ -171,11 +171,65 @@ def apply_perm_to_axis(tensor: Any, perm: Any, *, axis: int):
     return xp.moveaxis(permuted, 0, axis)
 
 
+def apply_matrix_to_axis(tensor: Any, matrix: Any, *, axis: int):
+    """Apply a group transform (indices or 2-D matrix) along ``axis``.
+
+    Index vectors take the permutation fast path; 2-D matrices are applied by
+    matrix multiplication (``new_i = sum_j M[i, j] old_j``), which is exact
+    for permutation matrices and required for signed permutations, rotations,
+    and orthogonal transforms.
+    """
+
+    xp = _array_backend(tensor)
+    arr = xp.asarray(matrix)
+    if arr.ndim == 1:
+        return apply_perm_to_axis(tensor, arr, axis=axis)
+    if arr.ndim != 2:
+        raise ValueError(
+            f"Expected transform as 1D indices or 2D matrix, got ndim={arr.ndim}."
+        )
+    moved = xp.moveaxis(tensor, axis, 0)
+    flat = moved.reshape((moved.shape[0], -1))
+    out = arr.astype(flat.dtype) @ flat
+    return xp.moveaxis(out.reshape(moved.shape), 0, axis)
+
+
+def binding_transform_matrix(matrix: Any, *, transforms: str, scope: str) -> Any | None:
+    """Return the effective matrix for one binding, or ``None`` to skip.
+
+    ``scope == "linear"`` bindings carry the full group transform.
+    ``scope == "permute_only"`` bindings carry only its permutation content
+    (RMSNorm scales permute with the stream but are exempt from signs and
+    orthogonal maps, whose action their consumers absorb): under a
+    ``signed_permutation`` group the entrywise absolute value is applied
+    (also a no-op for nonnegative soft relaxations), and under an
+    ``orthogonal`` group the binding is skipped entirely — exact only when
+    the bound tensor is the folded constant, which the solver preflight
+    enforces. The decision is class-based, never value-based, so it is safe
+    under JAX tracing.
+    """
+
+    if scope == "linear":
+        return matrix
+    if scope != "permute_only":
+        raise ValueError(f"Unknown binding transform scope {scope!r}.")
+    arr = matrix if hasattr(matrix, "ndim") else np.asarray(matrix)
+    if arr.ndim == 1 or transforms == "permutation":
+        return matrix
+    if transforms == "signed_permutation":
+        return _array_backend(arr).abs(arr)
+    if transforms == "orthogonal":
+        return None
+    raise ValueError(f"permute_only bindings are undefined for {transforms!r} groups.")
+
+
 __all__ = [
+    "apply_matrix_to_axis",
     "apply_perm_to_axis",
     "axis_slice",
     "binding_axis_interval",
     "binding_indexer",
     "binding_selector",
     "binding_sort_key",
+    "binding_transform_matrix",
 ]

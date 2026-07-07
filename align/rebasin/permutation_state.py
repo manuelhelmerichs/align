@@ -146,28 +146,41 @@ class PermutationState:
         )
 
     def soft(self, tau: float = 0.1, n_iters: int = 50) -> dict[str, jnp.ndarray]:
-        """Project stored logits to doubly stochastic matrices."""
+        """Project stored logits to doubly stochastic matrices.
 
-        if self.logits is None:
-            return {
-                gid: jnp.asarray(
-                    as_permutation_matrix(self.hard[gid], dtype=np.float32)
-                )
-                for gid in self.group_order
-            }
+        Groups without logits (e.g. rotation-pair groups excluded from the
+        Sinkhorn relaxation) fall back to their current hard matrices.
+        """
+
+        logits = self.logits or {}
         return {
-            gid: sinkhorn_operator(self.logits[gid], tau=tau, n_iters=n_iters)
+            gid: sinkhorn_operator(logits[gid], tau=tau, n_iters=n_iters)
+            if gid in logits
+            else jnp.asarray(as_permutation_matrix(self.hard[gid], dtype=np.float32))
             for gid in self.group_order
         }
 
-    def harden(self, method: str = "hungarian") -> PermutationState:
-        """Convert current matrices or projected logits to hard permutations."""
+    def harden(
+        self, method: str = "hungarian", *, groups: tuple[str, ...] | None = None
+    ) -> PermutationState:
+        """Convert current matrices or projected logits to hard permutations.
+
+        ``groups`` restricts hardening to the listed groups; others keep
+        their current hard matrices untouched. Solvers that relax only the
+        permutation-capable groups must pass their group subset so
+        rotation/orthogonal matrices held by other groups are not projected
+        onto permutations.
+        """
 
         if method.lower() != "hungarian":
             raise ValueError(f"Unsupported hardening method {method!r}.")
         matrices = self.soft() if self.logits is not None else self.hard
+        selected = set(self.group_order if groups is None else groups)
         hard: dict[str, Any] = {}
         for group_id in self.group_order:
+            if group_id not in selected:
+                hard[group_id] = self.hard[group_id]
+                continue
             matrix = as_permutation_matrix(matrices[group_id])
             if matrix.ndim == 2:
                 hard[group_id] = solve_lap_maximize(matrix)
@@ -190,7 +203,13 @@ class PermutationState:
         )
 
     def validate(self, problem, *, hard: bool = False) -> None:
-        """Validate shapes, group keys, and optionally hard-permutation constraints."""
+        """Validate shapes, group keys, and optionally hard-transform constraints.
+
+        With ``hard=True`` every matrix must be a hard member of its group's
+        declared transform class: a permutation, a signed permutation (its
+        entrywise absolute value is a permutation), or an orthogonal matrix
+        (rotation-pair and orthogonal groups).
+        """
 
         if set(self.group_order) != set(problem.groups):
             raise ValueError("State group_order must contain exactly problem groups.")
@@ -206,37 +225,61 @@ class PermutationState:
                     f"Group {group_id!r} has matrix shape {value.shape}, "
                     f"expected (..., {group.size}, {group.size})."
                 )
-            matrix = value
-            if hard:
-                row_error = np.max(np.abs(np.sum(matrix, axis=-1) - 1.0))
-                col_error = np.max(np.abs(np.sum(matrix, axis=-2) - 1.0))
-                binary_error = np.max(np.minimum(np.abs(matrix), np.abs(matrix - 1.0)))
-                if max(float(row_error), float(col_error), float(binary_error)) > 1e-5:
-                    raise ValueError(f"Group {group_id!r} is not a hard permutation.")
+            if not hard:
+                continue
+            transforms = getattr(group, "transforms", "permutation")
+            if transforms in ("rotation_pairs", "orthogonal"):
+                gram = value @ np.swapaxes(value, -1, -2)
+                eye = np.eye(group.size, dtype=gram.dtype)
+                if float(np.max(np.abs(gram - eye))) > 1e-4:
+                    raise ValueError(f"Group {group_id!r} is not orthogonal.")
+                continue
+            matrix = np.abs(value) if transforms == "signed_permutation" else value
+            row_error = np.max(np.abs(np.sum(matrix, axis=-1) - 1.0))
+            col_error = np.max(np.abs(np.sum(matrix, axis=-2) - 1.0))
+            binary_error = np.max(np.minimum(np.abs(matrix), np.abs(matrix - 1.0)))
+            if max(float(row_error), float(col_error), float(binary_error)) > 1e-5:
+                raise ValueError(
+                    f"Group {group_id!r} is not a hard {transforms.replace('_', ' ')}."
+                )
         if self.logits is not None:
-            if set(self.logits) != set(problem.groups):
-                raise ValueError("State logits must contain exactly problem groups.")
-            for group_id, group in problem.groups.items():
-                logits = self.logits[group_id]
-                if logits.shape[-2:] != (group.size, group.size):
+            unknown = sorted(set(self.logits) - set(problem.groups))
+            if unknown:
+                raise ValueError(
+                    "State logits reference unknown group(s): " + ", ".join(unknown)
+                )
+            for group_id, logits in self.logits.items():
+                size = problem.groups[group_id].size
+                if logits.shape[-2:] != (size, size):
                     raise ValueError(
                         f"Group {group_id!r} logits shape {logits.shape}, "
-                        f"expected (..., {group.size}, {group.size})."
+                        f"expected (..., {size}, {size})."
                     )
 
     def to_artifacts(self, dtype_policy: str = "hard_uint8") -> dict[str, np.ndarray]:
-        """Serialize final hard permutations keyed by group id."""
+        """Serialize final hard transforms keyed by group id.
+
+        Plain permutation matrices are stored as compact ``uint8``; signed
+        permutations, rotations, and orthogonal matrices (which are not
+        binary) are stored as ``float32``. The distinction is content-based,
+        so artifacts stay self-describing.
+        """
 
         if dtype_policy != "hard_uint8":
             raise ValueError(
                 f"Unsupported permutation artifact policy {dtype_policy!r}."
             )
-        return {
-            group_id: (as_permutation_matrix(self.hard[group_id]) > 0.5).astype(
-                np.uint8
+        artifacts: dict[str, np.ndarray] = {}
+        for group_id in self.group_order:
+            matrix = as_permutation_matrix(self.hard[group_id])
+            binary_error = float(
+                np.max(np.minimum(np.abs(matrix), np.abs(matrix - 1.0)))
             )
-            for group_id in self.group_order
-        }
+            if binary_error <= 1e-5:
+                artifacts[group_id] = (matrix > 0.5).astype(np.uint8)
+            else:
+                artifacts[group_id] = matrix.astype(np.float32)
+        return artifacts
 
 
 __all__ = [

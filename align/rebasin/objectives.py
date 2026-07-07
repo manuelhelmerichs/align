@@ -8,8 +8,13 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 
-from ..alignment import apply_perm_to_axis, binding_axis_interval
-from ..alignment.tensor_ops import binding_indexer, binding_selector, binding_sort_key
+from ..alignment import apply_matrix_to_axis, binding_axis_interval
+from ..alignment.tensor_ops import (
+    binding_indexer,
+    binding_selector,
+    binding_sort_key,
+    binding_transform_matrix,
+)
 
 
 class Objective(ABC):
@@ -23,6 +28,28 @@ class Objective(ABC):
 
     def linearize_group(self, problem, ref_data, target_data, state, group_id: str):
         """Return an LAP maximization cost matrix for one group."""
+
+        signed, invariant = self.linearize_group_split(
+            problem, ref_data, target_data, state, group_id
+        )
+        return signed + invariant
+
+    def linearize_group_split(
+        self, problem, ref_data, target_data, state, group_id: str
+    ):
+        """Return the group's linear payoff split as ``(signed, invariant)``.
+
+        ``signed[i, j]`` is the payoff of assigning target channel ``j`` to
+        reference slot ``i`` that flips sign under a channel sign flip (the
+        cross terms of ``linear``-scope bindings); ``invariant[i, j]`` is the
+        sign-invariant remainder (``permute_only`` binding cross terms and,
+        for weighted objectives, the assignment-dependent self-energy). Class
+        dispatch: permutation updates maximize ``signed + invariant``, signed
+        updates ``|signed| + invariant``, and continuous (rotation/orthogonal)
+        updates project ``signed`` alone — exact for objectives whose
+        self-energy is transform-invariant (plain L2), a documented heuristic
+        for weighted metrics.
+        """
 
         raise NotImplementedError(
             f"{self.__class__.__name__} does not support LAP linearization."
@@ -107,7 +134,13 @@ def _apply_state_to_tensor(problem, tensor_id: str, tensor, state):
     shape = problem.tensors[tensor_id].shape
     for binding in _sorted_bindings(problem, tensor_id):
         tensor_is_batched = _is_batched_tensor(problem, tensor_id, updated)
-        matrix = state.hard[binding.group]
+        matrix = binding_transform_matrix(
+            state.hard[binding.group],
+            transforms=problem.groups[binding.group].transforms,
+            scope=binding.transform_scope,
+        )
+        if matrix is None:
+            continue
         matrix_arr = jnp.asarray(matrix)
         if matrix_arr.ndim == 3 and not tensor_is_batched:
             updated = jnp.broadcast_to(updated, (matrix_arr.shape[0], *updated.shape))
@@ -149,22 +182,21 @@ def _apply_other_groups_hard(
     for binding in _sorted_bindings(problem, tensor_id):
         if binding.group in skip_groups:
             continue
+        matrix = binding_transform_matrix(
+            np.asarray(state.hard[binding.group]),
+            transforms=problem.groups[binding.group].transforms,
+            scope=binding.transform_scope,
+        )
+        if matrix is None:
+            continue
         axis, start, stop = binding_axis_interval(shape, binding)
         selector = binding_selector(shape, binding)
         if not selector and start == 0 and stop == int(updated.shape[axis]):
-            updated = apply_perm_to_axis(
-                updated,
-                np.asarray(state.hard[binding.group]),
-                axis=axis,
-            )
+            updated = apply_matrix_to_axis(updated, matrix, axis=axis)
             continue
         indexer = binding_indexer(updated.ndim, axis, start, stop, selector)
         segment = updated[indexer]
-        transformed = apply_perm_to_axis(
-            segment,
-            np.asarray(state.hard[binding.group]),
-            axis=axis,
-        )
+        transformed = apply_matrix_to_axis(segment, matrix, axis=axis)
         updated = np.array(updated, copy=True)
         updated[indexer] = transformed
     return updated
@@ -184,6 +216,17 @@ def _require_lap_linearizable(problem, group_id: str) -> None:
                 "are non-identity. Use the structured attention update "
                 "(lap schedules do this automatically) or a Sinkhorn "
                 "schedule."
+            )
+        if (
+            constraint.kind == "gqa_attention_block"
+            and constraint.metadata.get("kv_group") == group_id
+        ):
+            raise UnsupportedGroupLinearization(
+                f"Group {group_id!r} is a GQA kv-group head group; its "
+                "generic LAP linearization is inexact once per-slot "
+                "query-head or vo permutations are non-identity. Use the "
+                "structured GQA update (lap schedules do this automatically) "
+                "or a Sinkhorn schedule."
             )
 
     repeated = problem.repeated_group_terms().get(group_id, ())
@@ -228,11 +271,14 @@ class L2WeightObjective(Objective):
             return jnp.asarray(0.0)
         return loss
 
-    def linearize_group(self, problem, ref_data, target_data, state, group_id: str):
+    def linearize_group_split(
+        self, problem, ref_data, target_data, state, group_id: str
+    ):
         _require_lap_linearizable(problem, group_id)
 
         group = problem.groups[group_id]
-        cost = np.zeros((group.size, group.size), dtype=np.float64)
+        signed = np.zeros((group.size, group.size), dtype=np.float64)
+        invariant = np.zeros((group.size, group.size), dtype=np.float64)
         for tensor_id in problem.tensors:
             bindings = [
                 binding
@@ -258,8 +304,11 @@ class L2WeightObjective(Objective):
                 target_mat = np.moveaxis(target[indexer], axis, 0).reshape(
                     group.size, -1
                 )
-                cost += ref_mat @ target_mat.T
-        return cost
+                bucket = (
+                    invariant if binding.transform_scope == "permute_only" else signed
+                )
+                bucket += ref_mat @ target_mat.T
+        return signed, invariant
 
 
 @register_objective("fisher_l2")
@@ -334,11 +383,14 @@ class FisherL2Objective(Objective):
             return jnp.asarray(0.0)
         return loss
 
-    def linearize_group(self, problem, ref_data, target_data, state, group_id: str):
+    def linearize_group_split(
+        self, problem, ref_data, target_data, state, group_id: str
+    ):
         _require_lap_linearizable(problem, group_id)
 
         group = problem.groups[group_id]
-        cost = np.zeros((group.size, group.size), dtype=np.float64)
+        signed = np.zeros((group.size, group.size), dtype=np.float64)
+        invariant = np.zeros((group.size, group.size), dtype=np.float64)
         for tensor_id in problem.tensors:
             bindings = [
                 binding
@@ -366,11 +418,15 @@ class FisherL2Objective(Objective):
                 target_mat = np.moveaxis(target[indexer], axis, 0).reshape(
                     group.size, -1
                 )
-                # The weighted target self-energy depends on the assignment, so
-                # it enters the (maximization) cost alongside the cross term.
-                cost += (weight_mat * ref_mat) @ target_mat.T
-                cost -= 0.5 * weight_mat @ np.square(target_mat).T
-        return cost
+                cross = (weight_mat * ref_mat) @ target_mat.T
+                bucket = (
+                    invariant if binding.transform_scope == "permute_only" else signed
+                )
+                bucket += cross
+                # The weighted target self-energy depends on the assignment
+                # but not on channel signs, so it is sign-invariant.
+                invariant -= 0.5 * weight_mat @ np.square(target_mat).T
+        return signed, invariant
 
 
 class UnsupportedGroupLinearization(ValueError):

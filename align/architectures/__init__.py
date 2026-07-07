@@ -18,6 +18,7 @@ from .base import (
 _ADAPTER_EXPORTS = {
     "CNNAdapter": "align.architectures.cnn",
     "DenseMLPAdapter": "align.architectures.dense_mlp",
+    "ModernTransformerAdapter": "align.architectures.modern_transformer",
     "ResNetAdapter": "align.architectures.resnet",
     "ConvStackBlockAdapter": "align.architectures.resnet",
     "TransformerAdapter": "align.architectures.transformer",
@@ -25,6 +26,7 @@ _ADAPTER_EXPORTS = {
     "BlockAdapter": "align.architectures.blocks",
     "DenseStackBlockAdapter": "align.architectures.blocks",
     "AttentionBlockAdapter": "align.architectures.blocks",
+    "GQAAttentionBlockAdapter": "align.architectures.blocks",
     "ResidualStreamBlockAdapter": "align.architectures.blocks",
 }
 
@@ -50,6 +52,8 @@ __all__ = [
     "ConvStackBlockAdapter",
     "DenseMLPAdapter",
     "DenseStackBlockAdapter",
+    "GQAAttentionBlockAdapter",
+    "ModernTransformerAdapter",
     "ProblemBuilder",
     "ResNetAdapter",
     "ResidualStreamBlockAdapter",

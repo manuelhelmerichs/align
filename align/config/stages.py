@@ -246,7 +246,7 @@ class RebasinConfig:
                 f"Unknown rebasin objective '{self.objective}'. "
                 f"Available: {', '.join(sorted(valid_objectives))}"
             )
-        valid_solvers = {"lap", "sinkhorn"}
+        valid_solvers = {"lap", "procrustes", "sinkhorn"}
         for step in self.schedule:
             if step.solver.lower() not in valid_solvers:
                 raise ValueError(

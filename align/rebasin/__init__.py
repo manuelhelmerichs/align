@@ -38,9 +38,14 @@ from .permutation_state import (
 from .scheduler import SolverScheduler
 from .solvers import (
     LAPGroupSolver,
+    ProcrustesGroupSolver,
     SinkhornBlockSolver,
     SolverScheduleStep,
     available_solvers,
+    solve_orthogonal_maximize,
+    solve_rotation_pairs_maximize,
+    solve_signed_lap_maximize,
+    update_group_transform,
 )
 
 __all__ = [
@@ -49,6 +54,7 @@ __all__ = [
     "LAPGroupSolver",
     "Objective",
     "PermutationState",
+    "ProcrustesGroupSolver",
     "SinkhornBlockSolver",
     "SolverScheduleStep",
     "SolverScheduler",
@@ -70,4 +76,8 @@ __all__ = [
     "save_tensor_weights_npz",
     "sinkhorn_operator",
     "solve_lap_maximize",
+    "solve_orthogonal_maximize",
+    "solve_rotation_pairs_maximize",
+    "solve_signed_lap_maximize",
+    "update_group_transform",
 ]

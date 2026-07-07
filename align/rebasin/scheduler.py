@@ -9,14 +9,47 @@ import jax
 import numpy as np
 
 from ..alignment import materialize_many
-from .attention import attention_module_specs, update_attention_module
+from .attention import (
+    attention_module_specs,
+    gqa_module_specs,
+    update_attention_module,
+    update_gqa_attention_module,
+)
 from .permutation_state import PermutationState
 from .solvers import (
     LAPGroupSolver,
+    ProcrustesGroupSolver,
     SinkhornBlockSolver,
     SolverScheduleStep,
     _scheduled_groups,
 )
+
+
+def _check_permute_only_folded(problem, *data_mappings) -> None:
+    """Preflight for orthogonal groups with ``permute_only`` bindings.
+
+    General orthogonal maps skip permute-only bindings (RMSNorm scales), which
+    is exact only when the bound tensors are the folded constant 1. Enforced
+    once per solve so a schedule on unfolded parameters fails loudly instead
+    of silently corrupting the symmetry.
+    """
+
+    for binding in problem.axis_bindings:
+        if binding.transform_scope != "permute_only":
+            continue
+        if problem.groups[binding.group].transforms != "orthogonal":
+            continue
+        for data in data_mappings:
+            tensor = np.asarray(data[binding.tensor_id])
+            if float(np.max(np.abs(tensor - 1.0))) > 1e-3:
+                raise ValueError(
+                    f"Group {binding.group!r} declares the orthogonal transform "
+                    f"class, but {binding.tensor_id!r} is not folded to 1 "
+                    "(max deviation "
+                    f"{float(np.max(np.abs(tensor - 1.0))):.3g}). Run scale "
+                    "normalization (RMSNorm gamma folding) before rebasin, or "
+                    "declare the stream as 'signed_permutation'."
+                )
 
 
 class SolverScheduler:
@@ -28,7 +61,7 @@ class SolverScheduler:
         self.objective = objective
         self.schedule = tuple(schedule)
         for step in self.schedule:
-            if step.solver not in {"lap", "sinkhorn"}:
+            if step.solver not in {"lap", "procrustes", "sinkhorn"}:
                 raise ValueError(f"Unknown rebasin solver {step.solver!r}.")
 
     @classmethod
@@ -65,10 +98,15 @@ class SolverScheduler:
         state = initial_state or PermutationState.identity(
             problem, backend="jax" if self.prefers_gpu else "numpy"
         )
+        _check_permute_only_folded(problem, ref_data, target_data)
         aux_steps: list[dict[str, Any]] = []
         for index, step in enumerate(self.schedule):
             if step.solver == "lap":
                 state, aux = self._run_lap_step(
+                    problem, ref_data, target_data, state, step
+                )
+            elif step.solver == "procrustes":
+                state, aux = self._run_procrustes_step(
                     problem, ref_data, target_data, state, step
                 )
             elif step.solver == "sinkhorn":
@@ -130,6 +168,7 @@ class SolverScheduler:
         target_data = materialize_many(
             problem, target_params_batch, backend=backend or self.backend
         )
+        _check_permute_only_folded(problem, ref_data, target_data)
         state = PermutationState.identity(problem, backend="jax")
         aux_steps: list[dict[str, Any]] = []
         for index, step in enumerate(self.schedule):
@@ -176,12 +215,22 @@ class SolverScheduler:
             for spec in attention_module_specs(problem)
             if spec.head_group in scheduled
         }
-        # Intra groups of a scheduled head group are updated inside the
+        gqa_by_kv = {
+            spec.kv_group: spec
+            for spec in gqa_module_specs(problem)
+            if spec.kv_group in scheduled
+        }
+        # Intra groups of a scheduled head/kv group are updated inside the
         # structured module update, not as standalone LAP groups.
         structured_intras = {
             group_id
             for spec in module_by_head.values()
             for group_id in (*spec.qk_groups, *spec.vo_groups)
+            if group_id in scheduled
+        } | {
+            group_id
+            for spec in gqa_by_kv.values()
+            for group_id in (*spec.query_head_groups, *spec.vo_groups)
             if group_id in scheduled
         }
         solver = LAPGroupSolver(self.objective)
@@ -203,6 +252,16 @@ class SolverScheduler:
                         module_by_head[group_id],
                         scheduled_groups=scheduled,
                     )
+                elif group_id in gqa_by_kv:
+                    state, update_aux = update_gqa_attention_module(
+                        problem,
+                        self.objective,
+                        ref_data,
+                        target_data,
+                        state,
+                        gqa_by_kv[group_id],
+                        scheduled_groups=scheduled,
+                    )
                 else:
                     state, update_aux = solver.update(
                         problem, ref_data, target_data, state, group_id
@@ -212,6 +271,46 @@ class SolverScheduler:
             if sweep_delta <= step.tol:
                 break
         return state, {"solver": "lap", "sweeps": sweeps, "max_delta": max_delta}
+
+    def _run_procrustes_step(self, problem, ref_data, target_data, state, step):
+        scheduled = _scheduled_groups(problem, step)
+        eligible = tuple(
+            group_id
+            for group_id in scheduled
+            if problem.groups[group_id].transforms == "orthogonal"
+        )
+        if step.groups is not None or step.blocks is not None:
+            ineligible = sorted(set(scheduled) - set(eligible))
+            if ineligible:
+                raise ValueError(
+                    "procrustes steps only update 'orthogonal' groups; "
+                    "scheduled non-orthogonal group(s): " + ", ".join(ineligible)
+                )
+        if not eligible:
+            raise ValueError(
+                "procrustes step scheduled, but the problem declares no "
+                "'orthogonal' groups."
+            )
+        solver = ProcrustesGroupSolver(self.objective)
+        sweeps = 0
+        max_delta = 0.0
+        for _ in range(step.max_sweeps):
+            sweeps += 1
+            sweep_delta = 0.0
+            for group_id in eligible:
+                state, update_aux = solver.update(
+                    problem, ref_data, target_data, state, group_id
+                )
+                sweep_delta = max(sweep_delta, float(update_aux["delta"]))
+            max_delta = sweep_delta
+            if sweep_delta <= step.tol:
+                break
+        return state, {
+            "solver": "procrustes",
+            "sweeps": sweeps,
+            "max_delta": max_delta,
+            "groups": list(eligible),
+        }
 
 
 def _unbatch_state(state: PermutationState, *, sample_index: int) -> PermutationState:

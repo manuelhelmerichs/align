@@ -161,11 +161,12 @@ def update_attention_module(
     """One structured coordinate update for an attention module.
 
     Updates the head group via circuit-cost LAP, then every scheduled intra
-    group via the generic exact LAP linearization (which sees the fresh head
-    permutation through the state).
+    group via the generic exact class-dispatched update (which sees the fresh
+    head permutation through the state; signed intra groups get the exact
+    signed-LAP update).
     """
 
-    from .permutation_state import solve_lap_maximize
+    from .solvers import update_group_transform
 
     cost = head_cost_matrix(problem, ref_data, target_data, state, spec)
     row_ind, col_ind = linear_sum_assignment(cost)
@@ -184,17 +185,10 @@ def update_attention_module(
         if scheduled_groups is None or group_id in scheduled_groups
     ]
     for group_id in intra_groups:
-        intra_cost = objective.linearize_group(
-            problem, ref_data, target_data, state, group_id
+        state, group_delta = update_group_transform(
+            problem, objective, ref_data, target_data, state, group_id
         )
-        updated = solve_lap_maximize(np.asarray(intra_cost))
-        prev = as_permutation_matrix(
-            state.hard[group_id],
-            size=problem.groups[group_id].size,
-            dtype=updated.dtype,
-        )
-        delta = max(delta, float(np.max(np.abs(updated - prev))))
-        state = state.with_hard({group_id: updated})
+        delta = max(delta, group_delta)
 
     aux = {
         "solver": "attention",
@@ -205,9 +199,199 @@ def update_attention_module(
     return state, aux
 
 
+@dataclass(frozen=True)
+class GQAModuleSpec:
+    """One grouped-query attention module's coupled groups and tensors.
+
+    The head symmetry is the GQA quotient: kv-group permutations (size ``G``)
+    times per-group query-head permutations (size ``H/G``), the wreath
+    product. The per-slot qk groups are ``rotation_pairs`` groups — RoPE
+    removes the qk permutation symmetry (see docs/theory.md) — and are
+    updated by the generic rotation projection, not by this structured
+    update.
+    """
+
+    kv_group: str
+    query_head_groups: tuple[str, ...]
+    qk_groups: tuple[str, ...]
+    vo_groups: tuple[str, ...]
+    query: str
+    key: str
+    value: str
+    out: str
+    num_kv_groups: int
+    heads_per_group: int
+    head_dim: int
+
+    @classmethod
+    def from_constraint(cls, problem, constraint) -> GQAModuleSpec:
+        metadata = constraint.metadata
+        tensors = dict(metadata["tensors"])
+        return cls(
+            kv_group=str(metadata["kv_group"]),
+            query_head_groups=tuple(str(g) for g in metadata["query_head_groups"]),
+            qk_groups=tuple(str(g) for g in metadata["qk_groups"]),
+            vo_groups=tuple(str(g) for g in metadata["vo_groups"]),
+            query=str(tensors["query"]),
+            key=str(tensors["key"]),
+            value=str(tensors["value"]),
+            out=str(tensors["out"]),
+            num_kv_groups=int(metadata["num_kv_groups"]),
+            heads_per_group=int(metadata["heads_per_group"]),
+            head_dim=int(metadata["head_dim"]),
+        )
+
+    @property
+    def groups(self) -> tuple[str, ...]:
+        return (
+            self.kv_group,
+            *self.query_head_groups,
+            *self.qk_groups,
+            *self.vo_groups,
+        )
+
+
+def gqa_module_specs(problem) -> tuple[GQAModuleSpec, ...]:
+    """Return specs for every ``gqa_attention_block`` constraint of ``problem``."""
+
+    return tuple(
+        GQAModuleSpec.from_constraint(problem, constraint)
+        for constraint in problem.constraints
+        if constraint.kind == "gqa_attention_block"
+    )
+
+
+def _gqa_circuits(
+    problem, spec: GQAModuleSpec, data, *, state=None, skip_groups=None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-query-head QK and OV circuit matrices, shape ``(G, R, d, d)``.
+
+    ``QK[g, r] = W^Q_{g,r} (W^K_g)^T`` is invariant to any invertible qk
+    transform shared within the kv group (in particular the RoPE pair scaled
+    rotations); ``OV[g, r] = W^V_g W^O_{g,r}`` is invariant to the vo
+    transforms. Both are equivariant under query-head and kv-group
+    permutations, which head matching resolves.
+    """
+
+    tensors = {}
+    for tensor_id in (spec.query, spec.key, spec.value, spec.out):
+        tensor = data[tensor_id]
+        if state is not None:
+            tensor = _apply_other_groups_hard(
+                problem, tensor_id, tensor, state, skip_groups or set()
+            )
+        tensors[tensor_id] = np.asarray(tensor)
+
+    query = tensors[spec.query]  # (d, G, R, dk)
+    key = tensors[spec.key]  # (d, G, dk)
+    value = tensors[spec.value]  # (d, G, dk)
+    out = tensors[spec.out]  # (G, R, dk, d)
+    qk = np.einsum("dgrk,egk->grde", query, key, optimize=True)
+    ov = np.einsum("dgk,grke->grde", value, out, optimize=True)
+    return qk, ov
+
+
+def gqa_head_cost_matrix(
+    problem, ref_data, target_data, state, spec: GQAModuleSpec
+) -> tuple[np.ndarray, np.ndarray]:
+    """Two-level circuit cost of assigning target kv group ``j`` to ref slot ``i``.
+
+    Returns ``(cost, inner)`` where ``cost[i, j]`` is the summed circuit
+    distance under the best matching of the two groups' query heads (an inner
+    R x R assignment, solved exactly per pair) and ``inner[i, j]`` is that
+    matching as a permutation matrix. Groups outside the module are applied
+    to the target first; the module's own groups are excluded, which is exact
+    because circuit costs are invariant to the unresolved intra transforms.
+    """
+
+    ref_qk, ref_ov = _gqa_circuits(problem, spec, ref_data)
+    target_qk, target_ov = _gqa_circuits(
+        problem,
+        spec,
+        target_data,
+        state=state,
+        skip_groups=set(spec.groups),
+    )
+
+    def _pairwise(ref, target) -> np.ndarray:
+        # (G, R, d, d) x (G, R, d, d) -> (G, R, G, R) squared distances.
+        ref_sq = np.sum(ref**2, axis=(2, 3))
+        target_sq = np.sum(target**2, axis=(2, 3))
+        cross = np.einsum("irde,jsde->irjs", ref, target, optimize=True)
+        return ref_sq[:, :, None, None] + target_sq[None, None] - 2.0 * cross
+
+    head_cost = _pairwise(ref_qk, target_qk) + _pairwise(ref_ov, target_ov)
+    num_groups, heads = spec.num_kv_groups, spec.heads_per_group
+    cost = np.zeros((num_groups, num_groups), dtype=np.float64)
+    inner = np.zeros((num_groups, num_groups, heads, heads), dtype=np.float64)
+    for i in range(num_groups):
+        for j in range(num_groups):
+            row_ind, col_ind = linear_sum_assignment(head_cost[i, :, j, :])
+            cost[i, j] = float(head_cost[i, :, j, :][row_ind, col_ind].sum())
+            inner[i, j][row_ind, col_ind] = 1.0
+    return cost, inner
+
+
+def update_gqa_attention_module(
+    problem,
+    objective,
+    ref_data,
+    target_data,
+    state: PermutationState,
+    spec: GQAModuleSpec,
+    *,
+    scheduled_groups: set[str] | None = None,
+) -> tuple[PermutationState, dict[str, Any]]:
+    """One structured coordinate update for a grouped-query attention module.
+
+    Updates the kv-group permutation via the two-level circuit-cost LAP (the
+    inner query-head assignments enter only the cost), then updates every
+    scheduled per-slot group (query-head and vo) via the generic exact
+    class-dispatched update, which sees the fresh kv permutation through the
+    state. The per-slot qk rotation groups are not part of this update; they
+    are ordinary scheduled groups solved by the rotation projection.
+    """
+
+    from .solvers import update_group_transform
+
+    cost, _ = gqa_head_cost_matrix(problem, ref_data, target_data, state, spec)
+    row_ind, col_ind = linear_sum_assignment(cost)
+    kv_matrix = np.zeros_like(cost)
+    kv_matrix[row_ind, col_ind] = 1.0
+
+    previous = as_permutation_matrix(
+        state.hard[spec.kv_group], size=spec.num_kv_groups, dtype=np.float64
+    )
+    delta = float(np.max(np.abs(kv_matrix - previous)))
+    state = state.with_hard({spec.kv_group: kv_matrix})
+
+    intra_groups = [
+        group_id
+        for group_id in (*spec.query_head_groups, *spec.vo_groups)
+        if scheduled_groups is None or group_id in scheduled_groups
+    ]
+    for group_id in intra_groups:
+        state, group_delta = update_group_transform(
+            problem, objective, ref_data, target_data, state, group_id
+        )
+        delta = max(delta, group_delta)
+
+    aux = {
+        "solver": "gqa_attention",
+        "kv_group": spec.kv_group,
+        "delta": delta,
+        "intra_groups": list(intra_groups),
+    }
+    return state, aux
+
+
 __all__ = [
     "AttentionModuleSpec",
+    "GQAModuleSpec",
     "attention_module_specs",
+    "gqa_head_cost_matrix",
+    "gqa_module_specs",
     "head_cost_matrix",
     "update_attention_module",
+    "update_gqa_attention_module",
 ]

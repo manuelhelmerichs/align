@@ -41,6 +41,8 @@ from .synthetic import (
     dense_mlp_apply,
     gpt_transformer_apply,
     make_gpt_style_params,
+    make_modern_transformer_params,
+    modern_transformer_apply,
     permutation_matrix,
 )
 
@@ -126,7 +128,12 @@ def split_rhat(draws: np.ndarray) -> np.ndarray:
 
     ``draws`` has shape ``(n_chains, n_samples, n_params)``. Each chain is
     split in half, so at least four samples per chain are required. Parameters
-    that are constant within and across chains report R-hat 1.
+    that are constant within and across chains report R-hat 1. Constancy is
+    judged against the parameter's float32 quantization scale, not exact
+    equality: canonicalized coordinates (e.g. RMSNorm scales folded to unit
+    energy) land within one ulp of their canonical value, and ulp-level
+    variation must not read as chain separation. Materially separated
+    constant chains still report ``inf``.
     """
 
     if draws.ndim != 3:
@@ -149,10 +156,12 @@ def split_rhat(draws: np.ndarray) -> np.ndarray:
     between = n * chain_means.var(axis=0, ddof=1)
     var_plus = (n - 1) / n * within + between / n
 
+    scale = np.mean(np.abs(split), axis=(0, 1))
+    quantum = np.maximum((np.finfo(np.float32).eps * scale) ** 2, 1e-30)
     rhat = np.ones_like(within)
-    active = within > 1e-30
+    active = within > quantum
     rhat[active] = np.sqrt(var_plus[active] / within[active])
-    rhat[~active & (between > 1e-30)] = np.inf
+    rhat[~active & (between > quantum)] = np.inf
     return rhat
 
 
@@ -446,6 +455,138 @@ def make_synthetic_transformer_posterior_case(
         problem=problem,
         chains=tuple(chains),
         apply_fn=gpt_transformer_apply,
+        inputs=tokens,
+        metadata={
+            "seed": seed,
+            "n_chains": n_chains,
+            "n_samples": n_samples,
+            "noise_scale": noise_scale,
+            "scale_jitter": scale_jitter,
+            "noise_mode": noise_mode,
+            "chain_transforms": chain_transforms,
+        },
+    )
+
+
+def make_synthetic_modern_transformer_posterior_case(
+    *,
+    seed: int = 0,
+    n_chains: int = 3,
+    n_samples: int = 6,
+    noise_scale: float = 0.01,
+    scale_jitter: float = 0.5,
+    noise_mode: str = "isotropic",
+) -> PosteriorBenchmarkCase:
+    """Single-mode RMSNorm/RoPE/GQA posterior whose chains sit in symmetry copies.
+
+    Every non-reference chain applies one fixed random symmetry of a shared
+    base mode — the family's full implemented group: signed permutations on
+    the stream and vo groups, plain permutations on kv/query-head/FFN groups,
+    per-pair qk rotations, composed with the exact diagonal scales (RMSNorm
+    gamma, pair-tied qk, vo) — then Gaussian weight noise per sample. Rebasin
+    alone cannot remove the scales, so full collapse requires the
+    modern-transformer normalization plan first.
+    """
+
+    from align.normalization.modern_transformer import (
+        apply_rms_gamma_scales,
+        gqa_attention_constraints,
+        rms_norm_constraints,
+    )
+
+    from .synthetic import rotation_pairs_matrix, signed_permutation_matrix
+
+    if n_chains < 2:
+        raise ValueError("Posterior cases require at least two chains.")
+    if n_samples < 4:
+        raise ValueError("Posterior cases require at least four samples per chain.")
+
+    key = jax.random.PRNGKey(seed)
+    param_key, input_key = jax.random.split(key)
+    base = make_modern_transformer_params(key=param_key)
+    adapter = get_adapter("modern_transformer")
+    problem = adapter.build_problem(base)
+    tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
+
+    rng = np.random.default_rng(seed)
+    chains: list[tuple[ParamTree, ...]] = []
+    chain_transforms: list[dict[str, Any]] = []
+    for chain_idx in range(n_chains):
+        if chain_idx == 0:
+            transformed = base
+            perms: dict[str, np.ndarray] = {}
+        else:
+            gamma_scales = {
+                constraint.metadata["scale"]: np.exp(
+                    rng.uniform(
+                        -scale_jitter,
+                        scale_jitter,
+                        size=problem.tensors[constraint.metadata["scale"]].shape[0],
+                    )
+                ).astype(np.float32)
+                for constraint in rms_norm_constraints(problem)
+            }
+            transformed = apply_rms_gamma_scales(problem, base, gamma_scales)
+            circuit_scales = {}
+            for constraint in gqa_attention_constraints(problem):
+                metadata = constraint.metadata
+                head_dim = int(metadata["head_dim"])
+                for group_id in metadata["qk_groups"]:
+                    pair = np.exp(
+                        rng.uniform(-scale_jitter, scale_jitter, size=head_dim // 2)
+                    )
+                    circuit_scales[group_id] = np.concatenate([pair, pair]).astype(
+                        np.float32
+                    )
+                for group_id in metadata["vo_groups"]:
+                    circuit_scales[group_id] = np.exp(
+                        rng.uniform(-scale_jitter, scale_jitter, size=head_dim)
+                    ).astype(np.float32)
+            transformed = problem.apply_scales(
+                transformed, ScaleState.from_scales(problem, circuit_scales)
+            )
+            perms = {}
+            for gid, group in problem.groups.items():
+                if group.transforms == "rotation_pairs":
+                    perms[gid] = rotation_pairs_matrix(rng, group.size)
+                elif group.transforms in ("signed_permutation", "orthogonal"):
+                    perms[gid] = signed_permutation_matrix(rng, group.size)
+                else:
+                    perms[gid] = permutation_matrix(rng.permutation(group.size))
+            transformed = problem.apply(
+                transformed, PermutationState.from_perms(problem, perms)
+            )
+        chain_transforms.append({"perms": perms})
+
+        noise_std = _noise_std_tree(
+            transformed,
+            noise_mode=noise_mode,
+            noise_scale=noise_scale,
+            apply_fn=modern_transformer_apply,
+            inputs=tokens,
+        )
+        samples = []
+        for _ in range(n_samples):
+            noisy = jax.tree_util.tree_map(
+                lambda leaf, std: (
+                    np.asarray(leaf)
+                    + (std * rng.standard_normal(np.shape(leaf))).astype(
+                        np.asarray(leaf).dtype
+                    )
+                ),
+                transformed,
+                noise_std,
+            )
+            samples.append(noisy)
+        chains.append(tuple(samples))
+
+    return PosteriorBenchmarkCase(
+        name=f"synthetic_modern_transformer_posterior_{noise_mode}_seed_{seed}"
+        if noise_mode != "isotropic"
+        else f"synthetic_modern_transformer_posterior_seed_{seed}",
+        problem=problem,
+        chains=tuple(chains),
+        apply_fn=modern_transformer_apply,
         inputs=tokens,
         metadata={
             "seed": seed,

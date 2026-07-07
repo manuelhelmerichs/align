@@ -35,10 +35,14 @@ class ProblemBuilder:
         self.metadata: dict[str, Any] = {"architecture": architecture}
         self.group_order: list[str] = []
 
-    def add_group(self, group_id: str, size: int) -> str:
+    def add_group(
+        self, group_id: str, size: int, *, transforms: str = "permutation"
+    ) -> str:
         if group_id in self.groups:
             raise ValueError(f"Group {group_id!r} was already added.")
-        self.groups[group_id] = PermutationGroup(id=group_id, size=int(size))
+        self.groups[group_id] = PermutationGroup(
+            id=group_id, size=int(size), transforms=transforms
+        )
         self.group_order.append(group_id)
         return group_id
 
@@ -68,6 +72,7 @@ class ProblemBuilder:
         role: str = "out",
         scale_power: float = 1.0,
         selector: tuple[tuple[int, int], ...] = (),
+        transform_scope: str = "linear",
     ) -> str:
         """Bind one axis (or a half-open interval of it) of ``path`` to ``group``."""
 
@@ -82,6 +87,7 @@ class ProblemBuilder:
                 role=role,
                 scale_power=scale_power,
                 selector=selector,
+                transform_scope=transform_scope,
             )
         )
         return tensor_id

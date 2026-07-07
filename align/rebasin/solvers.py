@@ -30,8 +30,88 @@ def _scheduled_groups(problem, step: SolverScheduleStep) -> tuple[str, ...]:
     return tuple(groups)
 
 
+def solve_signed_lap_maximize(signed: np.ndarray, invariant: np.ndarray) -> np.ndarray:
+    """Exact signed-permutation update from a split linear payoff.
+
+    For any assignment the optimal sign of each matched pair is the sign of
+    its (sign-covariant) cross term, so the assignment maximizes
+    ``|signed| + invariant`` and the matched entries carry those signs.
+    """
+
+    perm = solve_lap_maximize(np.abs(signed) + invariant)
+    return perm * np.where(np.asarray(signed) >= 0.0, 1.0, -1.0)
+
+
+def solve_rotation_pairs_maximize(cross: np.ndarray) -> np.ndarray:
+    """Exact per-pair rotation update maximizing ``<M, cross>``.
+
+    Pairs follow the half-split convention ``(p, p + n/2)``; each pair's
+    optimal angle is the closed-form 2-D Procrustes-to-rotation solution
+    ``atan2(C[q,p] - C[p,q], C[p,p] + C[q,q])``.
+    """
+
+    cross = np.asarray(cross, dtype=np.float64)
+    size = cross.shape[0]
+    if size % 2:
+        raise ValueError(f"rotation_pairs update needs an even size, got {size}.")
+    half = size // 2
+    idx = np.arange(half)
+    trace_term = cross[idx, idx] + cross[idx + half, idx + half]
+    skew_term = cross[idx + half, idx] - cross[idx, idx + half]
+    angles = np.arctan2(skew_term, trace_term)
+    cos, sin = np.cos(angles), np.sin(angles)
+    matrix = np.zeros_like(cross)
+    matrix[idx, idx] = cos
+    matrix[idx + half, idx + half] = cos
+    matrix[idx + half, idx] = sin
+    matrix[idx, idx + half] = -sin
+    return matrix
+
+
+def solve_orthogonal_maximize(cross: np.ndarray) -> np.ndarray:
+    """Exact orthogonal Procrustes update maximizing ``<Q, cross>``."""
+
+    left, _, right_t = np.linalg.svd(np.asarray(cross, dtype=np.float64))
+    return left @ right_t
+
+
+def update_group_transform(
+    problem, objective, ref_data, target_data, state, group_id: str
+):
+    """One exact coordinate update of a group within its declared class.
+
+    All classes consume the same split linear payoff from the objective:
+    permutations solve an LAP on ``signed + invariant``, signed permutations
+    an LAP on ``|signed| + invariant`` with matched-entry signs, and
+    rotation-pair groups the closed-form per-pair rotation projection of the
+    sign-covariant cross term. Orthogonal-capable groups are updated at their
+    signed-permutation subgroup here; the full orthogonal update is the
+    ``procrustes`` schedule step.
+    """
+
+    group = problem.groups[group_id]
+    signed, invariant = objective.linearize_group_split(
+        problem, ref_data, target_data, state, group_id
+    )
+    signed = np.asarray(signed)
+    invariant = np.asarray(invariant)
+    if group.transforms == "permutation":
+        updated = solve_lap_maximize(signed + invariant)
+    elif group.transforms in ("signed_permutation", "orthogonal"):
+        updated = solve_signed_lap_maximize(signed, invariant)
+    elif group.transforms == "rotation_pairs":
+        updated = solve_rotation_pairs_maximize(signed)
+    else:  # pragma: no cover - guarded by problem validation
+        raise ValueError(f"Unknown group transform class {group.transforms!r}.")
+    previous = as_permutation_matrix(
+        state.hard[group_id], size=group.size, dtype=np.float64
+    )
+    delta = float(np.max(np.abs(updated - previous)))
+    return state.with_hard({group_id: updated}), delta
+
+
 class LAPGroupSolver:
-    """Exact LAP update for one group when the objective is linear in it."""
+    """Exact class-dispatched update for one group (LAP and its extensions)."""
 
     name = "lap"
 
@@ -39,14 +119,34 @@ class LAPGroupSolver:
         self.objective = objective
 
     def update(self, problem, ref_data, target_data, state, group_id: str):
-        cost = self.objective.linearize_group(
+        state, delta = update_group_transform(
+            problem, self.objective, ref_data, target_data, state, group_id
+        )
+        return state, {"delta": delta}
+
+
+class ProcrustesGroupSolver:
+    """Full orthogonal Procrustes update for orthogonal-capable groups."""
+
+    name = "procrustes"
+
+    def __init__(self, objective) -> None:
+        self.objective = objective
+
+    def update(self, problem, ref_data, target_data, state, group_id: str):
+        group = problem.groups[group_id]
+        if group.transforms != "orthogonal":
+            raise ValueError(
+                f"Group {group_id!r} declares transform class "
+                f"{group.transforms!r}; the procrustes solver only updates "
+                "'orthogonal' groups."
+            )
+        signed, _ = self.objective.linearize_group_split(
             problem, ref_data, target_data, state, group_id
         )
-        updated = solve_lap_maximize(np.asarray(cost))
+        updated = solve_orthogonal_maximize(np.asarray(signed))
         previous = as_permutation_matrix(
-            state.hard[group_id],
-            size=problem.groups[group_id].size,
-            dtype=updated.dtype,
+            state.hard[group_id], size=group.size, dtype=np.float64
         )
         delta = float(np.max(np.abs(updated - previous)))
         return state.with_hard({group_id: updated}), {"delta": delta}
@@ -62,7 +162,14 @@ class SinkhornBlockSolver:
         self.step = step
 
     def _groups(self, problem) -> tuple[str, ...]:
-        return _scheduled_groups(problem, self.step)
+        # Rotation-pair groups contain no non-trivial permutations, so the
+        # doubly stochastic relaxation is not a valid symmetry relaxation for
+        # them; their hard matrices stay fixed through Sinkhorn steps.
+        return tuple(
+            group_id
+            for group_id in _scheduled_groups(problem, self.step)
+            if problem.groups[group_id].transforms != "rotation_pairs"
+        )
 
     def _init_logits(
         self, problem, state, *, batch_size: int, rng_key
@@ -146,7 +253,9 @@ class SinkhornBlockSolver:
         }
         projected_state = pack(logit_tuple)
         soft_state = projected_state.with_logits(final_logits)
-        output_state = projected_state.harden() if self.step.harden else soft_state
+        output_state = (
+            projected_state.harden(groups=groups) if self.step.harden else soft_state
+        )
         aux: dict[str, Any] = {
             "solver": "sinkhorn",
             "steps": int(steps_taken),
@@ -173,13 +282,18 @@ def _batch_size(problem, target_data) -> int:
 
 
 def available_solvers() -> list[str]:
-    return ["lap", "sinkhorn"]
+    return ["lap", "procrustes", "sinkhorn"]
 
 
 __all__ = [
     "SolverScheduleStep",
     "LAPGroupSolver",
+    "ProcrustesGroupSolver",
     "SinkhornBlockSolver",
     "UnsupportedGroupLinearization",
     "available_solvers",
+    "solve_orthogonal_maximize",
+    "solve_rotation_pairs_maximize",
+    "solve_signed_lap_maximize",
+    "update_group_transform",
 ]

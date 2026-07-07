@@ -26,6 +26,7 @@ from align.alignment import (
 from align.architectures import (
     ArchitectureAdapter,
     DenseMLPAdapter,
+    ModernTransformerAdapter,
     ResNetAdapter,
     TransformerAdapter,
 )
@@ -618,6 +619,388 @@ def make_transformer_scaled_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
     )
 
 
+def _rms_norm(x: jax.Array, scale: Any, *, eps: float = 1e-6) -> jax.Array:
+    """RMSNorm: no mean subtraction, no bias (exactly orthogonal-equivariant)."""
+
+    rms = jnp.sqrt(jnp.mean(jnp.square(x), axis=-1, keepdims=True) + eps)
+    return (x / rms) * jnp.asarray(scale)
+
+
+def _rope_angles(seq_len: int, head_dim: int, *, base: float = 10000.0) -> jax.Array:
+    """Rotation angles ``(T, head_dim/2)`` for half-split rotary embeddings."""
+
+    half = head_dim // 2
+    inv_freq = base ** (-jnp.arange(half, dtype=jnp.float32) * 2.0 / head_dim)
+    return jnp.arange(seq_len, dtype=jnp.float32)[:, None] * inv_freq[None, :]
+
+
+def _rope_rotate(x: jax.Array, cos: jax.Array, sin: jax.Array) -> jax.Array:
+    """Rotate half-split pairs ``(p, p + dk/2)`` of the trailing axis."""
+
+    half = x.shape[-1] // 2
+    x1, x2 = x[..., :half], x[..., half:]
+    return jnp.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1)
+
+
+def gqa_attention_apply(module: Mapping[str, Any], x: jax.Array) -> jax.Array:
+    """Causal grouped-query attention with rotary embeddings on ``(B, T, d)``.
+
+    Kernel layout is kv-group-structured and bias-free: query
+    ``(d, G, R, dk)``, key/value ``(d, G, dk)``, out ``(G, R, dk, d)``.
+    RoPE uses the half-split pairing ``(p, p + dk/2)`` (LLaMA convention).
+    """
+
+    query_kernel = jnp.asarray(module["query"]["kernel"])
+    seq_len = x.shape[1]
+    head_dim = query_kernel.shape[-1]
+    angles = _rope_angles(seq_len, head_dim)
+    cos = jnp.cos(angles)[None, :, None, :]
+    sin = jnp.sin(angles)[None, :, None, :]
+
+    query = jnp.einsum("btd,dgrk->btgrk", x, query_kernel)
+    key = jnp.einsum("btd,dgk->btgk", x, jnp.asarray(module["key"]["kernel"]))
+    value = jnp.einsum("btd,dgk->btgk", x, jnp.asarray(module["value"]["kernel"]))
+    query = _rope_rotate(query, cos[..., None, :], sin[..., None, :])
+    key = _rope_rotate(key, cos, sin)
+    query = query / jnp.sqrt(jnp.asarray(head_dim, dtype=query.dtype))
+
+    scores = jnp.einsum("btgrk,bsgk->bgrts", query, key)
+    mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=bool))
+    scores = jnp.where(mask[None, None, None], scores, jnp.finfo(scores.dtype).min)
+    weights = jax.nn.softmax(scores, axis=-1)
+    context = jnp.einsum("bgrts,bsgk->btgrk", weights, value)
+    return jnp.einsum("btgrk,grkd->btd", context, jnp.asarray(module["out"]["kernel"]))
+
+
+def modern_transformer_apply(params: ParamTree, tokens: jax.Array) -> jax.Array:
+    """Forward pass for the RMSNorm + RoPE + GQA reference decoder.
+
+    Standard pre-norm residual blocks (``x = x + attn(RMS(x))``, then
+    ``x = x + ffn(RMS(x))``), GELU FFN, final RMSNorm, bias-free logits head.
+    No positional embedding: positions enter only through RoPE.
+    """
+
+    x = jnp.asarray(params["Embed_0"]["embedding"])[tokens]  # type: ignore[index]
+    block_names = sorted(
+        (name for name in params if str(name).startswith("Block_")),
+        key=_natural_key,
+    )
+    for name in block_names:
+        block = params[name]  # type: ignore[index]
+        h = _rms_norm(x, block["RMSNorm_0"]["scale"])
+        x = x + gqa_attention_apply(block["GQAttention_0"], h)
+        h = _rms_norm(x, block["RMSNorm_1"]["scale"])
+        ffn = block["FFN_0"]
+        hidden = jax.nn.gelu(h @ jnp.asarray(ffn["FFN_layer0"]["kernel"]))
+        x = x + hidden @ jnp.asarray(ffn["FFN_layer1"]["kernel"])
+    x = _rms_norm(x, params["RMSNorm_f"]["scale"])  # type: ignore[index]
+    return x @ jnp.asarray(params["DenseLogits"]["kernel"])  # type: ignore[index]
+
+
+def make_modern_transformer_params(
+    *,
+    key: jax.Array,
+    vocab_size: int = 7,
+    d_model: int = 8,
+    num_kv_groups: int = 2,
+    heads_per_group: int = 2,
+    head_dim: int = 4,
+    num_blocks: int = 2,
+    ffn_dim: int = 12,
+) -> dict[str, Any]:
+    """Random parameters in the RMSNorm + RoPE + GQA reference tree layout."""
+
+    if head_dim % 2:
+        raise ValueError("head_dim must be even for rotary embeddings.")
+
+    def _normal(rng_key: jax.Array, shape: tuple[int, ...], scale: float) -> jax.Array:
+        return scale * jax.random.normal(rng_key, shape, dtype=jnp.float32)
+
+    keys = iter(jax.random.split(key, 8 * num_blocks + 4))
+    params: dict[str, Any] = {
+        "Embed_0": {"embedding": _normal(next(keys), (vocab_size, d_model), 0.5)},
+        "RMSNorm_f": {"scale": 1.0 + _normal(next(keys), (d_model,), 0.2)},
+    }
+    for block_index in range(num_blocks):
+        params[f"Block_{block_index}"] = {
+            "RMSNorm_0": {"scale": 1.0 + _normal(next(keys), (d_model,), 0.2)},
+            "GQAttention_0": {
+                "query": {
+                    "kernel": _normal(
+                        next(keys),
+                        (d_model, num_kv_groups, heads_per_group, head_dim),
+                        0.6,
+                    )
+                },
+                "key": {
+                    "kernel": _normal(
+                        next(keys), (d_model, num_kv_groups, head_dim), 0.6
+                    )
+                },
+                "value": {
+                    "kernel": _normal(
+                        next(keys), (d_model, num_kv_groups, head_dim), 0.6
+                    )
+                },
+                "out": {
+                    "kernel": _normal(
+                        next(keys),
+                        (num_kv_groups, heads_per_group, head_dim, d_model),
+                        0.6,
+                    )
+                },
+            },
+            "RMSNorm_1": {"scale": 1.0 + _normal(next(keys), (d_model,), 0.2)},
+            "FFN_0": {
+                "FFN_layer0": {"kernel": _normal(next(keys), (d_model, ffn_dim), 0.6)},
+                "FFN_layer1": {"kernel": _normal(next(keys), (ffn_dim, d_model), 0.6)},
+            },
+        }
+    params["DenseLogits"] = {"kernel": _normal(next(keys), (d_model, vocab_size), 0.6)}
+    return params
+
+
+def _gqa_intra_reindex(problem: AlignmentProblem, forward_perms) -> dict[str, str]:
+    """Reference-slot reindexing of per-slot intra groups by the kv permutation."""
+
+    reindex: dict[str, str] = {}
+    for constraint in problem.constraints:
+        if constraint.kind != "gqa_attention_block":
+            continue
+        metadata = constraint.metadata
+        kv_matrix = np.asarray(forward_perms[metadata["kv_group"]])
+        sigma = np.argmax(kv_matrix, axis=1)  # new slot i took old group sigma[i]
+        sigma_inv = np.argsort(sigma)
+        for slot_groups in (
+            metadata["query_head_groups"],
+            metadata["qk_groups"],
+            metadata["vo_groups"],
+        ):
+            for slot, group_id in enumerate(slot_groups):
+                reindex[group_id] = slot_groups[int(sigma_inv[slot])]
+    return reindex
+
+
+def signed_permutation_matrix(rng: np.random.Generator, size: int) -> np.ndarray:
+    """Random signed permutation ``M`` with ``M[i, j_i] = sigma_i``."""
+
+    matrix = permutation_matrix(rng.permutation(size))
+    signs = rng.choice([-1.0, 1.0], size=size)
+    return matrix * signs[:, None]
+
+
+def rotation_pairs_matrix(rng: np.random.Generator, size: int) -> np.ndarray:
+    """Random half-split per-pair rotation matrix of even ``size``."""
+
+    half = size // 2
+    angles = rng.uniform(-np.pi, np.pi, size=half)
+    cos, sin = np.cos(angles), np.sin(angles)
+    idx = np.arange(half)
+    matrix = np.zeros((size, size), dtype=np.float64)
+    matrix[idx, idx] = cos
+    matrix[idx + half, idx + half] = cos
+    matrix[idx + half, idx] = sin
+    matrix[idx, idx + half] = -sin
+    return matrix
+
+
+def _modern_transformer_case(
+    seed: int,
+    *,
+    name: str,
+    signed: bool,
+    rotations: bool,
+    scales: bool,
+) -> SyntheticOrbitCase:
+    """Shared constructor for modern-transformer orbit cases.
+
+    The forward transform draws, per group and within its declared class:
+    permutations everywhere, signed permutations on signed/orthogonal-capable
+    groups when ``signed``, per-pair qk rotations when ``rotations``
+    (identity otherwise — rotation groups admit no permutations). ``scales``
+    additionally composes the family's exact diagonal scales: RMSNorm gamma
+    scales (signed helper), pair-tiled qk scales, and vo scales through
+    ``apply_scales``. Expected aligning transforms are the orthogonal
+    inverses (transposes), with per-slot groups re-indexed by the kv
+    permutation as in the flat-attention case.
+    """
+
+    from align.normalization.modern_transformer import (
+        apply_rms_gamma_scales,
+        gqa_attention_constraints,
+        rms_norm_constraints,
+    )
+
+    key = jax.random.PRNGKey(seed)
+    param_key, input_key, perm_key = jax.random.split(key, 3)
+    reference = make_modern_transformer_params(key=param_key)
+    adapter = ModernTransformerAdapter()
+    problem = adapter.build_problem(reference)
+
+    rng = np.random.default_rng(int(jax.random.randint(perm_key, (), 0, 2**31 - 1)))
+    forward: dict[str, np.ndarray] = {}
+    for group_id, group in problem.groups.items():
+        if group.transforms == "rotation_pairs":
+            forward[group_id] = (
+                rotation_pairs_matrix(rng, group.size)
+                if rotations
+                else np.eye(group.size)
+            )
+        elif signed and group.transforms in ("signed_permutation", "orthogonal"):
+            forward[group_id] = signed_permutation_matrix(rng, group.size)
+        else:
+            forward[group_id] = permutation_matrix(rng.permutation(group.size))
+    target = problem.apply(reference, PermutationState.from_perms(problem, forward))
+
+    if scales:
+        gamma_scales = {
+            constraint.metadata["scale"]: np.exp(
+                rng.uniform(
+                    -1.0,
+                    1.0,
+                    size=problem.tensors[constraint.metadata["scale"]].shape[0],
+                )
+            ).astype(np.float32)
+            for constraint in rms_norm_constraints(problem)
+        }
+        target = apply_rms_gamma_scales(problem, target, gamma_scales)
+        circuit_scales = {}
+        for constraint in gqa_attention_constraints(problem):
+            metadata = constraint.metadata
+            head_dim = int(metadata["head_dim"])
+            for group_id in metadata["qk_groups"]:
+                pair = np.exp(rng.uniform(-1.0, 1.0, size=head_dim // 2))
+                circuit_scales[group_id] = np.concatenate([pair, pair]).astype(
+                    np.float32
+                )
+            for group_id in metadata["vo_groups"]:
+                circuit_scales[group_id] = np.exp(
+                    rng.uniform(-1.0, 1.0, size=head_dim)
+                ).astype(np.float32)
+        target = problem.apply_scales(target, _scale_state(problem, circuit_scales))
+
+    intra_reindex = _gqa_intra_reindex(problem, forward)
+    expected: dict[str, np.ndarray] = {}
+    for group_id in forward:
+        source = intra_reindex.get(group_id, group_id)
+        expected[group_id] = np.asarray(forward[source]).T
+
+    tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
+    return SyntheticOrbitCase(
+        name=f"{name}_seed_{seed}",
+        adapter=adapter,
+        problem=problem,
+        reference=reference,
+        target=target,
+        inputs=tokens,
+        apply_fn=modern_transformer_apply,
+        expected_permutations=expected,
+    )
+
+
+def make_modern_transformer_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+    """RMSNorm/RoPE/GQA case whose target is a known permutation copy.
+
+    Forward permutations cover the residual stream, per-block kv-group
+    permutations, per-group query-head permutations, and per-group vo
+    intra-head permutations; qk rotation groups stay at identity (they admit
+    no permutations). Expected aligning permutations follow the
+    wreath-product inverse used by the flat-attention case: per-slot intra
+    expectations are transposed and re-indexed by the kv-group permutation.
+    """
+
+    return _modern_transformer_case(
+        seed,
+        name="modern_transformer_exact_orbit",
+        signed=False,
+        rotations=False,
+        scales=False,
+    )
+
+
+def make_modern_transformer_scaled_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+    """Orbit carrying the full implemented *discrete* + scale symmetry.
+
+    The target composes signed permutations on the stream and vo groups
+    (plain permutations elsewhere) with all exact diagonal scales: RMSNorm
+    gamma scales, pair-tied qk scales, and vo circuit scales.
+    Permutation-only rebasin cannot reach the reference;
+    ``known_optimum_distance`` of 0 presumes ``normalize=True``. Recovery is
+    exact (signs are discrete).
+    """
+
+    return _modern_transformer_case(
+        seed,
+        name="modern_transformer_scaled_orbit",
+        signed=True,
+        rotations=False,
+        scales=True,
+    )
+
+
+def make_modern_transformer_rotated_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+    """Orbit additionally carrying random per-pair qk rotations.
+
+    Extends the scaled orbit with random rotations on every qk
+    ``rotation_pairs`` group — the full implemented symmetry of the family.
+    Rotations are recovered by the closed-form per-pair projection inside
+    ``lap`` sweeps; recovered transforms match the expected transposes up to
+    float32 trigonometry rather than exactly.
+    """
+
+    return _modern_transformer_case(
+        seed,
+        name="modern_transformer_rotated_orbit",
+        signed=True,
+        rotations=True,
+        scales=True,
+    )
+
+
+def make_modern_transformer_orthogonal_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+    """Gamma-folded case whose target is an orthogonal stream copy.
+
+    The reference is the *normalized* base (gammas folded to 1, circuits
+    balanced); the target applies one random orthogonal matrix to the stream
+    group (identity elsewhere), which is exact because the folded gammas are
+    invariant. The adapter declares ``stream_transforms="orthogonal"``, so a
+    ``procrustes`` schedule step recovers the stream in closed form.
+    """
+
+    from align.normalization import ScaleNormalizer
+
+    key = jax.random.PRNGKey(seed)
+    param_key, input_key, perm_key = jax.random.split(key, 3)
+    base = make_modern_transformer_params(key=param_key)
+    adapter = ModernTransformerAdapter(stream_transforms="orthogonal")
+    problem = adapter.build_problem(base)
+    reference, _, _ = ScaleNormalizer().normalize(problem, base, task_type="regression")
+
+    rng = np.random.default_rng(int(jax.random.randint(perm_key, (), 0, 2**31 - 1)))
+    d_model = problem.groups["stream"].size
+    q_matrix, _ = np.linalg.qr(rng.standard_normal((d_model, d_model)))
+    forward = {"stream": q_matrix}
+    target = problem.apply(reference, PermutationState.from_perms(problem, forward))
+
+    expected = {
+        group_id: np.asarray(forward[group_id]).T
+        if group_id in forward
+        else np.eye(group.size)
+        for group_id, group in problem.groups.items()
+    }
+    tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
+    return SyntheticOrbitCase(
+        name=f"modern_transformer_orthogonal_orbit_seed_{seed}",
+        adapter=adapter,
+        problem=problem,
+        reference=reference,
+        target=target,
+        inputs=tokens,
+        apply_fn=modern_transformer_apply,
+        expected_permutations=expected,
+    )
+
+
 def _make_dense_params(
     *,
     key: jax.Array,
@@ -892,14 +1275,31 @@ def make_split_concat_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
     )
 
 
-def permutation_validity_error(perms: Mapping[str, Any]) -> float:
-    """Measure hard permutation validity using row/column sums and integrality."""
+def permutation_validity_error(
+    perms: Mapping[str, Any], problem: AlignmentProblem | None = None
+) -> float:
+    """Measure hard group-transform validity per declared class.
+
+    Plain permutation groups are checked for row/column sums and
+    integrality; signed-permutation groups apply the same check to the
+    entrywise absolute value; rotation-pair and orthogonal groups report the
+    orthogonality residual ``max |M M^T - I|``.
+    """
 
     worst = 0.0
-    for perm in perms.values():
+    for group_id, perm in perms.items():
         matrix = np.asarray(perm, dtype=np.float64)
         if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
             return float("inf")
+        transforms = (
+            problem.groups[group_id].transforms if problem is not None else None
+        )
+        if transforms in ("rotation_pairs", "orthogonal"):
+            residual = np.max(np.abs(matrix @ matrix.T - np.eye(matrix.shape[0])))
+            worst = max(worst, float(residual))
+            continue
+        if transforms == "signed_permutation":
+            matrix = np.abs(matrix)
         row_error = np.max(np.abs(np.sum(matrix, axis=1) - 1.0))
         col_error = np.max(np.abs(np.sum(matrix, axis=0) - 1.0))
         binary_error = np.max(np.minimum(np.abs(matrix), np.abs(matrix - 1.0)))
@@ -1007,7 +1407,7 @@ def run_alignment_benchmark(
         distance_after=after,
         distance_reduction=before - after,
         optimality_gap=optimality_gap,
-        permutation_validity_error=permutation_validity_error(perms),
+        permutation_validity_error=permutation_validity_error(perms, case.problem),
         recovered_permutation_error=recovered_permutation_error(
             perms, case.expected_permutations
         ),

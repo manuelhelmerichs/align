@@ -52,6 +52,12 @@ def is_layernorm_module(node: Any) -> bool:
     )
 
 
+def is_rmsnorm_module(node: Any) -> bool:
+    """True for RMSNorm modules (1-D scale, no bias)."""
+
+    return is_layernorm_module(node) and "bias" not in node
+
+
 def is_dense_module(node: Any) -> bool:
     """True for dense modules (2-D kernel, optional bias)."""
 
@@ -222,8 +228,22 @@ class AttentionBlockAdapter(BlockAdapter):
         qk_groups: list[str] = []
         vo_groups: list[str] = []
         for slot in range(num_heads):
-            qk_groups.append(builder.add_group(f"{self.block_id}/qk{slot}", head_dim))
-            vo_groups.append(builder.add_group(f"{self.block_id}/vo{slot}", head_dim))
+            # The diagonal circuit symmetry includes sign flips: flipping one
+            # intra-head dimension in both circuit factors preserves QK / OV.
+            qk_groups.append(
+                builder.add_group(
+                    f"{self.block_id}/qk{slot}",
+                    head_dim,
+                    transforms="signed_permutation",
+                )
+            )
+            vo_groups.append(
+                builder.add_group(
+                    f"{self.block_id}/vo{slot}",
+                    head_dim,
+                    transforms="signed_permutation",
+                )
+            )
 
         role_tensor_ids: dict[str, str] = {}
         for name, intra_groups, intra_role in (
@@ -287,12 +307,176 @@ class AttentionBlockAdapter(BlockAdapter):
 
 
 @dataclass
-class ResidualStreamBlockAdapter(BlockAdapter):
-    """The residual stream: one global permutation group over ``d_model``.
+class GQAAttentionBlockAdapter(BlockAdapter):
+    """One grouped-query attention module with RoPE on the qk circuit.
 
-    Binds LayerNorm parameters and embedding-style tensors (trailing
+    Emits the GQA quotient of the attention head symmetry: a kv-group
+    permutation of size ``G`` shared by query/key/value/out, one query-head
+    group of size ``H/G`` per kv slot (selector bindings on the query and out
+    kernels), one signed vo intra group per kv slot, and one qk
+    ``rotation_pairs`` group per kv slot: rotary embeddings restrict the qk
+    circuit symmetry to per frequency-pair scaled rotations (see the
+    modern-transformer subsection of docs/theory.md), so the qk groups carry
+    no permutations — solvers update them by the closed-form per-pair
+    rotation projection, and the normalization plan balances the pair scales
+    through the same bindings.
+
+    Expected kernel layout (flat ``(d, H, dk)`` trees reshape losslessly with
+    query head ``i`` in kv group ``i // (H/G)``): query ``(d, G, H/G, dk)``,
+    key/value ``(d, G, dk)``, out ``(G, H/G, dk, d)``. Biases are rejected —
+    the exact RoPE symmetry model assumes bias-free projections (LLaMA-style).
+    """
+
+    kind: ClassVar[str] = "gqa_attention"
+
+    block_id: str
+    module_path: tuple[str, ...]
+    stream_group: str
+
+    def build(self, builder: ProblemBuilder) -> tuple[str, ...]:
+        module = _descend(builder.params, self.module_path)
+        if not is_attention_module(module):
+            raise ValueError(
+                f"GQA attention block {self.block_id!r}: no query/key/value/out "
+                f"modules at {'/'.join(self.module_path)}."
+            )
+        for name in _ATTENTION_CHILDREN:
+            if "bias" in module[name]:
+                raise ValueError(
+                    f"GQA attention block {self.block_id!r} has a bias on "
+                    f"{name!r}; the RoPE/GQA symmetry model requires bias-free "
+                    "projections."
+                )
+        d_model = int(builder.groups[self.stream_group].size)
+        q_shape = _shape(module["query"]["kernel"])
+        if len(q_shape) != 4 or q_shape[0] != d_model:
+            raise ValueError(
+                f"GQA attention block {self.block_id!r} query kernel must be "
+                f"(d_model={d_model}, kv_groups, heads_per_group, head_dim), "
+                f"got {q_shape}."
+            )
+        _, num_kv_groups, heads_per_group, head_dim = q_shape
+        if head_dim % 2:
+            raise ValueError(
+                f"GQA attention block {self.block_id!r} head_dim {head_dim} must "
+                "be even for rotary embeddings."
+            )
+        kv_shape = (d_model, num_kv_groups, head_dim)
+        for name in ("key", "value"):
+            shape = _shape(module[name]["kernel"])
+            if shape != kv_shape:
+                raise ValueError(
+                    f"GQA attention block {self.block_id!r} {name} kernel must "
+                    f"be {kv_shape}, got {shape}."
+                )
+        out_shape = _shape(module["out"]["kernel"])
+        if out_shape != (num_kv_groups, heads_per_group, head_dim, d_model):
+            raise ValueError(
+                f"GQA attention block {self.block_id!r} out kernel must be "
+                f"{(num_kv_groups, heads_per_group, head_dim, d_model)}, got "
+                f"{out_shape}."
+            )
+
+        kv_group = builder.add_group(f"{self.block_id}/kv", num_kv_groups)
+        qh_groups: list[str] = []
+        qk_groups: list[str] = []
+        vo_groups: list[str] = []
+        for slot in range(num_kv_groups):
+            qh_groups.append(
+                builder.add_group(f"{self.block_id}/qh{slot}", heads_per_group)
+            )
+            qk_groups.append(
+                builder.add_group(
+                    f"{self.block_id}/qk{slot}",
+                    head_dim,
+                    transforms="rotation_pairs",
+                )
+            )
+            vo_groups.append(
+                builder.add_group(
+                    f"{self.block_id}/vo{slot}",
+                    head_dim,
+                    transforms="signed_permutation",
+                )
+            )
+
+        query_path = (*self.module_path, "query", "kernel")
+        key_path = (*self.module_path, "key", "kernel")
+        value_path = (*self.module_path, "value", "kernel")
+        out_path = (*self.module_path, "out", "kernel")
+
+        role_tensor_ids: dict[str, str] = {}
+        role_tensor_ids["query"] = builder.bind(
+            query_path, 0, self.stream_group, role="in"
+        )
+        builder.bind(query_path, 1, kv_group)
+        for slot, qh in enumerate(qh_groups):
+            builder.bind(query_path, 2, qh, selector=((1, slot),))
+        for slot, qk in enumerate(qk_groups):
+            builder.bind(query_path, 3, qk, role="out", selector=((1, slot),))
+        role_tensor_ids["key"] = builder.bind(key_path, 0, self.stream_group, role="in")
+        builder.bind(key_path, 1, kv_group)
+        for slot, qk in enumerate(qk_groups):
+            builder.bind(key_path, 2, qk, role="in", selector=((1, slot),))
+        role_tensor_ids["value"] = builder.bind(
+            value_path, 0, self.stream_group, role="in"
+        )
+        builder.bind(value_path, 1, kv_group)
+        for slot, vo in enumerate(vo_groups):
+            builder.bind(value_path, 2, vo, role="out", selector=((1, slot),))
+        role_tensor_ids["out"] = builder.bind(out_path, 0, kv_group)
+        for slot, qh in enumerate(qh_groups):
+            builder.bind(out_path, 1, qh, selector=((0, slot),))
+        for slot, vo in enumerate(vo_groups):
+            builder.bind(out_path, 2, vo, role="in", selector=((0, slot),))
+        builder.bind(out_path, 3, self.stream_group, role="out")
+
+        all_groups = (kv_group, *qh_groups, *qk_groups, *vo_groups)
+        builder.add_constraint(
+            GraphConstraint(
+                kind="gqa_attention_block",
+                groups=all_groups,
+                tensors=tuple(role_tensor_ids[name] for name in _ATTENTION_CHILDREN),
+                metadata={
+                    "kv_group": kv_group,
+                    "query_head_groups": tuple(qh_groups),
+                    "qk_groups": tuple(qk_groups),
+                    "vo_groups": tuple(vo_groups),
+                    "tensors": dict(role_tensor_ids),
+                    "num_kv_groups": num_kv_groups,
+                    "heads_per_group": heads_per_group,
+                    "head_dim": head_dim,
+                    "rope_pairing": "half",
+                },
+            )
+        )
+        builder.add_block(
+            self.block_id,
+            self.kind,
+            all_groups,
+            metadata={
+                "num_kv_groups": num_kv_groups,
+                "heads_per_group": heads_per_group,
+                "head_dim": head_dim,
+            },
+        )
+        return all_groups
+
+
+@dataclass
+class ResidualStreamBlockAdapter(BlockAdapter):
+    """The residual stream: one global group over ``d_model``.
+
+    Binds LayerNorm/RMSNorm parameters and embedding-style tensors (trailing
     ``d_model`` axis) to the stream group. Attention and FFN blocks tie their
     stream-facing axes to the same group via ``input_group``/``output_group``.
+
+    ``transforms`` declares the stream's symmetry class: ``"permutation"``
+    for LayerNorm stacks; ``"signed_permutation"`` or ``"orthogonal"`` for
+    RMSNorm stacks (whose streams admit the full orthogonal group). Beyond
+    plain permutations the norms must be RMSNorm (scale only), and the scale
+    vectors bind ``permute_only``: they permute with the stream but are
+    exempt from signs and orthogonal maps, which their consumers absorb.
     """
 
     kind: ClassVar[str] = "residual_stream"
@@ -301,14 +485,22 @@ class ResidualStreamBlockAdapter(BlockAdapter):
     layernorm_paths: tuple[tuple[str, ...], ...] = ()
     feature_leaves: tuple[tuple[str, ...], ...] = ()
     group_id: str = "stream"
+    transforms: str = "permutation"
 
     def build(self, builder: ProblemBuilder) -> str:
-        builder.add_group(self.group_id, self.d_model)
+        builder.add_group(self.group_id, self.d_model, transforms=self.transforms)
+        norm_scope = "linear" if self.transforms == "permutation" else "permute_only"
         for path in self.layernorm_paths:
             module = _descend(builder.params, path)
             if not is_layernorm_module(module):
                 raise ValueError(
                     f"Stream block: {'/'.join(path)} is not a LayerNorm module."
+                )
+            if self.transforms != "permutation" and not is_rmsnorm_module(module):
+                raise ValueError(
+                    f"Stream block: {'/'.join(path)} carries a bias; the "
+                    f"{self.transforms!r} stream symmetry holds only for "
+                    "RMSNorm (scale-only) stacks."
                 )
             scale_shape = _shape(module["scale"])
             if scale_shape != (self.d_model,):
@@ -316,7 +508,13 @@ class ResidualStreamBlockAdapter(BlockAdapter):
                     f"LayerNorm {'/'.join(path)} scale has shape {scale_shape}, "
                     f"expected ({self.d_model},)."
                 )
-            builder.bind((*path, "scale"), 0, self.group_id, role="out")
+            builder.bind(
+                (*path, "scale"),
+                0,
+                self.group_id,
+                role="out",
+                transform_scope=norm_scope,
+            )
             if "bias" in module:
                 builder.bind((*path, "bias"), 0, self.group_id, role="out")
         for path in self.feature_leaves:
@@ -340,8 +538,10 @@ __all__ = [
     "AttentionBlockAdapter",
     "BlockAdapter",
     "DenseStackBlockAdapter",
+    "GQAAttentionBlockAdapter",
     "ResidualStreamBlockAdapter",
     "is_attention_module",
     "is_dense_module",
     "is_layernorm_module",
+    "is_rmsnorm_module",
 ]

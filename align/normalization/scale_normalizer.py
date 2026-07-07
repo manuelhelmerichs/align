@@ -8,14 +8,19 @@ vectors, and applies the symmetry through
 and optional classification-head rescaling remain explicit post-passes because
 they are not positive scale symmetries.
 
-Two plans are dispatched on problem structure:
+Plans are dispatched on problem structure:
 
+- **Modern-transformer canonicalization** for problems with ``rms_norm`` or
+  ``gqa_attention_block`` constraints (RMSNorm + RoPE + GQA stacks): RMSNorm
+  post-norm gamma scales are folded to unit producer energy, RoPE qk pair
+  scales and vo circuit scales are balanced (see
+  ``align.normalization.modern_transformer``).
 - **Attention circuit balancing** for problems with ``attention_block``
-  constraints (transformers): the exact diagonal qk/vo circuit symmetry is
-  canonicalized by equalizing query/key and value/out energies per intra-head
-  dimension. This symmetry is activation-independent; all other groups
-  (stream, heads, GELU FFN hidden units) carry no per-channel scale symmetry
-  and stay at identity.
+  constraints (LayerNorm transformers): the exact diagonal qk/vo circuit
+  symmetry is canonicalized by equalizing query/key and value/out energies
+  per intra-head dimension. This symmetry is activation-independent; all
+  other groups (stream, heads, GELU FFN hidden units) carry no per-channel
+  scale symmetry and stay at identity.
 - **Dense chain normalization** for linear ReLU-MLP graphs (each permutation
   group has a single ``out``-role producer kernel, kernels are 2-D, and the
   groups form a single chain feeding one output head). Residual ties and
@@ -31,17 +36,16 @@ Two plans are dispatched on problem structure:
 
 from __future__ import annotations
 
-import copy
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
-from flax.core import frozen_dict
 
 from ..alignment import AlignmentProblem, AxisBinding, binding_axis_interval
-from ..alignment.tensor_ops import _descend, _set_path
+from ..alignment.tensor_ops import _descend
+from ._tree import replace_paths
 from .activations import is_positive_homogeneous, validate_activation
 from .attention import attention_balancing_scales, attention_constraints
 from .conv import conv_stack_producer_scales, has_conv_stack_block
@@ -54,6 +58,13 @@ from .kernel import (
     compute_degenerate_mask,
     compute_incoming_norms,
     normalize_last_layer_classification,
+)
+from .modern_transformer import (
+    apply_rms_gamma_scales,
+    gqa_vo_balancing_scales,
+    has_modern_transformer_plan,
+    qk_pair_scales,
+    rms_gamma_scales,
 )
 from .scale_state import ScaleState
 
@@ -216,17 +227,6 @@ def _dense_scale_plan(problem: AlignmentProblem) -> _DenseScalePlan:
         head_kernel_path=head_path,
         head_bias_path=(*head_path[:-1], "bias"),
     )
-
-
-def _replace_paths(
-    params: ParamTree,
-    replacements: Sequence[tuple[tuple[str, ...], Any]],
-) -> ParamTree:
-    is_frozen = isinstance(params, frozen_dict.FrozenDict)
-    mutable = frozen_dict.unfreeze(params) if is_frozen else copy.deepcopy(params)
-    for path, value in replacements:
-        _set_path(mutable, path, value)
-    return frozen_dict.freeze(mutable) if is_frozen else mutable
 
 
 def _multiply_axis(tensor: Any, factors: Any, *, axis: int) -> Any:
@@ -399,7 +399,7 @@ def _canonicalize_degenerate_producers(
         kernel, bias = _canonicalize_degenerate(kernel, bias, mask)
         replacements.append((site.kernel_path, kernel))
         replacements.append((site.bias_path, bias))
-    return _replace_paths(params, replacements) if replacements else params
+    return replace_paths(params, replacements) if replacements else params
 
 
 def _rescale_classification_head(
@@ -419,7 +419,7 @@ def _rescale_classification_head(
         epsilon=epsilon,
     )
     return (
-        _replace_paths(
+        replace_paths(
             params,
             (
                 (plan.head_kernel_path, normalized_head.kernel),
@@ -481,6 +481,24 @@ class ScaleNormalizer:
                 raise ValueError(
                     "num_classes required when classification_head_rescale is enabled"
                 )
+
+        if has_modern_transformer_plan(problem):
+            if mode is not None:
+                raise ValueError(
+                    "The modern-transformer plan has one canonical form "
+                    "(gamma producer energy plus qk-pair/vo balancing); the "
+                    "'mode' option is undefined for it. Omit the option."
+                )
+            return self._normalize_modern_transformer(
+                problem,
+                params,
+                epsilon=epsilon,
+                degenerate_handling=degenerate_handling,
+                classification_head_rescale=classification_head_rescale,
+                task=task,
+                activation=activation,
+                normalize_biases=normalize_biases,
+            )
 
         if attention_constraints(problem):
             if mode == "unit_norm":
@@ -635,6 +653,78 @@ class ScaleNormalizer:
             "classification_head_rescale": classification_head_rescale,
         }
         return normalized_params, scale_factors, aux
+
+    def _normalize_modern_transformer(
+        self,
+        problem: AlignmentProblem,
+        params: ParamTree,
+        *,
+        epsilon: float,
+        degenerate_handling: str,
+        classification_head_rescale: bool,
+        task: str,
+        activation: str,
+        normalize_biases: bool,
+    ) -> tuple[ParamTree, list[Any], dict[str, Any]]:
+        """RMSNorm gamma folding, qk pair balancing, and vo circuit balancing.
+
+        The three exact diagonal symmetries of the RMSNorm + RoPE + GQA
+        family, applied in a fixed order (gamma, qk pairs, vo) so the
+        composed canonical form is deterministic. GELU FFN hidden units and
+        the residual stream carry no per-channel scale symmetry and stay at
+        identity.
+        """
+
+        if classification_head_rescale:
+            raise ValueError(
+                "classification_head_rescale is not supported for "
+                "modern-transformer normalization; it is a dense-chain "
+                "post-pass."
+            )
+        if degenerate_handling != "preserve":
+            raise ValueError(
+                f"degenerate_handling={degenerate_handling!r} has no meaning "
+                "for modern-transformer normalization (degenerate gamma "
+                "channels keep scale 1); use 'preserve'."
+            )
+
+        gamma_scales = rms_gamma_scales(problem, params, epsilon=epsilon)
+        normalized = apply_rms_gamma_scales(problem, params, gamma_scales)
+        pair_scales = qk_pair_scales(problem, normalized, epsilon=epsilon)
+        vo_scales = gqa_vo_balancing_scales(problem, normalized, epsilon=epsilon)
+        circuit_scales = {**pair_scales, **vo_scales}
+        if circuit_scales:
+            normalized = problem.apply_scales(
+                normalized,
+                ScaleState.from_scales(problem, circuit_scales, backend="jax"),
+            )
+
+        scale_factors = [
+            *gamma_scales.values(),
+            *(
+                circuit_scales[gid]
+                for gid in problem.group_order
+                if gid in circuit_scales
+            ),
+        ]
+        aux: dict[str, Any] = {
+            "plan": "modern_transformer",
+            "mode": "balanced",
+            "task_type": task,
+            "epsilon": epsilon,
+            "degenerate_handling": degenerate_handling,
+            "normalize_biases": normalize_biases,
+            "activation": activation,
+            "classification_head_rescale": classification_head_rescale,
+            "rms_norms": sorted(gamma_scales),
+            "balanced_qk_groups": [
+                gid for gid in problem.group_order if gid in pair_scales
+            ],
+            "balanced_vo_groups": [
+                gid for gid in problem.group_order if gid in vo_scales
+            ],
+        }
+        return normalized, scale_factors, aux
 
     def _normalize_attention_circuits(
         self,
