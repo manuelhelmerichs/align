@@ -107,6 +107,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Scale-normalize samples before rebasin (dense MLPs only).",
     )
+    posterior.add_argument(
+        "--refine-passes",
+        type=int,
+        default=1,
+        help="Barycenter refinement passes: re-align against the mean of the "
+        "previous pass's aligned samples (1 = plain single-reference rebasin).",
+    )
     posterior.add_argument("--output", type=Path, help="Write the JSON report here.")
 
     return parser
@@ -246,6 +253,7 @@ def _run_posterior(args: argparse.Namespace) -> int:
             args.objective_kwargs, flag="--objective-kwargs"
         ),
         normalize=args.normalize,
+        refine_passes=args.refine_passes,
     )
     _emit([record], label="experiment-posterior", output=args.output)
     return 0 if record.skipped is None else 1

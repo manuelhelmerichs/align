@@ -142,6 +142,7 @@ def _posterior_record(
     objective_kwargs: Mapping[str, Any] | None,
     normalize: bool,
     rng_seed: int = 0,
+    refine_passes: int = 1,
 ) -> BenchmarkRecord:
     record = BenchmarkRecord(
         name=f"posterior/{case_label}/{schedule_name}/{objective}",
@@ -154,6 +155,7 @@ def _posterior_record(
             "objective_kwargs": dict(objective_kwargs or {}),
             "normalize": normalize,
             "seed": rng_seed,
+            "refine_passes": refine_passes,
         },
     )
     try:
@@ -164,6 +166,7 @@ def _posterior_record(
             schedule=schedule,
             normalize=normalize,
             rng_seed=rng_seed,
+            refine_passes=refine_passes,
         )
     except (UnsupportedGroupLinearization, NotImplementedError) as exc:
         record.skipped = str(exc)

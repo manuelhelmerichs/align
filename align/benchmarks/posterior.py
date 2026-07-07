@@ -181,10 +181,7 @@ def evaluate_posterior_metrics(
         predictions = np.stack(
             [np.asarray(case.apply_fn(sample, case.inputs)) for sample in sample_list]
         )
-        mean_params = jax.tree_util.tree_map(
-            lambda *leaves: np.mean(np.stack([np.asarray(x) for x in leaves]), axis=0),
-            *sample_list,
-        )
+        mean_params = _tree_mean(sample_list)
         mean_predictions = np.asarray(case.apply_fn(mean_params, case.inputs))
         averaging_gap = float(
             np.sqrt(np.mean(np.square(mean_predictions - predictions.mean(axis=0))))
@@ -359,15 +356,17 @@ def make_synthetic_transformer_posterior_case(
     n_samples: int = 6,
     noise_scale: float = 0.01,
     scale_jitter: float = 0.5,
+    noise_mode: str = "isotropic",
 ) -> PosteriorBenchmarkCase:
     """Build a single-mode GPT posterior whose chains sit in symmetry copies.
 
     Every non-reference chain applies one fixed random symmetry of a shared
     base mode: permutations on all groups (stream, heads, intra-head, FFN)
     composed with positive diagonal scales on the qk/vo intra-head groups (the
-    exact attention circuit symmetry), then i.i.d. Gaussian weight noise per
-    sample. Rebasin alone cannot remove the circuit scales, so full collapse
-    requires balancing normalization first.
+    exact attention circuit symmetry), then Gaussian weight noise per sample
+    (``noise_mode`` as in :func:`make_synthetic_mlp_posterior_case`). Rebasin
+    alone cannot remove the circuit scales, so full collapse requires
+    balancing normalization first.
     """
 
     if n_chains < 2:
@@ -380,6 +379,7 @@ def make_synthetic_transformer_posterior_case(
     base = make_gpt_style_params(key=param_key)
     adapter = get_adapter("transformer")
     problem = adapter.build_problem(base)
+    tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
     intra_groups = [
         group_id
         for constraint in problem.constraints
@@ -417,22 +417,32 @@ def make_synthetic_transformer_posterior_case(
             )
         chain_transforms.append({"perms": perms, "scales": scales})
 
+        noise_std = _noise_std_tree(
+            transformed,
+            noise_mode=noise_mode,
+            noise_scale=noise_scale,
+            apply_fn=gpt_transformer_apply,
+            inputs=tokens,
+        )
         samples = []
         for _ in range(n_samples):
             noisy = jax.tree_util.tree_map(
-                lambda leaf: (
+                lambda leaf, std: (
                     np.asarray(leaf)
-                    + noise_scale
-                    * rng.standard_normal(np.shape(leaf)).astype(np.asarray(leaf).dtype)
+                    + (std * rng.standard_normal(np.shape(leaf))).astype(
+                        np.asarray(leaf).dtype
+                    )
                 ),
                 transformed,
+                noise_std,
             )
             samples.append(noisy)
         chains.append(tuple(samples))
 
-    tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
     return PosteriorBenchmarkCase(
-        name=f"synthetic_transformer_posterior_seed_{seed}",
+        name=f"synthetic_transformer_posterior_{noise_mode}_seed_{seed}"
+        if noise_mode != "isotropic"
+        else f"synthetic_transformer_posterior_seed_{seed}",
         problem=problem,
         chains=tuple(chains),
         apply_fn=gpt_transformer_apply,
@@ -443,6 +453,7 @@ def make_synthetic_transformer_posterior_case(
             "n_samples": n_samples,
             "noise_scale": noise_scale,
             "scale_jitter": scale_jitter,
+            "noise_mode": noise_mode,
             "chain_transforms": chain_transforms,
         },
     )
@@ -544,6 +555,15 @@ def _normalize_tree(problem: AlignmentProblem, params: ParamTree) -> ParamTree:
     return normalized
 
 
+def _tree_mean(trees: Sequence[ParamTree]) -> ParamTree:
+    return jax.tree_util.tree_map(
+        lambda *leaves: np.mean(
+            np.stack([np.asarray(leaf) for leaf in leaves]), axis=0
+        ),
+        *trees,
+    )
+
+
 def run_posterior_benchmark(
     case: PosteriorBenchmarkCase,
     *,
@@ -552,51 +572,75 @@ def run_posterior_benchmark(
     schedule: Sequence[Mapping[str, Any]] | None = None,
     normalize: bool = False,
     rng_seed: int = 0,
+    refine_passes: int = 1,
 ) -> PosteriorBenchmarkResult:
     """Align every sample of a posterior case to its reference and score it.
 
     ``metrics_before`` is computed on the raw input chains, ``metrics_after``
     on the normalized (optional) and rebasined chains, so the comparison
     reflects the complete alignment treatment.
+
+    ``refine_passes > 1`` enables iterative barycenter refinement: after each
+    pass, the reference is replaced by the mean of the aligned samples and
+    every (normalized) sample is re-aligned from scratch against it. The
+    single reference *sample* carries its own posterior noise, which becomes
+    the matching bottleneck at high noise; the aligned mean estimates the
+    basin barycenter with noise reduced by ``1/sqrt(n_samples)``. Objectives
+    with ``calibration`` kwargs re-resolve at each pass's reference (the
+    metric lives at the matching base point).
     """
+
+    if refine_passes < 1:
+        raise ValueError("refine_passes must be at least 1.")
 
     metrics_before = evaluate_posterior_metrics(case, case.chains)
 
     reference = case.reference
     if normalize:
         reference = _normalize_tree(case.problem, reference)
-    scheduler = build_scheduler(
-        objective=objective,
-        objective_kwargs=resolve_calibration_kwargs(
-            objective_kwargs,
-            problem=case.problem,
-            params=reference,
-            apply_fn=case.apply_fn,
-            inputs=case.inputs,
-        ),
-        schedule=schedule,
-    )
-    ref_data = case.problem.materialize(
-        reference, backend=scheduler.backend, cache=True
-    )
 
     flat_samples = case.iter_samples()
+    targets = [
+        _normalize_tree(case.problem, params) if normalize else params
+        for _, _, params in flat_samples
+    ]
+
     aligned_flat: list[ParamTree] = []
     objective_values: list[float] = []
     start = time.perf_counter()
-    for index, (_, _, params) in enumerate(flat_samples):
-        target = _normalize_tree(case.problem, params) if normalize else params
-        aligned, _, aux = rebasin_single_sample(
-            case.problem,
-            reference,
-            target,
-            scheduler=scheduler,
-            ref_data=ref_data,
-            rng_key=jax.random.fold_in(jax.random.PRNGKey(rng_seed), index),
+    for pass_idx in range(refine_passes):
+        scheduler = build_scheduler(
+            objective=objective,
+            objective_kwargs=resolve_calibration_kwargs(
+                objective_kwargs,
+                problem=case.problem,
+                params=reference,
+                apply_fn=case.apply_fn,
+                inputs=case.inputs,
+            ),
+            schedule=schedule,
         )
-        aligned_flat.append(aligned)
-        if aux is not None and "objective_final" in aux:
-            objective_values.append(float(aux["objective_final"]))
+        ref_data = case.problem.materialize(
+            reference, backend=scheduler.backend, cache=True
+        )
+        aligned_flat = []
+        objective_values = []
+        for index, target in enumerate(targets):
+            aligned, _, aux = rebasin_single_sample(
+                case.problem,
+                reference,
+                target,
+                scheduler=scheduler,
+                ref_data=ref_data,
+                rng_key=jax.random.fold_in(
+                    jax.random.PRNGKey(rng_seed), pass_idx * len(targets) + index
+                ),
+            )
+            aligned_flat.append(aligned)
+            if aux is not None and "objective_final" in aux:
+                objective_values.append(float(aux["objective_final"]))
+        if pass_idx < refine_passes - 1:
+            reference = _tree_mean(aligned_flat)
     wall_time = time.perf_counter() - start
 
     aligned_chains: list[list[ParamTree]] = [[] for _ in case.chains]
