@@ -241,20 +241,24 @@ class L2WeightObjective(Objective):
             ]
             if not bindings:
                 continue
-            if len(bindings) > 1:  # Defensive; repeated check above should catch this.
-                raise UnsupportedGroupLinearization(group_id)
-            binding = bindings[0]
+            # Multiple bindings on one axis (e.g. a conv->flatten boundary
+            # binding each spatial position's channel slice) contribute a sum
+            # of independent linear terms; multi-axis repeats are rejected by
+            # the linearizability check above.
             shape = problem.tensors[tensor_id].shape
             ref = np.asarray(ref_data[tensor_id])
             target = _apply_other_groups_hard(
                 problem, tensor_id, target_data[tensor_id], state, {group_id}
             )
-            axis, start, stop = binding_axis_interval(shape, binding)
-            selector = binding_selector(shape, binding)
-            indexer = binding_indexer(ref.ndim, axis, start, stop, selector)
-            ref_mat = np.moveaxis(ref[indexer], axis, 0).reshape(group.size, -1)
-            target_mat = np.moveaxis(target[indexer], axis, 0).reshape(group.size, -1)
-            cost += ref_mat @ target_mat.T
+            for binding in bindings:
+                axis, start, stop = binding_axis_interval(shape, binding)
+                selector = binding_selector(shape, binding)
+                indexer = binding_indexer(ref.ndim, axis, start, stop, selector)
+                ref_mat = np.moveaxis(ref[indexer], axis, 0).reshape(group.size, -1)
+                target_mat = np.moveaxis(target[indexer], axis, 0).reshape(
+                    group.size, -1
+                )
+                cost += ref_mat @ target_mat.T
         return cost
 
 
@@ -343,25 +347,29 @@ class FisherL2Objective(Objective):
             ]
             if not bindings:
                 continue
-            if len(bindings) > 1:  # Defensive; repeated check above should catch this.
-                raise UnsupportedGroupLinearization(group_id)
-            binding = bindings[0]
+            # Same-axis multi-bindings sum independent linear terms (see the
+            # L2 linearization); multi-axis repeats are rejected above.
             shape = problem.tensors[tensor_id].shape
             ref = np.asarray(ref_data[tensor_id])
             weight = self._weight(problem, tensor_id)
             target = _apply_other_groups_hard(
                 problem, tensor_id, target_data[tensor_id], state, {group_id}
             )
-            axis, start, stop = binding_axis_interval(shape, binding)
-            selector = binding_selector(shape, binding)
-            indexer = binding_indexer(ref.ndim, axis, start, stop, selector)
-            ref_mat = np.moveaxis(ref[indexer], axis, 0).reshape(group.size, -1)
-            weight_mat = np.moveaxis(weight[indexer], axis, 0).reshape(group.size, -1)
-            target_mat = np.moveaxis(target[indexer], axis, 0).reshape(group.size, -1)
-            # The weighted target self-energy depends on the assignment, so it
-            # enters the (maximization) cost alongside the cross term.
-            cost += (weight_mat * ref_mat) @ target_mat.T
-            cost -= 0.5 * weight_mat @ np.square(target_mat).T
+            for binding in bindings:
+                axis, start, stop = binding_axis_interval(shape, binding)
+                selector = binding_selector(shape, binding)
+                indexer = binding_indexer(ref.ndim, axis, start, stop, selector)
+                ref_mat = np.moveaxis(ref[indexer], axis, 0).reshape(group.size, -1)
+                weight_mat = np.moveaxis(weight[indexer], axis, 0).reshape(
+                    group.size, -1
+                )
+                target_mat = np.moveaxis(target[indexer], axis, 0).reshape(
+                    group.size, -1
+                )
+                # The weighted target self-energy depends on the assignment, so
+                # it enters the (maximization) cost alongside the cross term.
+                cost += (weight_mat * ref_mat) @ target_mat.T
+                cost -= 0.5 * weight_mat @ np.square(target_mat).T
         return cost
 
 

@@ -33,6 +33,7 @@ class ArchitectureAdapter(ABC):
 
 _ADAPTERS: dict[str, type[ArchitectureAdapter]] = {}
 _BUILTIN_ADAPTERS: dict[str, tuple[str, str]] = {
+    "cnn": ("align.architectures.cnn", "CNNAdapter"),
     "dense_mlp": ("align.architectures.dense_mlp", "DenseMLPAdapter"),
     "resnet": ("align.architectures.resnet", "ResNetAdapter"),
     "transformer": ("align.architectures.transformer", "TransformerAdapter"),

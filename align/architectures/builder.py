@@ -63,11 +63,13 @@ class ProblemBuilder:
         axis: int,
         group: str,
         *,
+        start: int | None = None,
+        stop: int | None = None,
         role: str = "out",
         scale_power: float = 1.0,
         selector: tuple[tuple[int, int], ...] = (),
     ) -> str:
-        """Bind one axis of the tensor at ``path`` to ``group``."""
+        """Bind one axis (or a half-open interval of it) of ``path`` to ``group``."""
 
         tensor_id = self.tensor(path)
         self.bindings.append(
@@ -75,6 +77,8 @@ class ProblemBuilder:
                 tensor_id=tensor_id,
                 axis=axis,
                 group=group,
+                start=start,
+                stop=stop,
                 role=role,
                 scale_power=scale_power,
                 selector=selector,

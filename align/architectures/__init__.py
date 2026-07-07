@@ -16,6 +16,7 @@ from .base import (
 )
 
 _ADAPTER_EXPORTS = {
+    "CNNAdapter": "align.architectures.cnn",
     "DenseMLPAdapter": "align.architectures.dense_mlp",
     "ResNetAdapter": "align.architectures.resnet",
     "ConvStackBlockAdapter": "align.architectures.resnet",
@@ -45,6 +46,7 @@ __all__ = [
     "ArchitectureAdapter",
     "AttentionBlockAdapter",
     "BlockAdapter",
+    "CNNAdapter",
     "ConvStackBlockAdapter",
     "DenseMLPAdapter",
     "DenseStackBlockAdapter",
