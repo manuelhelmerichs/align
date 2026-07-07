@@ -32,6 +32,7 @@ _NORMALIZE_FIELDS = frozenset(
 _SCALE_NORMALIZE_FIELDS = frozenset(
     {
         "epsilon",
+        "mode",
         "degenerate_handling",
         "normalize_biases",
         "activation",
@@ -39,6 +40,7 @@ _SCALE_NORMALIZE_FIELDS = frozenset(
         "classification_head_rescale",
     }
 )
+_VALID_SCALE_MODES = frozenset({"balanced", "unit_norm"})
 _VALID_DEGENERATE_HANDLING = frozenset(
     {"preserve", "zero_outgoing", "canonical_vector"}
 )
@@ -60,6 +62,7 @@ class NormalizationOptions:
     """Configuration options for scale normalization."""
 
     epsilon: float = 1e-8
+    mode: str | None = None
     degenerate_handling: str = "preserve"
     normalize_biases: bool = True
     activation: str = "relu"
@@ -68,6 +71,10 @@ class NormalizationOptions:
 
     def __post_init__(self):
         self.epsilon = float(self.epsilon)
+        if self.mode is not None:
+            self.mode = _validate_choice(
+                "scale_normalize.mode", str(self.mode).lower(), _VALID_SCALE_MODES
+            )
         self.degenerate_handling = _validate_choice(
             "degenerate_handling",
             str(self.degenerate_handling),
@@ -158,6 +165,7 @@ class NormalizeConfig:
     def method_kwargs(self) -> dict[str, Any]:
         return {
             "epsilon": self.scale_normalize.epsilon,
+            "mode": self.scale_normalize.mode,
             "degenerate_handling": self.scale_normalize.degenerate_handling,
             "normalize_biases": self.scale_normalize.normalize_biases,
             "activation": self.scale_normalize.activation,

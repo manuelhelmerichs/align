@@ -20,7 +20,13 @@ Two plans are dispatched on problem structure:
   group has a single ``out``-role producer kernel, kernels are 2-D, and the
   groups form a single chain feeding one output head). Residual ties and
   branches give a group multiple ``out``-role producers and are rejected;
-  convolutional kernels are rejected as non-dense.
+  convolutional kernels are rejected as non-dense. Two canonical forms are
+  available via ``mode``: ``balanced`` (default) picks the minimum-norm orbit
+  representative by equalizing each hidden unit's incoming and outgoing
+  energies (a convex fixed point, the same philosophy as attention circuit
+  balancing), while ``unit_norm`` normalizes incoming norms to 1
+  (Erdogan-style). ``balanced`` keeps canonical weights near the data scale;
+  ``unit_norm`` can inflate posteriors whose true unit norms are far from 1.
 """
 
 from __future__ import annotations
@@ -289,6 +295,72 @@ def _group_scales(
     return action_scales, reported_scales, degenerate_masks
 
 
+def _balanced_group_scales(
+    params: ParamTree,
+    plan: _DenseScalePlan,
+    *,
+    epsilon: float,
+    normalize_biases: bool,
+    max_iter: int = 500,
+    tol: float = 1e-9,
+) -> tuple[dict[str, Any], list[Any], dict[str, Any]]:
+    """Derive per-group scales that equalize incoming and outgoing energies.
+
+    Minimizing the total squared weight norm over the positive scale orbit is
+    convex in the log-scales; per-group coordinate descent (divide the
+    producer column and bias by ``s``, multiply the consumer row by ``s``,
+    with the balanced update ``s = ((E_out + eps) / (E_in + eps))^(1/4)``)
+    converges to the unique minimum-norm representative. Degenerate units
+    (mask from the raw incoming energy, as in ``unit_norm`` mode) keep scale 1
+    so the post-passes see the same contract.
+    """
+
+    mats = [
+        np.asarray(_descend(params, site.kernel_path), dtype=np.float64).copy()
+        for site in plan.sites
+    ]
+    biases = [
+        np.asarray(_descend(params, site.bias_path), dtype=np.float64).copy()
+        for site in plan.sites
+    ]
+    mats.append(
+        np.asarray(_descend(params, plan.head_kernel_path), dtype=np.float64).copy()
+    )
+
+    degenerate_masks: dict[str, Any] = {}
+    for site, kernel, bias in zip(plan.sites, mats[:-1], biases, strict=True):
+        layer = DenseLayer(kernel=jnp.asarray(kernel), bias=jnp.asarray(bias))
+        degenerate_masks[site.group_id] = compute_degenerate_mask(
+            layer, epsilon=epsilon, normalize_biases=normalize_biases
+        )
+
+    totals = [np.ones(kernel.shape[1], dtype=np.float64) for kernel in mats[:-1]]
+    masks = [np.asarray(degenerate_masks[site.group_id]) for site in plan.sites]
+    for _ in range(max_iter):
+        delta = 0.0
+        for index in range(len(plan.sites)):
+            energy_out = np.sum(mats[index] ** 2, axis=0)
+            if normalize_biases:
+                energy_out = energy_out + biases[index] ** 2
+            energy_in = np.sum(mats[index + 1] ** 2, axis=1)
+            factors = ((energy_out + epsilon) / (energy_in + epsilon)) ** 0.25
+            factors = np.where(masks[index], 1.0, factors)
+            mats[index] /= factors[None, :]
+            biases[index] /= factors
+            mats[index + 1] *= factors[:, None]
+            totals[index] *= factors
+            delta = max(delta, float(np.max(np.abs(np.log(factors)))))
+        if delta < tol:
+            break
+
+    action_scales = {
+        site.group_id: jnp.asarray(total, dtype=jnp.float32)
+        for site, total in zip(plan.sites, totals, strict=True)
+    }
+    reported_scales = [action_scales[site.group_id] for site in plan.sites]
+    return action_scales, reported_scales, degenerate_masks
+
+
 def _zero_degenerate_consumers(
     problem: AlignmentProblem,
     params: ParamTree,
@@ -388,6 +460,12 @@ class ScaleNormalizer:
             "classification_head_rescale",
             method_kwargs.pop("classification_head_rescale", False),
         )
+        mode = method_kwargs.pop("mode", None)
+        if mode is not None and mode not in ("balanced", "unit_norm"):
+            raise ValueError(
+                f"Unknown scale normalization mode {mode!r}. Available: "
+                "balanced, unit_norm."
+            )
         if method_kwargs:
             unexpected = next(iter(method_kwargs))
             raise TypeError(
@@ -405,6 +483,13 @@ class ScaleNormalizer:
                 )
 
         if attention_constraints(problem):
+            if mode == "unit_norm":
+                raise ValueError(
+                    "mode='unit_norm' is undefined for attention circuit "
+                    "normalization: circuits are canonicalized by balancing "
+                    "(the minimum-norm representative). Use mode='balanced' or "
+                    "omit the option."
+                )
             return self._normalize_attention_circuits(
                 problem,
                 params,
@@ -417,6 +502,12 @@ class ScaleNormalizer:
             )
 
         if has_conv_stack_block(problem):
+            if mode == "balanced":
+                raise ValueError(
+                    "mode='balanced' is not implemented for conv-stack "
+                    "normalization; the conv plan canonicalizes by unit joint "
+                    "producer energy. Use mode='unit_norm' or omit the option."
+                )
             return self._normalize_conv_stack(
                 problem,
                 params,
@@ -435,14 +526,23 @@ class ScaleNormalizer:
                 "hidden units carry no scale symmetry; disable the normalize "
                 "stage for this architecture."
             )
+        dense_mode = mode or "balanced"
         plan = _dense_scale_plan(problem)
-        action_scales, scale_factors, degenerate_masks = _group_scales(
-            params,
-            plan,
-            epsilon=epsilon,
-            degenerate_handling=degenerate_handling,
-            normalize_biases=normalize_biases,
-        )
+        if dense_mode == "balanced":
+            action_scales, scale_factors, degenerate_masks = _balanced_group_scales(
+                params,
+                plan,
+                epsilon=epsilon,
+                normalize_biases=normalize_biases,
+            )
+        else:
+            action_scales, scale_factors, degenerate_masks = _group_scales(
+                params,
+                plan,
+                epsilon=epsilon,
+                degenerate_handling=degenerate_handling,
+                normalize_biases=normalize_biases,
+            )
         normalized_params = problem.apply_scales(
             params,
             ScaleState.from_scales(problem, action_scales, backend="jax"),
@@ -459,6 +559,7 @@ class ScaleNormalizer:
 
         aux: dict[str, Any] = {
             "plan": "dense_chain",
+            "mode": dense_mode,
             "task_type": task,
             "epsilon": epsilon,
             "degenerate_handling": degenerate_handling,
@@ -525,6 +626,7 @@ class ScaleNormalizer:
         scale_factors = [scales[group_id] for group_id in problem.group_order]
         aux: dict[str, Any] = {
             "plan": "conv_producer_energy",
+            "mode": "unit_norm",
             "task_type": task,
             "epsilon": epsilon,
             "degenerate_handling": degenerate_handling,
@@ -575,6 +677,7 @@ class ScaleNormalizer:
         ]
         aux: dict[str, Any] = {
             "plan": "attention_balance",
+            "mode": "balanced",
             "task_type": task,
             "epsilon": epsilon,
             "degenerate_handling": degenerate_handling,
