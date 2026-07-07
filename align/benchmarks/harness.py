@@ -142,7 +142,7 @@ def _posterior_record(
     objective_kwargs: Mapping[str, Any] | None,
     normalize: bool,
     rng_seed: int = 0,
-    refine_passes: int = 1,
+    refine_passes: int = 2,
 ) -> BenchmarkRecord:
     record = BenchmarkRecord(
         name=f"posterior/{case_label}/{schedule_name}/{objective}",

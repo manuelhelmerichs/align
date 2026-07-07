@@ -25,6 +25,7 @@ normalize:
   num_classes: null        # Only required when task_type == classification and classification_head_rescale == true.
   scale_normalize:
     epsilon: 1e-8          # Numerical stabiliser for variance scaling.
+    mode: null             # Dense-chain canonical form: balanced (default; minimum-norm) or unit_norm (incoming norm 1).
     degenerate_handling: preserve  # Alternatives: zero_outgoing, canonical_vector.
     normalize_biases: true
     activation: relu

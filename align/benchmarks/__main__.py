@@ -110,9 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
     posterior.add_argument(
         "--refine-passes",
         type=int,
-        default=1,
+        default=2,
         help="Barycenter refinement passes: re-align against the mean of the "
-        "previous pass's aligned samples (1 = plain single-reference rebasin).",
+        "previous pass's aligned samples (1 = plain single-reference "
+        "rebasin; default 2 — single-reference canonicalization is "
+        "reference-dependent at moderate posterior noise).",
     )
     posterior.add_argument("--output", type=Path, help="Write the JSON report here.")
 

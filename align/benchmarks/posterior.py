@@ -572,7 +572,7 @@ def run_posterior_benchmark(
     schedule: Sequence[Mapping[str, Any]] | None = None,
     normalize: bool = False,
     rng_seed: int = 0,
-    refine_passes: int = 1,
+    refine_passes: int = 2,
 ) -> PosteriorBenchmarkResult:
     """Align every sample of a posterior case to its reference and score it.
 
@@ -580,14 +580,17 @@ def run_posterior_benchmark(
     on the normalized (optional) and rebasined chains, so the comparison
     reflects the complete alignment treatment.
 
-    ``refine_passes > 1`` enables iterative barycenter refinement: after each
-    pass, the reference is replaced by the mean of the aligned samples and
-    every (normalized) sample is re-aligned from scratch against it. The
-    single reference *sample* carries its own posterior noise, which becomes
-    the matching bottleneck at high noise; the aligned mean estimates the
-    basin barycenter with noise reduced by ``1/sqrt(n_samples)``. Objectives
-    with ``calibration`` kwargs re-resolve at each pass's reference (the
-    metric lives at the matching base point).
+    ``refine_passes > 1`` (the default is 2) enables iterative barycenter
+    refinement: after each pass, the reference is replaced by the mean of the
+    aligned samples and every (normalized) sample is re-aligned from scratch
+    against it. The single reference *sample* carries its own posterior
+    noise, which becomes the matching bottleneck at high noise — and makes
+    single-pass canonicalization reference-dependent at moderate noise; the
+    aligned mean estimates the basin barycenter with noise reduced by
+    ``1/sqrt(n_samples)``. Objectives with ``calibration`` kwargs re-resolve
+    at each pass's reference (the metric lives at the matching base point).
+    Past the matching breakdown point refinement can hurt (see
+    ``docs/theory.md``); pass ``refine_passes=1`` there.
     """
 
     if refine_passes < 1:

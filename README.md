@@ -80,7 +80,8 @@ uv run align configs/examples/align.yaml --output-dir results/example/align/lap
 - [docs/theory.md](docs/theory.md): the symmetry model (scale + permutation) and objective/schedule background
 - [docs/developer_reference.md](docs/developer_reference.md): CLI, config schema, runtime, and artifact layout
 - [docs/producer_artifact_contract.md](docs/producer_artifact_contract.md): expected sampler output layout
-- [docs/symmetry_coverage.md](docs/symmetry_coverage.md): symmetry × architecture coverage matrix, gap analysis, and work log
+
+Roadmap and open work are tracked as GitHub issues (see the paper and JOSS umbrella issues).
 
 ## Development
 
