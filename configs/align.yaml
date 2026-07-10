@@ -45,6 +45,7 @@ rebasin:
   #   weights_path: results/example_experiment/fisher_weights.npz
   layer_root: params.fcn   # Dot path to the dense layer subtree in the PyTree.
   seed: 0                  # RNG seed ensures deterministic initialisation for stochastic methods.
+  refine_passes: 2         # Barycenter refinement passes; 2 makes the canonical frame reference-independent. Drop to 1 past matching breakdown.
   schedule:
     - solver: lap          # Exact coordinate-descent LAP update when each group occurs at most once per tensor.
       max_sweeps: 25

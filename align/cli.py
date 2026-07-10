@@ -446,6 +446,7 @@ def _digest_payload(config_payload: Mapping[str, Any]) -> dict[str, Any]:
             "schedule": rebasin.get("schedule"),
             "layer_root": rebasin.get("layer_root"),
             "seed": rebasin.get("seed"),
+            "refine_passes": rebasin.get("refine_passes"),
         }
     return payload
 
@@ -537,6 +538,9 @@ def _load_or_create_run_manifest(
             "normalize_method": config.normalize.method if config.normalize else None,
             "rebasin_objective": config.rebasin.objective if config.rebasin else None,
             "rebasin_schedule": config.rebasin.schedule_payload()
+            if config.rebasin
+            else None,
+            "rebasin_refine_passes": config.rebasin.refine_passes
             if config.rebasin
             else None,
         },

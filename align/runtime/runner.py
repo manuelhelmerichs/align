@@ -13,6 +13,7 @@ from typing import Any
 
 from ..config import AlignConfig, resolve_adapter_defaults
 from ..logging_utils import progress_bar
+from ..samples import WeightSample
 from ..state import RunManifest, SampleManifest, SampleRecord
 from .common import (
     _LOG_SAMPLE_INTERVAL,
@@ -22,6 +23,7 @@ from .common import (
     _WORKER_HEARTBEAT_TIMEOUT,
     available_cpu_count,
 )
+from .diagnostics import reference_stability_diagnostic, tree_mean
 from .loaders import SampleLoader
 from .loggers import AlignLogger
 from .parallel import WorkerPool
@@ -34,26 +36,41 @@ _LOG = logging.getLogger(__name__)
 class _RunnerPipelineSink:
     """Write pipeline outputs through ``AlignLogger`` and update run progress."""
 
-    def __init__(self, runner: AlignRunner, bar) -> None:
+    def __init__(
+        self,
+        runner: AlignRunner,
+        bar,
+        *,
+        output_logger: AlignLogger,
+        final_pass: bool,
+    ) -> None:
         self.runner = runner
         self.bar = bar
+        self.output_logger = output_logger
+        self.final_pass = bool(final_pass)
 
     def write(self, output: PipelineOutput) -> None:
         record = output.record
-        logger = self.runner.logger
+        logger = self.output_logger
         if output.scale_factors is not None:
             logger.write_scale_factors(record, output.scale_factors)
         if output.permutations is not None and self.runner.config.rebasin:
             logger.write_permutations(record, output.permutations)
-        if self.runner.save_intermediate and output.intermediate_sample is not None:
+        if (
+            self.final_pass
+            and self.runner.save_intermediate
+            and output.intermediate_sample is not None
+        ):
             logger.write_intermediate(record, output.intermediate_sample)
 
         logger.write_sample(record, output.sample)
-        logger.write_aux(record, output.aux)
-        self.runner.run_manifest.record_progress(record=record)
-        self.runner._maybe_persist_state()
+        if self.final_pass:
+            logger.write_aux(record, output.aux)
+            self.runner.run_manifest.record_progress(record=record)
+            self.runner._maybe_persist_state()
         self.bar.update(label=record.label)
-        self.runner._maybe_log_progress(record.label)
+        if self.final_pass:
+            self.runner._maybe_log_progress(record.label)
 
 
 class AlignRunner:
@@ -91,9 +108,21 @@ class AlignRunner:
         self._validate_artifacts_on_resume = bool(
             config.runtime.validate_artifacts_on_resume
         )
+        self._refinement_pass_index = 0
+        self._rebasin_reference_path: Path | None = None
+        self._rebasin_reference_index: int | None = self.manifest.reference_index
 
     def _dry_run_summary_extra(self) -> dict[str, Any]:
-        return {"stages": self.stage_order}
+        return {
+            "stages": self.stage_order,
+            "refine_passes": self._refine_passes(),
+        }
+
+    def _refine_passes(self) -> int:
+        config = self.config.rebasin
+        if config is None or not config.enabled:
+            return 1
+        return int(config.refine_passes)
 
     def _compute_parallelism(self) -> int:
         requested = self.config.runtime.parallelism
@@ -114,12 +143,14 @@ class AlignRunner:
     def execute(self, *, dry_run: bool = False) -> None:
         pending = self._pending_records()
         processed = self.run_manifest.processed_count()
+        refine_passes = self._refine_passes()
         self.progress_logger.info(
-            "Aligning %d/%d samples (resume=%d processed) | stages=%s",
+            "Aligning %d/%d samples (resume=%d processed) | stages=%s | passes=%d",
             len(pending),
             self.manifest.total,
             self.manifest.total - len(pending),
             ",".join(self.stage_order),
+            refine_passes,
         )
         if dry_run:
             self._write_dry_run_summary(pending)
@@ -130,19 +161,105 @@ class AlignRunner:
             return
 
         loader = SampleLoader(self.manifest)
-        ref_sample = loader.load_reference()
-        self._stage_executors = self._prepare_executors(ref_sample)
+        configured_reference = loader.load_reference()
+        rebasin_reference: WeightSample | None = None
+        previous_logger: AlignLogger | None = None
+        stability_history: list[dict[str, Any]] = []
+        refinement_root = self.run_manifest.state_dir / "refinement"
+        if refine_passes > 1:
+            shutil.rmtree(refinement_root, ignore_errors=True)
+            refinement_root.mkdir(parents=True, exist_ok=True)
 
-        use_parallel = self.parallelism > 1 and len(pending) > 1
-        if use_parallel:
-            elapsed = self._run_parallel(pending, processed)
-        else:
-            elapsed = self._run_local(pending, loader, processed)
+        elapsed = 0.0
+        for pass_index in range(refine_passes):
+            final_pass = pass_index == refine_passes - 1
+            pass_number = pass_index + 1
+            pass_records = pending if final_pass else list(self.manifest.records)
+            output_logger = (
+                self.logger
+                if final_pass
+                else AlignLogger(
+                    manifest=self.manifest,
+                    output_dir=refinement_root / f"pass_{pass_number}",
+                    stages=[],
+                    save_intermediate=False,
+                )
+            )
+
+            self._refinement_pass_index = pass_index
+            self._rebasin_reference_index = (
+                self.manifest.reference_index if pass_index == 0 else None
+            )
+            self._rebasin_reference_path = None
+            if rebasin_reference is not None:
+                reference_path = refinement_root / f"reference_{pass_number}.npz"
+                self.logger.sample_codec.save(reference_path, rebasin_reference)
+                self._rebasin_reference_path = reference_path
+
+            self._stage_executors = self._prepare_executors(
+                configured_reference,
+                rebasin_reference=rebasin_reference,
+                pass_index=pass_index,
+            )
+            self.progress_logger.info(
+                "Starting alignment pass %d/%d%s",
+                pass_number,
+                refine_passes,
+                " (final artifacts)" if final_pass else "",
+            )
+            use_parallel = self.parallelism > 1 and len(pass_records) > 1
+            if use_parallel:
+                elapsed += self._run_parallel(
+                    pass_records,
+                    processed if final_pass else 0,
+                    output_logger=output_logger,
+                    final_pass=final_pass,
+                )
+            else:
+                elapsed += self._run_local(
+                    pass_records,
+                    loader,
+                    processed if final_pass else 0,
+                    output_logger=output_logger,
+                    final_pass=final_pass,
+                )
+
+            if previous_logger is not None:
+                diagnostic = self._reference_stability(
+                    previous_logger,
+                    output_logger,
+                    previous_pass=pass_number - 1,
+                    current_pass=pass_number,
+                )
+                stability_history.append(diagnostic)
+                self.progress_logger.info(
+                    "Reference stability after pass %d: convergence ratio=%s",
+                    pass_number,
+                    (
+                        f"{diagnostic['convergence_ratio']:.6g}"
+                        if diagnostic["convergence_ratio"] is not None
+                        else "undefined (zero cloud spread)"
+                    ),
+                )
+
+            if not final_pass:
+                rebasin_reference = self._mean_output_sample(output_logger)
+                previous_logger = output_logger
 
         total_elapsed = self.run_manifest.add_elapsed(elapsed)
-        self.logger.finalize(elapsed_seconds=total_elapsed)
+        diagnostics = None
+        if stability_history:
+            latest = dict(stability_history[-1])
+            latest["history"] = stability_history
+            diagnostics = {"reference_stability": latest}
+        self.logger.finalize(
+            elapsed_seconds=total_elapsed,
+            diagnostics=diagnostics,
+        )
         self.run_manifest.mark_complete()
         self.run_manifest.save()
+        if refine_passes > 1:
+            shutil.rmtree(refinement_root, ignore_errors=True)
         self.progress_logger.info("Align complete in %.2fs", elapsed)
 
     def _pending_records(self) -> list[SampleRecord]:
@@ -163,6 +280,39 @@ class AlignRunner:
                 )
         self.logger.maybe_flush(force=True)
         return pending
+
+    def _output_samples(self, logger: AlignLogger):
+        for record in self.manifest.records:
+            path = logger.artifact_paths(record)["final"]
+            yield logger.sample_codec.load(path)
+
+    def _mean_output_sample(self, logger: AlignLogger) -> WeightSample:
+        return tree_mean(self._output_samples(logger))
+
+    def _reference_stability(
+        self,
+        previous_logger: AlignLogger,
+        current_logger: AlignLogger,
+        *,
+        previous_pass: int,
+        current_pass: int,
+    ) -> dict[str, Any]:
+        rebasin_executor = self._get_stage_executor("rebasin")
+        if rebasin_executor is None or rebasin_executor.problem is None:
+            raise RuntimeError(
+                "Reference stability requires a prepared rebasin executor."
+            )
+        rebasin_config = self.config.rebasin
+        if rebasin_config is None:
+            raise RuntimeError("Reference stability requires rebasin configuration.")
+        return reference_stability_diagnostic(
+            previous_samples=lambda: self._output_samples(previous_logger),
+            current_samples=lambda: self._output_samples(current_logger),
+            problem=rebasin_executor.problem,
+            schedule=rebasin_config.schedule,
+            previous_pass=previous_pass,
+            current_pass=current_pass,
+        )
 
     def _write_dry_run_summary(self, pending: list[SampleRecord]) -> None:
         summary_path = self.run_manifest.state_dir / "dry_run_summary.json"
@@ -210,7 +360,13 @@ class AlignRunner:
         self.logger.maybe_flush(force=force)
         self._last_save_time = now
 
-    def _prepare_executors(self, ref_sample) -> list[tuple[str, StageExecutor]]:
+    def _prepare_executors(
+        self,
+        ref_sample: WeightSample,
+        *,
+        rebasin_reference: WeightSample | None = None,
+        pass_index: int = 0,
+    ) -> list[tuple[str, StageExecutor]]:
         executors: dict[str, StageExecutor] = {}
         adapter_kwargs = dict(self.config.adapter or {})
         if self.config.normalize and self.config.normalize.enabled:
@@ -222,8 +378,11 @@ class AlignRunner:
         if self.config.rebasin and self.config.rebasin.enabled:
             executors["rebasin"] = RebasinExecutor(
                 self.config.rebasin,
-                reference_index=self.manifest.reference_index,
+                reference_index=(
+                    self.manifest.reference_index if pass_index == 0 else None
+                ),
                 seed=self.config.rebasin.seed,
+                rng_offset=pass_index * self.manifest.total,
                 batch_size=self.per_device_batch,
                 architecture=self.config.architecture,
                 adapter_kwargs=adapter_kwargs,
@@ -235,10 +394,18 @@ class AlignRunner:
             executor = executors.get(name)
             if executor is None:
                 continue
-            executor.prepare(self.manifest, ref_current)
-            ref_current = executor.reference_output(
-                self.manifest.reference_record, ref_current
+            stage_reference = (
+                rebasin_reference
+                if name == "rebasin" and rebasin_reference is not None
+                else ref_current
             )
+            executor.prepare(self.manifest, stage_reference)
+            if name == "rebasin":
+                ref_current = stage_reference
+            else:
+                ref_current = executor.reference_output(
+                    self.manifest.reference_record, ref_current
+                )
             stage_list.append((name, executor))
         return stage_list
 
@@ -264,7 +431,13 @@ class AlignRunner:
             return []
 
     def _run_local(
-        self, pending: list[SampleRecord], loader: SampleLoader, processed_initial: int
+        self,
+        pending: list[SampleRecord],
+        loader: SampleLoader,
+        processed_initial: int,
+        *,
+        output_logger: AlignLogger,
+        final_pass: bool,
     ) -> float:
         start = time.time()
         pipeline = StagePipeline(
@@ -287,7 +460,12 @@ class AlignRunner:
                 pipeline.run_records(
                     pending,
                     loader,
-                    _RunnerPipelineSink(self, bar),
+                    _RunnerPipelineSink(
+                        self,
+                        bar,
+                        output_logger=output_logger,
+                        final_pass=final_pass,
+                    ),
                     batch_size=batch_size,
                 )
         finally:
@@ -297,7 +475,12 @@ class AlignRunner:
         return time.time() - start
 
     def _run_parallel(
-        self, pending: list[SampleRecord], processed_initial: int
+        self,
+        pending: list[SampleRecord],
+        processed_initial: int,
+        *,
+        output_logger: AlignLogger,
+        final_pass: bool,
     ) -> float:
         start = time.time()
         scratch_root = self.run_manifest.state_dir / "scratch"
@@ -363,15 +546,19 @@ class AlignRunner:
                             artifacts=message.get("artifacts", {}),
                             checksums=message.get("checksums"),
                             aux=message.get("aux") or {},
+                            output_logger=output_logger,
+                            final_pass=final_pass,
                         )
                         try:
                             state.assigned.remove(sample_index)
                         except ValueError:
                             pass
-                        self.run_manifest.record_progress(sample_index=sample_index)
-                        self._maybe_persist_state()
+                        if final_pass:
+                            self.run_manifest.record_progress(sample_index=sample_index)
+                            self._maybe_persist_state()
                         bar.update(label=record.label)
-                        self._maybe_log_progress(record.label)
+                        if final_pass:
+                            self._maybe_log_progress(record.label)
                         completed += 1
                     elif msg_type == "error":
                         reason = message.get("error", "worker reported error")
@@ -522,6 +709,11 @@ class AlignRunner:
             if self.config.rebasin and self.config.rebasin.enabled
             else None,
             "seed": self.config.rebasin.seed if self.config.rebasin else None,
+            "rng_offset": self._refinement_pass_index * self.manifest.total,
+            "rebasin_reference_path": str(self._rebasin_reference_path)
+            if self._rebasin_reference_path is not None
+            else None,
+            "rebasin_reference_index": self._rebasin_reference_index,
             "per_device_batch": self.per_device_batch,
             "save_intermediate": self.save_intermediate,
             "architecture": self.config.architecture,
@@ -536,12 +728,13 @@ class AlignRunner:
         artifacts: Mapping[str, Any],
         checksums: Mapping[str, int] | None,
         aux: Mapping[str, Any],
+        output_logger: AlignLogger | None = None,
+        final_pass: bool = True,
     ) -> None:
-        self.logger.commit_from_scratch(
-            record, artifacts=artifacts, checksums=checksums
-        )
-        if aux:
-            self.logger.write_aux(record, aux)
+        logger = output_logger or self.logger
+        logger.commit_from_scratch(record, artifacts=artifacts, checksums=checksums)
+        if final_pass and aux:
+            logger.write_aux(record, aux)
         sample_scratch = artifacts.get("scratch_dir")
         if sample_scratch:
             shutil.rmtree(Path(sample_scratch), ignore_errors=True)

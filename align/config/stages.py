@@ -17,6 +17,7 @@ _REBASIN_FIELDS = frozenset(
         "schedule",
         "layer_root",
         "seed",
+        "refine_passes",
     }
 )
 _NORMALIZE_FIELDS = frozenset(
@@ -201,6 +202,20 @@ class RebasinConfig:
     )
     layer_root: str | None = None
     seed: int | None = None
+    refine_passes: int = 2
+
+    def __post_init__(self) -> None:
+        if isinstance(self.refine_passes, bool):
+            raise ValueError("rebasin.refine_passes must be an integer at least 1.")
+        try:
+            refine_passes = int(self.refine_passes)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "rebasin.refine_passes must be an integer at least 1."
+            ) from exc
+        if refine_passes != self.refine_passes or refine_passes < 1:
+            raise ValueError("rebasin.refine_passes must be an integer at least 1.")
+        self.refine_passes = refine_passes
 
     @classmethod
     def from_mapping(
@@ -232,6 +247,7 @@ class RebasinConfig:
             schedule=schedule,
             layer_root=payload.get("layer_root"),
             seed=_maybe_int(payload.get("seed")),
+            refine_passes=payload.get("refine_passes", 2),
         )
 
     def schedule_payload(self) -> list[dict[str, Any]]:

@@ -37,6 +37,7 @@ rebasin:
   objective_kwargs: {}
   layer_root: params.fcn
   seed: 0
+  refine_passes: 2
   schedule:
     - solver: lap
       max_sweeps: 25

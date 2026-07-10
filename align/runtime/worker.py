@@ -295,7 +295,10 @@ class _WorkerLoop:
 
 
 def _build_stage_executors(
-    job: dict[str, Any], manifest: SampleManifest, ref_sample: WeightSample
+    job: dict[str, Any],
+    manifest: SampleManifest,
+    ref_sample: WeightSample,
+    rebasin_reference: WeightSample | None = None,
 ):
     from .stages import NormalizeExecutor, RebasinExecutor
 
@@ -323,8 +326,13 @@ def _build_stage_executors(
                 "rebasin",
                 RebasinExecutor(
                     rebasin_cfg,
-                    reference_index=manifest.reference_index,
+                    reference_index=(
+                        job["rebasin_reference_index"]
+                        if "rebasin_reference_index" in job
+                        else manifest.reference_index
+                    ),
                     seed=job.get("seed"),
+                    rng_offset=int(job.get("rng_offset") or 0),
                     batch_size=int(job.get("per_device_batch") or 1),
                     architecture=architecture,
                     adapter_kwargs=adapter_kwargs,
@@ -339,9 +347,19 @@ def _build_stage_executors(
         ]
 
     ref_current = ref_sample
-    for _, executor in stages:
-        executor.prepare(manifest, ref_current)
-        ref_current = executor.reference_output(manifest.reference_record, ref_current)
+    for name, executor in stages:
+        stage_reference = (
+            rebasin_reference
+            if name == "rebasin" and rebasin_reference is not None
+            else ref_current
+        )
+        executor.prepare(manifest, stage_reference)
+        if name == "rebasin":
+            ref_current = stage_reference
+        else:
+            ref_current = executor.reference_output(
+                manifest.reference_record, ref_current
+            )
 
     return stages
 
@@ -358,7 +376,16 @@ def run_worker(job: dict[str, Any], command_queue, progress_queue) -> None:
 
     loader = SampleLoader(manifest)
     ref_sample = loader.load_reference()
-    stages = _build_stage_executors(job, manifest, ref_sample)
+    rebasin_reference = None
+    reference_path = job.get("rebasin_reference_path")
+    if reference_path:
+        rebasin_reference = loader.codec.load(Path(reference_path))
+    stages = _build_stage_executors(
+        job,
+        manifest,
+        ref_sample,
+        rebasin_reference=rebasin_reference,
+    )
 
     loop = _WorkerLoop(
         job,

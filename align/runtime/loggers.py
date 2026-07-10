@@ -28,7 +28,7 @@ _NORMALIZE_STATIC_KEYS = frozenset(
     }
 )
 _NORMALIZE_PER_SAMPLE_KEYS = frozenset({"last_layer_gamma"})
-_REBASIN_STATIC_KEYS = frozenset({"objective", "schedule"})
+_REBASIN_STATIC_KEYS = frozenset({"objective", "schedule", "refine_passes"})
 _REBASIN_PER_SAMPLE_KEYS = frozenset({"reference"})
 
 
@@ -341,7 +341,12 @@ class AlignLogger:
         existing.update({k: v for k, v in filtered_payload.items() if v is not None})
         path.write_text(json.dumps(existing, separators=(",", ":")))
 
-    def finalize(self, *, elapsed_seconds: float) -> None:
+    def finalize(
+        self,
+        *,
+        elapsed_seconds: float,
+        diagnostics: Mapping[str, Any] | None = None,
+    ) -> None:
         self.maybe_flush(force=True)
         summary: dict[str, Any] = {
             "stages": self.stages,
@@ -351,6 +356,8 @@ class AlignLogger:
         }
         if self._static_config:
             summary["stage_config"] = self._static_config
+        if diagnostics:
+            summary["diagnostics"] = dict(diagnostics)
         (self.output_dir / "align_summary.json").write_text(
             json.dumps(summary, indent=2)
         )

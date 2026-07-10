@@ -148,15 +148,19 @@ class RebasinExecutor(StageExecutor):
         self,
         config: RebasinConfig,
         *,
-        reference_index: int,
+        reference_index: int | None,
         seed: int | None = None,
+        rng_offset: int = 0,
         batch_size: int = 1,
         architecture: str,
         adapter_kwargs: Mapping[str, Any],
     ) -> None:
         self.config = config
-        self.reference_index = int(reference_index)
+        self.reference_index = (
+            int(reference_index) if reference_index is not None else None
+        )
         self._base_key = jax.random.PRNGKey(seed) if seed is not None else None
+        self.rng_offset = int(rng_offset)
         self.batch_size = max(1, int(batch_size))
 
         self.adapter = None
@@ -189,7 +193,7 @@ class RebasinExecutor(StageExecutor):
     def _rng_for_record(self, record: SampleRecord) -> jax.Array | None:
         if self._base_key is None:
             return None
-        return jax.random.fold_in(self._base_key, int(record.index))
+        return jax.random.fold_in(self._base_key, self.rng_offset + int(record.index))
 
     def _stage_result(
         self,
@@ -201,6 +205,7 @@ class RebasinExecutor(StageExecutor):
         aux_payload = dict(aux or {})
         aux_payload["objective"] = self.config.objective
         aux_payload["schedule"] = self.config.schedule_payload()
+        aux_payload["refine_passes"] = self.config.refine_passes
         return StageResult(
             sample=sample.with_params(params),
             artifacts={"permutations": perms},
@@ -225,7 +230,10 @@ class RebasinExecutor(StageExecutor):
             rng_key=self._rng_for_record(record),
             ref_data=self.ref_data,
             ref_backend=self.ref_backend,
-            is_reference=record.index == self.reference_index,
+            is_reference=(
+                self.reference_index is not None
+                and record.index == self.reference_index
+            ),
         )
         return self._stage_result(sample, folded_params, perms, aux_info)
 
@@ -253,7 +261,7 @@ class RebasinExecutor(StageExecutor):
         ref_positions = [
             idx
             for idx, rec in enumerate(record_list)
-            if rec.index == self.reference_index
+            if self.reference_index is not None and rec.index == self.reference_index
         ]
         for pos in ref_positions:
             results[pos] = self.process_single(record_list[pos], sample_batch[pos])

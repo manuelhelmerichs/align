@@ -121,6 +121,7 @@ class AlignConfig:
                 "schedule": self.rebasin.schedule_payload(),
                 "layer_root": self.rebasin.layer_root,
                 "seed": self.rebasin.seed,
+                "refine_passes": self.rebasin.refine_passes,
             }
         else:
             payload["rebasin"] = None
