@@ -14,7 +14,7 @@ import numpy as np
 from ..symmetry import (
     AxisBinding,
     ComponentSpec,
-    GraphConstraint,
+    ConstraintRecord,
     SymmetryGraph,
     SymmetryGroup,
     TensorSpec,
@@ -30,7 +30,7 @@ class SymmetryGraphBuilder:
         self.groups: dict[str, SymmetryGroup] = {}
         self.tensors: dict[str, TensorSpec] = {}
         self.bindings: list[AxisBinding] = []
-        self.constraints: list[GraphConstraint] = []
+        self.constraints: list[ConstraintRecord] = []
         self.components: dict[str, ComponentSpec] = {}
         self.metadata: dict[str, Any] = {"architecture": architecture}
         self.group_order: list[str] = []
@@ -92,7 +92,7 @@ class SymmetryGraphBuilder:
         )
         return tensor_id
 
-    def add_constraint(self, constraint: GraphConstraint) -> None:
+    def add_constraint(self, constraint: ConstraintRecord) -> None:
         self.constraints.append(constraint)
 
     def add_component(

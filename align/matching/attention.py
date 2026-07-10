@@ -16,7 +16,11 @@ from typing import Any
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from ..symmetry import binding_axis_interval
+from ..symmetry import (
+    GQARoPECircuitConstraint,
+    MHACircuitConstraint,
+    binding_axis_interval,
+)
 from .objectives import _apply_other_groups_hard
 from .state import TransformState, as_permutation_matrix
 
@@ -36,20 +40,20 @@ class AttentionModuleSpec:
     head_dim: int
 
     @classmethod
-    def from_constraint(cls, problem, constraint) -> AttentionModuleSpec:
-        metadata = constraint.metadata
-        head_group = str(metadata["head_group"])
-        qk_groups = tuple(str(gid) for gid in metadata["qk_groups"])
-        vo_groups = tuple(str(gid) for gid in metadata["vo_groups"])
-        tensors = dict(metadata["tensors"])
+    def from_constraint(
+        cls, problem, constraint: MHACircuitConstraint
+    ) -> AttentionModuleSpec:
+        head_group = constraint.head_group
+        qk_groups = constraint.qk_groups
+        vo_groups = constraint.vo_groups
         return cls(
             head_group=head_group,
             qk_groups=qk_groups,
             vo_groups=vo_groups,
-            query=str(tensors["query"]),
-            key=str(tensors["key"]),
-            value=str(tensors["value"]),
-            out=str(tensors["out"]),
+            query=constraint.query,
+            key=constraint.key,
+            value=constraint.value,
+            out=constraint.out,
             num_heads=int(problem.groups[head_group].size),
             head_dim=int(problem.groups[qk_groups[0]].size),
         )
@@ -60,12 +64,12 @@ class AttentionModuleSpec:
 
 
 def attention_module_specs(problem) -> tuple[AttentionModuleSpec, ...]:
-    """Return specs for every ``attention_block`` constraint of ``problem``."""
+    """Return specs for every MHA circuit constraint of ``problem``."""
 
     return tuple(
         AttentionModuleSpec.from_constraint(problem, constraint)
         for constraint in problem.constraints
-        if constraint.kind == "attention_block"
+        if isinstance(constraint, MHACircuitConstraint)
     )
 
 
@@ -161,7 +165,7 @@ def update_attention_module(
     """One structured coordinate update for an attention module.
 
     Updates the head group via circuit-cost LAP, then every scheduled intra
-    group via the generic exact class-dispatched update (which sees the fresh
+    group via the generic exact transform-family update (which sees the fresh
     head permutation through the state; signed intra groups get the exact
     signed-LAP update).
     """
@@ -224,21 +228,21 @@ class GQAModuleSpec:
     head_dim: int
 
     @classmethod
-    def from_constraint(cls, problem, constraint) -> GQAModuleSpec:
-        metadata = constraint.metadata
-        tensors = dict(metadata["tensors"])
+    def from_constraint(
+        cls, problem, constraint: GQARoPECircuitConstraint
+    ) -> GQAModuleSpec:
         return cls(
-            kv_group=str(metadata["kv_group"]),
-            query_head_groups=tuple(str(g) for g in metadata["query_head_groups"]),
-            qk_groups=tuple(str(g) for g in metadata["qk_groups"]),
-            vo_groups=tuple(str(g) for g in metadata["vo_groups"]),
-            query=str(tensors["query"]),
-            key=str(tensors["key"]),
-            value=str(tensors["value"]),
-            out=str(tensors["out"]),
-            num_kv_groups=int(metadata["num_kv_groups"]),
-            heads_per_group=int(metadata["heads_per_group"]),
-            head_dim=int(metadata["head_dim"]),
+            kv_group=constraint.kv_group,
+            query_head_groups=constraint.query_head_groups,
+            qk_groups=constraint.qk_groups,
+            vo_groups=constraint.vo_groups,
+            query=constraint.query,
+            key=constraint.key,
+            value=constraint.value,
+            out=constraint.out,
+            num_kv_groups=constraint.num_kv_groups,
+            heads_per_group=constraint.heads_per_group,
+            head_dim=constraint.head_dim,
         )
 
     @property
@@ -252,12 +256,12 @@ class GQAModuleSpec:
 
 
 def gqa_module_specs(problem) -> tuple[GQAModuleSpec, ...]:
-    """Return specs for every ``gqa_attention_block`` constraint of ``problem``."""
+    """Return specs for every GQA + RoPE circuit constraint of ``problem``."""
 
     return tuple(
         GQAModuleSpec.from_constraint(problem, constraint)
         for constraint in problem.constraints
-        if constraint.kind == "gqa_attention_block"
+        if isinstance(constraint, GQARoPECircuitConstraint)
     )
 
 
@@ -347,7 +351,7 @@ def update_gqa_attention_module(
     Updates the kv-group permutation via the two-level circuit-cost LAP (the
     inner query-head assignments enter only the cost), then updates every
     scheduled per-slot group (query-head and vo) via the generic exact
-    class-dispatched update, which sees the fresh kv permutation through the
+    transform-family update, which sees the fresh kv permutation through the
     state. The per-slot qk rotation groups are not part of this update; they
     are ordinary scheduled groups solved by the rotation projection.
     """
@@ -377,7 +381,7 @@ def update_gqa_attention_module(
         delta = max(delta, group_delta)
 
     aux = {
-        "solver": "gqa_attention",
+        "solver": "gqa_rope",
         "kv_group": spec.kv_group,
         "delta": delta,
         "intra_groups": list(intra_groups),

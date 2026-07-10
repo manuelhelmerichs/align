@@ -69,5 +69,5 @@ runtime:
   device_ids: null         # Explicit CUDA device ids in multi-GPU boxes; omit to consume every visible GPU.
   per_device_batch: 1      # Use >1 for pure Sinkhorn schedules; LAP schedules process one sample at a time.
   verbosity: info          # Logging verbosity passed to the CLI (quiet/info/debug).
-  validate_artifacts_on_resume: true  # Re-hash final/transform files before skipping them; set false to trust checksums.
+  validate_artifacts_on_resume: true  # Re-hash aligned sample/transform files before skipping them; false trusts checksums.
   save_intermediate: false # Persist intermediate outputs when chaining canonicalize and match.

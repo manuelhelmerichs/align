@@ -27,7 +27,7 @@ class ArchitectureRecipe(ABC):
     name: str
 
     @abstractmethod
-    def build_problem(self, params: Mapping[str, Any]):
+    def build_graph(self, params: Mapping[str, Any]):
         """Return the graph-native alignment problem for ``params``."""
 
 

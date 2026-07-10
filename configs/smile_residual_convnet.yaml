@@ -1,7 +1,7 @@
 schema_version: 2
 
 paths:
-  experiment_root: results/example_smile_resnet_run
+  experiment_root: results/example_smile_residual_convnet_run
   samples_dir: null
   tree_path: null
   output_dir: null

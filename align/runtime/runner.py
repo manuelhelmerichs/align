@@ -14,9 +14,15 @@ from typing import Any
 from .._jax_platforms import is_gpu_platform
 from ..config import RunConfig, resolve_recipe_defaults
 from ..logging_utils import progress_bar
+from ..run_state import RunState
+from ..sample_manifest import SampleManifest, SampleRecord
 from ..samples import WeightSample
-from ..state import RunState, SampleManifest, SampleRecord
-from .common import (
+from .artifacts import RunArtifactStore
+from .diagnostics import reference_stability_diagnostic, tree_mean
+from .loaders import SampleLoader
+from .parallel import WorkerPool
+from .pipeline import SampleAlignmentResult, StagePipeline
+from .resources import (
     _LOG_SAMPLE_INTERVAL,
     _LOG_TIME_INTERVAL_SECONDS,
     _STATE_SAVE_INTERVAL_SECONDS,
@@ -24,11 +30,6 @@ from .common import (
     _WORKER_HEARTBEAT_TIMEOUT,
     available_cpu_count,
 )
-from .diagnostics import reference_stability_diagnostic, tree_mean
-from .loaders import SampleLoader
-from .loggers import RunArtifactStore
-from .parallel import WorkerPool
-from .pipeline import SampleAlignmentResult, StagePipeline
 from .stages import CanonicalizeExecutor, MatchExecutor, StageExecutor
 
 _LOG = logging.getLogger(__name__)
@@ -53,21 +54,22 @@ class _RunnerPipelineSink:
     def write(self, output: SampleAlignmentResult) -> None:
         record = output.record
         logger = self.output_logger
-        if output.scale_factors is not None:
-            logger.write_scale_factors(record, output.scale_factors)
-        if output.permutations is not None and self.runner.config.match:
-            logger.write_permutations(record, output.permutations)
-        if (
-            self.final_pass
-            and self.runner.save_intermediate
-            and output.intermediate_sample is not None
-        ):
-            logger.write_intermediate(record, output.intermediate_sample)
+        if output.scales is not None:
+            logger.write_scales(record, output.scales)
+        if output.transforms is not None and self.runner.config.match:
+            logger.write_transforms(
+                record,
+                output.transforms,
+                transform_families=output.transform_families,
+            )
+        if self.final_pass and self.runner.save_intermediate:
+            for stage, sample in output.stage_outputs.items():
+                logger.write_stage_output(record, stage, sample)
 
-        logger.write_sample(record, output.sample)
+        logger.write_aligned_sample(record, output.sample)
         if self.final_pass:
-            logger.write_aux(record, output.aux)
-            self.runner.run_manifest.record_progress(record=record)
+            logger.write_diagnostics(record, output.diagnostics)
+            self.runner.run_state.record_progress(record=record)
             self.runner._maybe_persist_state()
         self.bar.update(label=record.label)
         if self.final_pass:
@@ -81,13 +83,13 @@ class AlignmentRunner:
         self,
         config: RunConfig,
         manifest: SampleManifest,
-        run_manifest: RunState,
+        run_state: RunState,
         logger: RunArtifactStore,
         *,
         progress_logger: logging.Logger | None = None,
     ) -> None:
         self.manifest = manifest
-        self.run_manifest = run_manifest
+        self.run_state = run_state
         self.logger = logger
         self.progress_logger = progress_logger or _LOG
         self.config = config
@@ -98,7 +100,7 @@ class AlignmentRunner:
         self.parallelism = self._compute_parallelism()
         self._stage_executors: list[tuple[str, StageExecutor]] = []
         now = time.time()
-        processed_so_far = self.run_manifest.processed_count()
+        processed_so_far = self.run_state.processed_count()
         self._log_sample_interval = _LOG_SAMPLE_INTERVAL
         self._log_time_interval = _LOG_TIME_INTERVAL_SECONDS
         self._state_save_interval = _STATE_SAVE_INTERVAL_SECONDS
@@ -139,7 +141,7 @@ class AlignmentRunner:
 
     def execute(self, *, dry_run: bool = False) -> None:
         pending = self._pending_records()
-        processed = self.run_manifest.processed_count()
+        processed = self.run_state.processed_count()
         barycenter_passes = self._barycenter_passes()
         self.progress_logger.info(
             "Aligning %d/%d samples (resume=%d processed) | stages=%s | passes=%d",
@@ -162,7 +164,7 @@ class AlignmentRunner:
         match_reference: WeightSample | None = None
         previous_logger: RunArtifactStore | None = None
         stability_history: list[dict[str, Any]] = []
-        refinement_root = self.run_manifest.state_dir / "refinement"
+        refinement_root = self.run_state.state_dir / "refinement"
         if barycenter_passes > 1:
             shutil.rmtree(refinement_root, ignore_errors=True)
             refinement_root.mkdir(parents=True, exist_ok=True)
@@ -243,7 +245,7 @@ class AlignmentRunner:
                 match_reference = self._mean_output_sample(output_logger)
                 previous_logger = output_logger
 
-        total_elapsed = self.run_manifest.add_elapsed(elapsed)
+        total_elapsed = self.run_state.add_elapsed(elapsed)
         diagnostics = None
         if stability_history:
             latest = dict(stability_history[-1])
@@ -253,8 +255,8 @@ class AlignmentRunner:
             elapsed_seconds=total_elapsed,
             diagnostics=diagnostics,
         )
-        self.run_manifest.mark_complete()
-        self.run_manifest.save()
+        self.run_state.mark_complete()
+        self.run_state.save()
         if barycenter_passes > 1:
             shutil.rmtree(refinement_root, ignore_errors=True)
         self.progress_logger.info("Align complete in %.2fs", elapsed)
@@ -262,14 +264,14 @@ class AlignmentRunner:
     def _pending_records(self) -> list[SampleRecord]:
         pending: list[SampleRecord] = []
         for record in self.manifest.records:
-            if not self.run_manifest.is_processed(record.index):
+            if not self.run_state.is_processed(record.index):
                 pending.append(record)
                 continue
             if (
                 self._validate_artifacts_on_resume
                 and not self.logger.validate_artifacts(record)
             ):
-                self.run_manifest.mark_unprocessed(record.index)
+                self.run_state.mark_unprocessed(record.index)
                 pending.append(record)
                 self.progress_logger.warning(
                     "Artifact checksum mismatch for %s. Sample will be reprocessed.",
@@ -280,7 +282,7 @@ class AlignmentRunner:
 
     def _output_samples(self, logger: RunArtifactStore):
         for record in self.manifest.records:
-            path = logger.artifact_paths(record)["final"]
+            path = logger.artifact_paths(record)["aligned_sample"]
             yield logger.sample_codec.load(path)
 
     def _mean_output_sample(self, logger: RunArtifactStore) -> WeightSample:
@@ -312,12 +314,12 @@ class AlignmentRunner:
         )
 
     def _write_dry_run_summary(self, pending: list[SampleRecord]) -> None:
-        summary_path = self.run_manifest.state_dir / "dry_run_summary.json"
+        summary_path = self.run_state.state_dir / "dry_run_summary.json"
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         summary = {
             "manifest": self.manifest.summary(),
             "pending_samples": len(pending),
-            "output_dir": str(self.run_manifest.output_dir),
+            "output_dir": str(self.run_state.output_dir),
         }
         summary.update(self._dry_run_summary_extra())
         summary_path.write_text(json.dumps(summary, indent=2))
@@ -329,7 +331,7 @@ class AlignmentRunner:
             and self.progress_logger.getEffectiveLevel() >= logging.INFO
         ):
             return
-        processed = self.run_manifest.processed_count()
+        processed = self.run_state.processed_count()
         now = time.time()
         if processed <= self._last_logged_count:
             return
@@ -353,7 +355,7 @@ class AlignmentRunner:
         now = time.time()
         if not force and (now - self._last_save_time) < self._state_save_interval:
             return
-        self.run_manifest.save()
+        self.run_state.save()
         self.logger.maybe_flush(force=force)
         self._last_save_time = now
 
@@ -485,7 +487,7 @@ class AlignmentRunner:
         final_pass: bool,
     ) -> float:
         start = time.time()
-        scratch_root = self.run_manifest.state_dir / "scratch"
+        scratch_root = self.run_state.state_dir / "scratch"
         scratch_root.mkdir(parents=True, exist_ok=True)
 
         match_executor = self._get_stage_executor("match")
@@ -547,7 +549,7 @@ class AlignmentRunner:
                             record,
                             artifacts=message.get("artifacts", {}),
                             checksums=message.get("checksums"),
-                            aux=message.get("aux") or {},
+                            diagnostics=message.get("diagnostics") or {},
                             output_logger=output_logger,
                             final_pass=final_pass,
                         )
@@ -556,7 +558,7 @@ class AlignmentRunner:
                         except ValueError:
                             pass
                         if final_pass:
-                            self.run_manifest.record_progress(sample_index=sample_index)
+                            self.run_state.record_progress(sample_index=sample_index)
                             self._maybe_persist_state()
                         bar.update(label=record.label)
                         if final_pass:
@@ -587,7 +589,7 @@ class AlignmentRunner:
         except KeyboardInterrupt:
             self.progress_logger.warning("Interrupt received, stopping workers...")
             pool.shutdown(force=False)
-            self.run_manifest.save()
+            self.run_state.save()
             self.logger.maybe_flush(force=True)
             raise
         finally:
@@ -702,7 +704,7 @@ class AlignmentRunner:
 
     def _worker_job_template(self) -> dict[str, Any]:
         return {
-            "manifest_path": str(self.run_manifest.manifest_path),
+            "manifest_path": str(self.run_state.manifest_path),
             "stages": [name for name, _ in self._stage_executors],
             "canonicalize_config": self.config.canonicalize,
             "match_config": self.config.match,
@@ -725,14 +727,14 @@ class AlignmentRunner:
         *,
         artifacts: Mapping[str, Any],
         checksums: Mapping[str, int] | None,
-        aux: Mapping[str, Any],
+        diagnostics: Mapping[str, Any],
         output_logger: RunArtifactStore | None = None,
         final_pass: bool = True,
     ) -> None:
         logger = output_logger or self.logger
         logger.commit_from_scratch(record, artifacts=artifacts, checksums=checksums)
-        if final_pass and aux:
-            logger.write_aux(record, aux)
+        if final_pass and diagnostics:
+            logger.write_diagnostics(record, diagnostics)
         sample_scratch = artifacts.get("scratch_dir")
         if sample_scratch:
             shutil.rmtree(Path(sample_scratch), ignore_errors=True)

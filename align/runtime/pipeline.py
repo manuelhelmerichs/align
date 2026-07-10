@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from ..sample_manifest import SampleRecord
 from ..samples import WeightSample
-from ..state import SampleRecord
 from .loaders import PrefetchingLoader, SampleLoader
 from .stages import StageExecutor
 
@@ -18,10 +18,11 @@ class SampleAlignmentResult:
 
     record: SampleRecord
     sample: WeightSample
-    aux: dict[str, Any]
-    permutations: Any = None
-    scale_factors: Any = None
-    intermediate_sample: WeightSample | None = None
+    diagnostics: dict[str, Any]
+    transforms: Mapping[str, Any] | None = None
+    scales: Mapping[str, Any] | None = None
+    transform_families: Mapping[str, str] | None = None
+    stage_outputs: Mapping[str, WeightSample] = field(default_factory=dict)
 
 
 class PipelineSink(Protocol):
@@ -84,34 +85,38 @@ class StagePipeline:
         the single and batched paths.
         """
 
-        aux_payload: dict[str, Any] = {}
+        diagnostics_payload: dict[str, Any] = {}
         current = sample
-        permutations = None
-        scale_factors = None
-        intermediate_sample = None
+        transforms = None
+        scales = None
+        transform_families = None
+        stage_outputs: dict[str, WeightSample] = {}
 
         for idx, name, executor in stages:
             last_stage = idx == len(self.stages) - 1
             result = executor.process_single(record, current)
             current = result.sample
 
-            if result.aux:
-                aux_payload[name] = result.aux
+            if result.diagnostics:
+                diagnostics_payload[name] = result.diagnostics
             if name == "canonicalize":
-                scale_factors = result.artifacts.get("scale_factors")
+                scales = result.scales
             elif name == "match":
-                permutations = result.artifacts.get("permutations")
+                transforms = result.transforms
+                if result.diagnostics:
+                    transform_families = result.diagnostics.get("transform_families")
 
             if self.save_intermediate and not last_stage:
-                intermediate_sample = current
+                stage_outputs[name] = current
 
         return SampleAlignmentResult(
             record=record,
             sample=current,
-            aux=aux_payload,
-            permutations=permutations,
-            scale_factors=scale_factors,
-            intermediate_sample=intermediate_sample,
+            diagnostics=diagnostics_payload,
+            transforms=transforms,
+            scales=scales,
+            transform_families=transform_families,
+            stage_outputs=stage_outputs,
         )
 
     def process_batch(
@@ -141,17 +146,22 @@ class StagePipeline:
         )
         outputs: list[SampleAlignmentResult] = []
         for partial, match_result in zip(partials, match_results, strict=True):
-            aux_payload = dict(partial.aux)
-            if match_result.aux:
-                aux_payload["match"] = match_result.aux
+            diagnostics_payload = dict(partial.diagnostics)
+            if match_result.diagnostics:
+                diagnostics_payload["match"] = match_result.diagnostics
             outputs.append(
                 SampleAlignmentResult(
                     record=partial.record,
                     sample=match_result.sample,
-                    aux=aux_payload,
-                    permutations=match_result.artifacts.get("permutations"),
-                    scale_factors=partial.scale_factors,
-                    intermediate_sample=partial.intermediate_sample,
+                    diagnostics=diagnostics_payload,
+                    transforms=match_result.transforms,
+                    scales=partial.scales,
+                    transform_families=(
+                        match_result.diagnostics.get("transform_families")
+                        if match_result.diagnostics
+                        else None
+                    ),
+                    stage_outputs=partial.stage_outputs,
                 )
             )
         return outputs

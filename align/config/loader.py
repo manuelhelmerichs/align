@@ -19,7 +19,7 @@ from .selection import SelectionConfig
 from .stages import CanonicalizeConfig, MatchConfig
 
 if TYPE_CHECKING:
-    from ..state import SampleManifest
+    from ..sample_manifest import SampleManifest
 
 SCHEMA_VERSION = 2
 _STAGES = ("canonicalize", "match")

@@ -21,10 +21,11 @@ from .config import (
 )
 from .config._utils import _parse_int_list
 from .logging_utils import configure_logging
-from .state import RunState, SampleManifest, compute_config_digest
+from .run_state import RunState, compute_config_digest
+from .sample_manifest import SampleManifest
 
 _STATE_MANIFEST = "sample_manifest.json"
-_STATE_RUN = "align_run_state.json"
+_STATE_RUN = "run_state.json"
 _LOG = logging.getLogger("align")
 
 
@@ -218,7 +219,17 @@ def run(args: argparse.Namespace) -> None:
     runtime_settings = _runtime_settings_snapshot(config.runtime)
 
     run_state_path = state_dir / _STATE_RUN
-    run_manifest = _load_or_create_run_manifest(
+    legacy_run_state_path = state_dir / "align_run_state.json"
+    if (
+        config.runtime.resume
+        and not run_state_path.exists()
+        and legacy_run_state_path.exists()
+    ):
+        raise ValueError(
+            "Cannot resume version-1 state/align_run_state.json. Start a new "
+            "schema-version-2 run."
+        )
+    run_state = _load_or_create_run_state(
         run_state_path,
         run_exists=config.runtime.resume,
         manifest=manifest,
@@ -249,7 +260,7 @@ def run(args: argparse.Namespace) -> None:
 
     from .runtime import AlignmentRunner, RunArtifactStore
 
-    align_logger = RunArtifactStore(
+    artifact_store = RunArtifactStore(
         manifest=manifest,
         output_dir=output_dir,
         stages=stages,
@@ -258,8 +269,8 @@ def run(args: argparse.Namespace) -> None:
     runner = AlignmentRunner(
         config=config,
         manifest=manifest,
-        run_manifest=run_manifest,
-        logger=align_logger,
+        run_state=run_state,
+        logger=artifact_store,
         progress_logger=logger,
     )
 
@@ -286,7 +297,7 @@ def _describe_symmetry(config: RunConfig, manifest: SampleManifest) -> str:
 
     recipe = get_recipe(config.architecture.family, **config.architecture.recipe_kwargs)
     ref_sample = SampleLoader(manifest).load_reference()
-    problem = recipe.build_problem(ref_sample.params)
+    problem = recipe.build_graph(ref_sample.params)
     return format_symmetry_description(problem)
 
 
@@ -466,7 +477,7 @@ def _load_or_build_manifest(
     return manifest
 
 
-def _load_or_create_run_manifest(
+def _load_or_create_run_state(
     path: Path,
     *,
     run_exists: bool,
@@ -480,23 +491,23 @@ def _load_or_create_run_manifest(
     ignore_digest: bool = False,
 ) -> RunState:
     if path.exists():
-        run_manifest = RunState.load(path)
-        if run_manifest.config_digest != digest:
+        run_state = RunState.load(path)
+        if run_state.config_digest != digest:
             if ignore_digest:
                 _LOG.warning(
                     "Config digest mismatch ignored. Resume run behaviour may be undefined."
                 )
             else:
                 raise ValueError("Configuration mismatch detected for resume run.")
-        manifest.validate_digest(run_manifest.manifest_digest)
-        return run_manifest
+        manifest.validate_digest(run_state.manifest_digest)
+        return run_state
 
     if run_exists:
         raise FileNotFoundError(
             "--resume specified but no run state found under the output directory."
         )
 
-    run_manifest = RunState(
+    run_state = RunState(
         path=path,
         experiment_root=exp_root,
         output_dir=output_dir,
@@ -524,8 +535,8 @@ def _load_or_create_run_manifest(
             else None,
         },
     )
-    run_manifest.save()
-    return run_manifest
+    run_state.save()
+    return run_state
 
 
 if __name__ == "__main__":  # pragma: no cover

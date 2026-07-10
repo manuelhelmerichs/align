@@ -10,7 +10,7 @@ from typing import Any, ClassVar
 import numpy as np
 import yaml
 
-from ..symmetry import GraphConstraint, SymmetryGraph
+from ..symmetry import ResidualChannelTie, SymmetryGraph
 from ..symmetry.tensor_ops import _canonical_axis, _descend, _maybe_descend
 from .graph_builder import SymmetryGraphBuilder
 from .recipe import ArchitectureRecipe, register_recipe
@@ -272,12 +272,12 @@ class ResidualConvNetRule(SymmetryRule):
     Groups are union-find roots over conv output channels (residual adds merge
     the participating convs); FRN/BatchNorm parameters and BN running stats
     follow their conv's group, and trailing ``Dense_*`` heads consume the last
-    conv group. Emitted as a single ``conv_stack`` component.
+    conv group. Emitted as the semantic ``features`` component.
     """
 
-    kind: ClassVar[str] = "conv_stack"
+    kind: ClassVar[str] = "convnet"
 
-    component_id: str = "conv_stack"
+    component_id: str = "features"
     parameter_root: str = "core"
     batch_stats_root: str | None = "batch_stats"
     residual_topology: Mapping[str, Any] | Sequence[Any] | str | None = None
@@ -336,7 +336,7 @@ class ResidualConvNetRule(SymmetryRule):
         candidate = "/".join(parts)
         return candidate if candidate in available else None
 
-    def build(self, builder: SymmetryGraphBuilder) -> None:
+    def add_to(self, builder: SymmetryGraphBuilder) -> None:
         params = builder.params
         parameter_root_path = tuple(self.parameter_root.split("."))
         subtree = _maybe_descend(params, parameter_root_path)
@@ -498,7 +498,9 @@ class ResidualConvNetRule(SymmetryRule):
                 )
             _bind(dense_path, 0, last_group, "in")
 
-        def _residual_tie(members: tuple[str, ...], source: str) -> GraphConstraint:
+        def _residual_channel_tie(
+            members: tuple[str, ...], source: str
+        ) -> ResidualChannelTie:
             tie_groups = tuple(
                 dict.fromkeys(
                     conv_to_group[member]
@@ -509,18 +511,18 @@ class ResidualConvNetRule(SymmetryRule):
             tie_tensors: list[str] = []
             for member in members:
                 tie_tensors.extend(conv_to_out_tensors.get(member, ()))
-            return GraphConstraint(
-                kind="residual_tie",
+            return ResidualChannelTie(
                 groups=tie_groups,
                 tensors=tuple(dict.fromkeys(tie_tensors)),
-                metadata={"members": members, "source": source},
+                members=members,
+                source=source,
             )
 
         for group in residual_groups:
             members = tuple(sorted(group, key=order_index.__getitem__))
-            builder.add_constraint(_residual_tie(members, "residual_topology"))
+            builder.add_constraint(_residual_channel_tie(members, "residual_topology"))
         for left, right in self.residual_connections:
-            builder.add_constraint(_residual_tie((left, right), "manual"))
+            builder.add_constraint(_residual_channel_tie((left, right), "manual"))
 
         builder.add_component(self.component_id, self.kind, tuple(builder.group_order))
         builder.metadata.update(
@@ -610,12 +612,12 @@ class ResidualConvNetRecipe(ArchitectureRecipe):
         default_factory=list
     )
 
-    def build_problem(self, params: Mapping[str, Any]) -> SymmetryGraph:
+    def build_graph(self, params: Mapping[str, Any]) -> SymmetryGraph:
         builder = SymmetryGraphBuilder(params, architecture=self.name)
         ResidualConvNetRule(
             parameter_root=self.parameter_root,
             batch_stats_root=self.batch_stats_root,
             residual_topology=self.residual_topology,
             residual_connections=self.residual_connections,
-        ).build(builder)
+        ).add_to(builder)
         return builder.finish()

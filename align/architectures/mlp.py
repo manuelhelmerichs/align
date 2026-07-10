@@ -18,7 +18,7 @@ class MLPRecipe(ArchitectureRecipe):
 
     Discovers the layer chain under ``parameter_root`` and delegates construction
     to :class:`~align.architectures.rules.DenseChainRule` (component
-    ``fcn``, hidden groups ``fcn/h{j}``).
+    ``mlp``, hidden groups ``mlp/h{j}``).
     """
 
     name: str = "mlp"
@@ -59,10 +59,10 @@ class MLPRecipe(ArchitectureRecipe):
             )
         return [(root + (name,)) for name in layer_names]
 
-    def build_problem(self, params: Mapping[str, Any]) -> SymmetryGraph:
+    def build_graph(self, params: Mapping[str, Any]) -> SymmetryGraph:
         layer_paths = self._infer_layer_paths(params)
         builder = SymmetryGraphBuilder(params, architecture=self.name)
-        DenseChainRule(component_id="fcn", layer_paths=tuple(layer_paths)).build(
+        DenseChainRule(component_id="mlp", layer_paths=tuple(layer_paths)).add_to(
             builder
         )
         builder.metadata["layer_paths"] = layer_paths

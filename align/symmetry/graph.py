@@ -11,6 +11,13 @@ import jax.numpy as jnp
 import numpy as np
 from flax.core import frozen_dict
 
+from .constraints import (
+    ConstraintRecord,
+    GQARoPECircuitConstraint,
+    MHACircuitConstraint,
+    ResidualChannelTie,
+    RMSNormScaleConstraint,
+)
 from .tensor_ops import (
     _descend,
     _set_path,
@@ -105,16 +112,6 @@ class AxisBinding:
     scale_power: float = 1.0
     selector: tuple[tuple[int, int], ...] = ()
     transform_scope: Literal["linear", "permute_only"] = "linear"
-
-
-@dataclass(frozen=True)
-class GraphConstraint:
-    """Graph-level architecture constraint recorded beside axis bindings."""
-
-    kind: str
-    groups: tuple[str, ...] = ()
-    tensors: tuple[str, ...] = ()
-    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -215,7 +212,7 @@ class SymmetryGraph:
     groups: dict[str, SymmetryGroup]
     tensors: dict[str, TensorSpec]
     axis_bindings: tuple[AxisBinding, ...] = ()
-    constraints: tuple[GraphConstraint, ...] = ()
+    constraints: tuple[ConstraintRecord, ...] = ()
     components: dict[str, ComponentSpec] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -307,7 +304,7 @@ class SymmetryGraph:
                 raise ValueError(f"Group {group_id!r} has non-positive size.")
             if group.transform_family not in TRANSFORM_FAMILIES:
                 raise ValueError(
-                    f"Group {group_id!r} has unknown transform class "
+                    f"Group {group_id!r} has unknown transform family "
                     f"{group.transform_family!r}; expected one of "
                     f"{', '.join(TRANSFORM_FAMILIES)}."
                 )
@@ -465,53 +462,51 @@ class SymmetryGraph:
             for group_id in constraint.groups:
                 if group_id not in self.groups:
                     raise ValueError(
-                        f"Constraint {constraint.kind!r} references unknown group "
+                        f"Constraint {type(constraint).__name__} references unknown group "
                         f"{group_id!r}."
                     )
             for tensor_id in constraint.tensors:
                 if tensor_id not in self.tensors:
                     raise ValueError(
-                        f"Constraint {constraint.kind!r} references unknown tensor "
+                        f"Constraint {type(constraint).__name__} references unknown tensor "
                         f"{tensor_id!r}."
                     )
-            if constraint.kind == "residual_tie":
+            if isinstance(constraint, ResidualChannelTie):
                 if len(set(constraint.groups)) != 1:
                     raise ValueError(
-                        "residual_tie constraints must be canonicalized to exactly "
+                        "Residual channel ties must be canonicalized to exactly "
                         "one shared group."
                     )
-            if constraint.kind == "attention_block":
-                self._validate_attention_constraint(constraint)
-            if constraint.kind == "gqa_attention_block":
-                self._validate_gqa_attention_constraint(constraint)
-            if constraint.kind == "rms_norm":
+            elif isinstance(constraint, MHACircuitConstraint):
+                self._validate_mha_constraint(constraint)
+            elif isinstance(constraint, GQARoPECircuitConstraint):
+                self._validate_gqa_rope_constraint(constraint)
+            elif isinstance(constraint, RMSNormScaleConstraint):
                 self._validate_rms_norm_constraint(constraint)
 
         _ = self.group_order
 
-    def _validate_attention_constraint(self, constraint: GraphConstraint) -> None:
-        """Check head/intra group structure of one ``attention_block`` constraint."""
+    def _validate_mha_constraint(self, constraint: MHACircuitConstraint) -> None:
+        """Check the head/intra-group structure of one MHA circuit."""
 
-        metadata = constraint.metadata
-        head_group = metadata.get("head_group")
+        head_group = constraint.head_group
         if head_group not in self.groups:
             raise ValueError(
-                f"attention_block constraint references unknown head group "
-                f"{head_group!r}."
+                f"MHA circuit constraint references unknown head group {head_group!r}."
             )
         num_heads = int(self.groups[head_group].size)
-        qk_groups = tuple(metadata.get("qk_groups", ()))
-        vo_groups = tuple(metadata.get("vo_groups", ()))
+        qk_groups = constraint.qk_groups
+        vo_groups = constraint.vo_groups
         for label, slot_groups in (("qk", qk_groups), ("vo", vo_groups)):
             if len(slot_groups) != num_heads:
                 raise ValueError(
-                    f"attention_block constraint lists {len(slot_groups)} "
+                    f"MHA circuit constraint lists {len(slot_groups)} "
                     f"{label} groups for {num_heads} heads."
                 )
             for group_id in slot_groups:
                 if group_id not in self.groups:
                     raise ValueError(
-                        f"attention_block constraint references unknown {label} "
+                        f"MHA circuit constraint references unknown {label} "
                         f"group {group_id!r}."
                     )
         head_dims = {
@@ -519,117 +514,114 @@ class SymmetryGraph:
         }
         if len(head_dims) != 1:
             raise ValueError(
-                "attention_block intra-head groups must share one head_dim; got "
+                "MHA circuit intra-head groups must share one head_dim; got "
                 f"sizes {sorted(head_dims)}."
             )
-        tensor_roles = dict(metadata.get("tensors", {}))
         for role in ("query", "key", "value", "out"):
-            tensor_id = tensor_roles.get(role)
+            tensor_id = getattr(constraint, role)
             if tensor_id not in self.tensors:
                 raise ValueError(
-                    f"attention_block constraint is missing a valid {role!r} "
+                    f"MHA circuit constraint is missing a valid {role!r} "
                     f"tensor (got {tensor_id!r})."
                 )
         expected_groups = {head_group, *qk_groups, *vo_groups}
         if set(constraint.groups) != expected_groups:
             raise ValueError(
-                "attention_block constraint groups must list exactly the head "
+                "MHA circuit constraint groups must list exactly the head "
                 "and intra-head groups."
             )
 
-    def _validate_gqa_attention_constraint(self, constraint: GraphConstraint) -> None:
-        """Check the kv-group/query-head/vo structure of one GQA constraint."""
+    def _validate_gqa_rope_constraint(
+        self, constraint: GQARoPECircuitConstraint
+    ) -> None:
+        """Check the kv-group/query-head/vo structure of one GQA + RoPE circuit."""
 
-        metadata = constraint.metadata
-        kv_group = metadata.get("kv_group")
+        kv_group = constraint.kv_group
         if kv_group not in self.groups:
             raise ValueError(
-                f"gqa_attention_block constraint references unknown kv group "
+                f"GQA + RoPE circuit constraint references unknown kv group "
                 f"{kv_group!r}."
             )
         num_kv_groups = int(self.groups[kv_group].size)
-        query_head_groups = tuple(metadata.get("query_head_groups", ()))
-        qk_groups = tuple(metadata.get("qk_groups", ()))
-        vo_groups = tuple(metadata.get("vo_groups", ()))
-        for label, slot_groups, size_key in (
-            ("query_head", query_head_groups, "heads_per_group"),
-            ("qk", qk_groups, "head_dim"),
-            ("vo", vo_groups, "head_dim"),
+        query_head_groups = constraint.query_head_groups
+        qk_groups = constraint.qk_groups
+        vo_groups = constraint.vo_groups
+        for label, slot_groups, expected_size in (
+            ("query_head", query_head_groups, constraint.heads_per_group),
+            ("qk", qk_groups, constraint.head_dim),
+            ("vo", vo_groups, constraint.head_dim),
         ):
             if len(slot_groups) != num_kv_groups:
                 raise ValueError(
-                    f"gqa_attention_block constraint lists {len(slot_groups)} "
+                    f"GQA + RoPE circuit constraint lists {len(slot_groups)} "
                     f"{label} groups for {num_kv_groups} kv groups."
                 )
-            expected_size = int(metadata.get(size_key, -1))
             for group_id in slot_groups:
                 if group_id not in self.groups:
                     raise ValueError(
-                        f"gqa_attention_block constraint references unknown "
+                        f"GQA + RoPE circuit constraint references unknown "
                         f"{label} group {group_id!r}."
                     )
                 if int(self.groups[group_id].size) != expected_size:
                     raise ValueError(
-                        f"gqa_attention_block {label} group {group_id!r} has "
+                        f"GQA + RoPE circuit {label} group {group_id!r} has "
                         f"size {self.groups[group_id].size}, expected "
                         f"{expected_size}."
                     )
-        if int(metadata.get("head_dim", 0)) % 2:
+        if constraint.head_dim % 2:
             raise ValueError(
-                "gqa_attention_block head_dim must be even for rotary pairs."
+                "GQA + RoPE circuit head_dim must be even for rotary pairs."
             )
-        tensor_roles = dict(metadata.get("tensors", {}))
         for role in ("query", "key", "value", "out"):
-            tensor_id = tensor_roles.get(role)
+            tensor_id = getattr(constraint, role)
             if tensor_id not in self.tensors:
                 raise ValueError(
-                    f"gqa_attention_block constraint is missing a valid {role!r} "
+                    f"GQA + RoPE circuit constraint is missing a valid {role!r} "
                     f"tensor (got {tensor_id!r})."
                 )
         for group_id in qk_groups:
             if self.groups[group_id].transform_family != "rotation_pairs":
                 raise ValueError(
-                    f"gqa_attention_block qk group {group_id!r} must declare "
-                    "the 'rotation_pairs' transform class (RoPE removes the "
+                    f"GQA + RoPE circuit qk group {group_id!r} must declare "
+                    "the 'rotation_pairs' transform family (RoPE removes the "
                     "qk permutation symmetry)."
                 )
         expected_groups = {kv_group, *query_head_groups, *qk_groups, *vo_groups}
         if set(constraint.groups) != expected_groups:
             raise ValueError(
-                "gqa_attention_block constraint groups must list exactly the "
+                "GQA + RoPE circuit constraint groups must list exactly the "
                 "kv and per-slot groups."
             )
 
-    def _validate_rms_norm_constraint(self, constraint: GraphConstraint) -> None:
-        """Check the scale/consumer wiring of one ``rms_norm`` constraint."""
+    def _validate_rms_norm_constraint(self, constraint: RMSNormScaleConstraint) -> None:
+        """Check the scale/consumer wiring of one RMSNorm scale constraint."""
 
-        metadata = constraint.metadata
-        scale_id = metadata.get("scale")
+        scale_id = constraint.scale
         if scale_id not in self.tensors:
             raise ValueError(
-                f"rms_norm constraint references unknown scale tensor {scale_id!r}."
+                f"RMSNorm scale constraint references unknown tensor {scale_id!r}."
             )
         scale_shape = self.tensors[scale_id].shape
         if len(scale_shape) != 1:
             raise ValueError(
-                f"rms_norm scale tensor {scale_id!r} must be 1-D, got shape "
+                f"RMSNorm scale tensor {scale_id!r} must be 1-D, got shape "
                 f"{scale_shape}."
             )
-        consumers = tuple(metadata.get("consumers", ()))
+        consumers = constraint.consumers
         if not consumers:
             raise ValueError(
-                f"rms_norm constraint for {scale_id!r} lists no consumers."
+                f"RMSNorm scale constraint for {scale_id!r} lists no consumers."
             )
         for tensor_id, axis in consumers:
             if tensor_id not in self.tensors:
                 raise ValueError(
-                    f"rms_norm constraint references unknown consumer tensor "
+                    f"RMSNorm scale constraint references unknown consumer tensor "
                     f"{tensor_id!r}."
                 )
             shape = self.tensors[tensor_id].shape
             if int(shape[int(axis)]) != int(scale_shape[0]):
                 raise ValueError(
-                    f"rms_norm consumer {tensor_id!r} axis {axis} has size "
+                    f"RMSNorm consumer {tensor_id!r} axis {axis} has size "
                     f"{shape[int(axis)]}, expected {scale_shape[0]}."
                 )
 
@@ -670,7 +662,7 @@ class SymmetryGraph:
             _set_path(mutable, tensor.path, updated)
         return frozen_dict.freeze(mutable) if is_frozen else mutable
 
-    def apply(self, params: Mapping[str, Any], state) -> Mapping[str, Any]:
+    def apply_transforms(self, params: Mapping[str, Any], state) -> Mapping[str, Any]:
         """Apply a hard group-transform state to all bound tensor axes.
 
         Permutation matrices, signed permutations, rotation-pair components, and
@@ -745,7 +737,6 @@ __all__ = [
     "AxisBinding",
     "ComponentSpec",
     "TRANSFORM_FAMILIES",
-    "GraphConstraint",
     "MaterializedTensors",
     "TensorSpec",
     "binding_axis_interval",

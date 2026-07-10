@@ -2,9 +2,9 @@
 
 Defines the architecture-derived alignment graph (:class:`SymmetryGraph` and
 its tensor/axis/group/constraint types) plus the low-level array and pytree
-primitives both symmetry-removal stages build on. The permutation stage lives in
-``align.matching`` and the scale stage in ``align.canonicalization``; both consume the
-``SymmetryGraph`` and its symmetry actions (``apply`` / ``apply_scales``).
+primitives both alignment stages build on. Matching lives in ``align.matching``
+and scale canonicalization in ``align.canonicalization``; both consume the
+``SymmetryGraph`` actions (``apply_transforms`` / ``apply_scales``).
 """
 
 from .components import (
@@ -17,11 +17,17 @@ from .components import (
     resolve_component_patterns,
     tensors_for_component,
 )
+from .constraints import (
+    ConstraintRecord,
+    GQARoPECircuitConstraint,
+    MHACircuitConstraint,
+    ResidualChannelTie,
+    RMSNormScaleConstraint,
+)
 from .graph import (
     TRANSFORM_FAMILIES,
     AxisBinding,
     ComponentSpec,
-    GraphConstraint,
     SymmetryGraph,
     SymmetryGroup,
     TensorSpec,
@@ -39,7 +45,11 @@ __all__ = [
     "SymmetryGraph",
     "AxisBinding",
     "ComponentSpec",
-    "GraphConstraint",
+    "ConstraintRecord",
+    "GQARoPECircuitConstraint",
+    "MHACircuitConstraint",
+    "RMSNormScaleConstraint",
+    "ResidualChannelTie",
     "TRANSFORM_FAMILIES",
     "SymmetryGroup",
     "TensorSpec",

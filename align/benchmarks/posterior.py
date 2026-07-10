@@ -33,17 +33,17 @@ from align.matching import (
     match_sample,
     resolve_calibration_kwargs,
 )
-from align.symmetry import SymmetryGraph
+from align.symmetry import MHACircuitConstraint, SymmetryGraph
 
 from .synthetic import (
     ParamTree,
     _make_dense_params,
-    dense_mlp_apply,
-    gpt_transformer_apply,
-    make_gpt_style_params,
-    make_modern_transformer_params,
-    modern_transformer_apply,
+    layernorm_mha_transformer_apply,
+    make_layernorm_mha_transformer_params,
+    make_rmsnorm_gqa_rope_transformer_params,
+    mlp_apply,
     permutation_matrix,
+    rmsnorm_gqa_rope_transformer_apply,
 )
 
 ApplyFn = Callable[[ParamTree, jax.Array], jax.Array]
@@ -275,7 +275,7 @@ def make_synthetic_mlp_posterior_case(
     ``inverse_fisher`` (Laplace-like, std proportional to ``F^(-1/2)`` at each
     chain's mode; see :func:`_noise_std_tree`). Before alignment, cross-chain
     R-hat is far above 1 because chain means differ by symmetry actions; after
-    normalization plus rebasin all chains should collapse onto one basin and
+    scale canonicalization plus matching should collapse all chains onto one basin and
     R-hat should approach 1.
     """
 
@@ -287,8 +287,8 @@ def make_synthetic_mlp_posterior_case(
     key = jax.random.PRNGKey(seed)
     param_key, input_key = jax.random.split(key)
     base = _make_dense_params(key=param_key, sizes=tuple(sizes))
-    adapter = get_recipe("mlp")
-    problem = adapter.build_problem(base)
+    recipe = get_recipe("mlp")
+    problem = recipe.build_graph(base)
     inputs = jax.random.normal(input_key, (n_inputs, int(sizes[0])))
 
     rng = np.random.default_rng(seed)
@@ -297,10 +297,10 @@ def make_synthetic_mlp_posterior_case(
     for chain_idx in range(n_chains):
         if chain_idx == 0:
             transformed = base
-            perms: dict[str, np.ndarray] = {}
+            transforms: dict[str, np.ndarray] = {}
             scales: dict[str, np.ndarray] = {}
         else:
-            perms = {
+            transforms = {
                 gid: permutation_matrix(rng.permutation(group.size))
                 for gid, group in problem.groups.items()
             }
@@ -311,16 +311,16 @@ def make_synthetic_mlp_posterior_case(
                 for gid, group in problem.groups.items()
             }
             scaled = problem.apply_scales(base, ScaleState.from_scales(problem, scales))
-            transformed = problem.apply(
-                scaled, TransformState.from_transforms(problem, perms)
+            transformed = problem.apply_transforms(
+                scaled, TransformState.from_transforms(problem, transforms)
             )
-        chain_transforms.append({"perms": perms, "scales": scales})
+        chain_transforms.append({"transforms": transforms, "scales": scales})
 
         noise_std = _noise_std_tree(
             transformed,
             noise_mode=noise_mode,
             noise_scale=noise_scale,
-            apply_fn=dense_mlp_apply,
+            apply_fn=mlp_apply,
             inputs=inputs,
         )
         samples = []
@@ -344,7 +344,7 @@ def make_synthetic_mlp_posterior_case(
         else f"synthetic_mlp_posterior_seed_{seed}",
         problem=problem,
         chains=tuple(chains),
-        apply_fn=dense_mlp_apply,
+        apply_fn=mlp_apply,
         inputs=inputs,
         metadata={
             "seed": seed,
@@ -358,7 +358,7 @@ def make_synthetic_mlp_posterior_case(
     )
 
 
-def make_synthetic_transformer_posterior_case(
+def make_synthetic_layernorm_mha_transformer_posterior_case(
     *,
     seed: int = 0,
     n_chains: int = 3,
@@ -373,9 +373,9 @@ def make_synthetic_transformer_posterior_case(
     base mode: permutations on all groups (stream, heads, intra-head, FFN)
     composed with positive diagonal scales on the qk/vo intra-head groups (the
     exact attention circuit symmetry), then Gaussian weight noise per sample
-    (``noise_mode`` as in :func:`make_synthetic_mlp_posterior_case`). Rebasin
+    (``noise_mode`` as in :func:`make_synthetic_mlp_posterior_case`). Matching
     alone cannot remove the circuit scales, so full collapse requires
-    balancing normalization first.
+    balancing canonicalization first.
     """
 
     if n_chains < 2:
@@ -385,17 +385,17 @@ def make_synthetic_transformer_posterior_case(
 
     key = jax.random.PRNGKey(seed)
     param_key, input_key = jax.random.split(key)
-    base = make_gpt_style_params(key=param_key)
-    adapter = get_recipe("layernorm_mha_transformer")
-    problem = adapter.build_problem(base)
+    base = make_layernorm_mha_transformer_params(key=param_key)
+    recipe = get_recipe("layernorm_mha_transformer")
+    problem = recipe.build_graph(base)
     tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
     intra_groups = [
         group_id
         for constraint in problem.constraints
-        if constraint.kind == "attention_block"
+        if isinstance(constraint, MHACircuitConstraint)
         for group_id in (
-            *constraint.metadata["qk_groups"],
-            *constraint.metadata["vo_groups"],
+            *constraint.qk_groups,
+            *constraint.vo_groups,
         )
     ]
 
@@ -405,10 +405,10 @@ def make_synthetic_transformer_posterior_case(
     for chain_idx in range(n_chains):
         if chain_idx == 0:
             transformed = base
-            perms: dict[str, np.ndarray] = {}
+            transforms: dict[str, np.ndarray] = {}
             scales: dict[str, np.ndarray] = {}
         else:
-            perms = {
+            transforms = {
                 gid: permutation_matrix(rng.permutation(group.size))
                 for gid, group in problem.groups.items()
             }
@@ -421,16 +421,16 @@ def make_synthetic_transformer_posterior_case(
                 for gid in intra_groups
             }
             scaled = problem.apply_scales(base, ScaleState.from_scales(problem, scales))
-            transformed = problem.apply(
-                scaled, TransformState.from_transforms(problem, perms)
+            transformed = problem.apply_transforms(
+                scaled, TransformState.from_transforms(problem, transforms)
             )
-        chain_transforms.append({"perms": perms, "scales": scales})
+        chain_transforms.append({"transforms": transforms, "scales": scales})
 
         noise_std = _noise_std_tree(
             transformed,
             noise_mode=noise_mode,
             noise_scale=noise_scale,
-            apply_fn=gpt_transformer_apply,
+            apply_fn=layernorm_mha_transformer_apply,
             inputs=tokens,
         )
         samples = []
@@ -449,12 +449,12 @@ def make_synthetic_transformer_posterior_case(
         chains.append(tuple(samples))
 
     return PosteriorBenchmarkCase(
-        name=f"synthetic_transformer_posterior_{noise_mode}_seed_{seed}"
+        name=f"synthetic_layernorm_mha_transformer_posterior_{noise_mode}_seed_{seed}"
         if noise_mode != "isotropic"
-        else f"synthetic_transformer_posterior_seed_{seed}",
+        else f"synthetic_layernorm_mha_transformer_posterior_seed_{seed}",
         problem=problem,
         chains=tuple(chains),
-        apply_fn=gpt_transformer_apply,
+        apply_fn=layernorm_mha_transformer_apply,
         inputs=tokens,
         metadata={
             "seed": seed,
@@ -468,7 +468,7 @@ def make_synthetic_transformer_posterior_case(
     )
 
 
-def make_synthetic_modern_transformer_posterior_case(
+def make_synthetic_rmsnorm_gqa_rope_transformer_posterior_case(
     *,
     seed: int = 0,
     n_chains: int = 3,
@@ -483,15 +483,15 @@ def make_synthetic_modern_transformer_posterior_case(
     base mode — the family's full implemented group: signed permutations on
     the stream and vo groups, plain permutations on kv/query-head/FFN groups,
     per-pair qk rotations, composed with the exact diagonal scales (RMSNorm
-    gamma, pair-tied qk, vo) — then Gaussian weight noise per sample. Rebasin
+    gamma, pair-tied qk, vo) — then Gaussian weight noise per sample. Matching
     alone cannot remove the scales, so full collapse requires the
-    modern-transformer normalization plan first.
+    RMSNorm/RoPE/GQA canonicalization plan first.
     """
 
     from align.canonicalization.rmsnorm_gqa_rope import (
         apply_rms_gamma_scales,
-        gqa_attention_constraints,
-        rms_norm_constraints,
+        gqa_rope_circuit_constraints,
+        rmsnorm_scale_constraints,
     )
 
     from .synthetic import rotation_pairs_matrix, signed_permutation_matrix
@@ -503,9 +503,9 @@ def make_synthetic_modern_transformer_posterior_case(
 
     key = jax.random.PRNGKey(seed)
     param_key, input_key = jax.random.split(key)
-    base = make_modern_transformer_params(key=param_key)
-    adapter = get_recipe("rmsnorm_gqa_rope_transformer")
-    problem = adapter.build_problem(base)
+    base = make_rmsnorm_gqa_rope_transformer_params(key=param_key)
+    recipe = get_recipe("rmsnorm_gqa_rope_transformer")
+    problem = recipe.build_graph(base)
     tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
 
     rng = np.random.default_rng(seed)
@@ -514,55 +514,54 @@ def make_synthetic_modern_transformer_posterior_case(
     for chain_idx in range(n_chains):
         if chain_idx == 0:
             transformed = base
-            perms: dict[str, np.ndarray] = {}
+            transforms: dict[str, np.ndarray] = {}
         else:
             gamma_scales = {
-                constraint.metadata["scale"]: np.exp(
+                constraint.scale: np.exp(
                     rng.uniform(
                         -scale_jitter,
                         scale_jitter,
-                        size=problem.tensors[constraint.metadata["scale"]].shape[0],
+                        size=problem.tensors[constraint.scale].shape[0],
                     )
                 ).astype(np.float32)
-                for constraint in rms_norm_constraints(problem)
+                for constraint in rmsnorm_scale_constraints(problem)
             }
             transformed = apply_rms_gamma_scales(problem, base, gamma_scales)
             circuit_scales = {}
-            for constraint in gqa_attention_constraints(problem):
-                metadata = constraint.metadata
-                head_dim = int(metadata["head_dim"])
-                for group_id in metadata["qk_groups"]:
+            for constraint in gqa_rope_circuit_constraints(problem):
+                head_dim = constraint.head_dim
+                for group_id in constraint.qk_groups:
                     pair = np.exp(
                         rng.uniform(-scale_jitter, scale_jitter, size=head_dim // 2)
                     )
                     circuit_scales[group_id] = np.concatenate([pair, pair]).astype(
                         np.float32
                     )
-                for group_id in metadata["vo_groups"]:
+                for group_id in constraint.vo_groups:
                     circuit_scales[group_id] = np.exp(
                         rng.uniform(-scale_jitter, scale_jitter, size=head_dim)
                     ).astype(np.float32)
             transformed = problem.apply_scales(
                 transformed, ScaleState.from_scales(problem, circuit_scales)
             )
-            perms = {}
+            transforms = {}
             for gid, group in problem.groups.items():
                 if group.transform_family == "rotation_pairs":
-                    perms[gid] = rotation_pairs_matrix(rng, group.size)
+                    transforms[gid] = rotation_pairs_matrix(rng, group.size)
                 elif group.transform_family in ("signed_permutation", "orthogonal"):
-                    perms[gid] = signed_permutation_matrix(rng, group.size)
+                    transforms[gid] = signed_permutation_matrix(rng, group.size)
                 else:
-                    perms[gid] = permutation_matrix(rng.permutation(group.size))
-            transformed = problem.apply(
-                transformed, TransformState.from_transforms(problem, perms)
+                    transforms[gid] = permutation_matrix(rng.permutation(group.size))
+            transformed = problem.apply_transforms(
+                transformed, TransformState.from_transforms(problem, transforms)
             )
-        chain_transforms.append({"perms": perms})
+        chain_transforms.append({"transforms": transforms})
 
         noise_std = _noise_std_tree(
             transformed,
             noise_mode=noise_mode,
             noise_scale=noise_scale,
-            apply_fn=modern_transformer_apply,
+            apply_fn=rmsnorm_gqa_rope_transformer_apply,
             inputs=tokens,
         )
         samples = []
@@ -581,12 +580,12 @@ def make_synthetic_modern_transformer_posterior_case(
         chains.append(tuple(samples))
 
     return PosteriorBenchmarkCase(
-        name=f"synthetic_modern_transformer_posterior_{noise_mode}_seed_{seed}"
+        name=f"synthetic_rmsnorm_gqa_rope_transformer_posterior_{noise_mode}_seed_{seed}"
         if noise_mode != "isotropic"
-        else f"synthetic_modern_transformer_posterior_seed_{seed}",
+        else f"synthetic_rmsnorm_gqa_rope_transformer_posterior_seed_{seed}",
         problem=problem,
         chains=tuple(chains),
-        apply_fn=modern_transformer_apply,
+        apply_fn=rmsnorm_gqa_rope_transformer_apply,
         inputs=tokens,
         metadata={
             "seed": seed,
@@ -614,7 +613,7 @@ def load_experiment_posterior_case(
     experiment_root: str | Path,
     *,
     architecture: str,
-    adapter_kwargs: Mapping[str, Any] | None = None,
+    recipe_kwargs: Mapping[str, Any] | None = None,
     samples_dir: str | Path | None = None,
     tree_path: str | Path | None = None,
     chain_indices: Sequence[int] | None = None,
@@ -634,7 +633,7 @@ def load_experiment_posterior_case(
     """
 
     from align.runtime.loaders import SampleLoader
-    from align.state import SampleManifest
+    from align.sample_manifest import SampleManifest
 
     root = Path(experiment_root).resolve()
     resolved_samples_dir = Path(samples_dir) if samples_dir else root / "samples"
@@ -668,8 +667,8 @@ def load_experiment_posterior_case(
     ref_sample_index = ref_sample_ids.index(manifest.reference_record.sample_id)
 
     reference = chains[ref_chain_index][ref_sample_index]
-    adapter = get_recipe(architecture, **dict(adapter_kwargs or {}))
-    problem = adapter.build_problem(reference)
+    recipe = get_recipe(architecture, **dict(recipe_kwargs or {}))
+    problem = recipe.build_graph(reference)
 
     return PosteriorBenchmarkCase(
         name=name or f"experiment_{root.name}",
@@ -710,19 +709,19 @@ def run_posterior_benchmark(
     objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[Mapping[str, Any]] | None = None,
-    normalize: bool = False,
+    canonicalize: bool = False,
     rng_seed: int = 0,
     barycenter_passes: int = 2,
 ) -> PosteriorBenchmarkResult:
     """Align every sample of a posterior case to its reference and score it.
 
     ``metrics_before`` is computed on the raw input chains, ``metrics_after``
-    on the normalized (optional) and rebasined chains, so the comparison
+    on the optionally canonicalized and matched chains, so the comparison
     reflects the complete alignment treatment.
 
     ``barycenter_passes > 1`` (the default is 2) enables iterative barycenter
     refinement: after each pass, the reference is replaced by the mean of the
-    aligned samples and every (normalized) sample is re-aligned from scratch
+    aligned samples and every canonicalized sample is re-aligned from scratch
     against it. The single reference *sample* carries its own posterior
     noise, which becomes the matching bottleneck at high noise — and makes
     single-pass canonicalization reference-dependent at moderate noise; the
@@ -739,12 +738,12 @@ def run_posterior_benchmark(
     metrics_before = evaluate_posterior_metrics(case, case.chains)
 
     reference = case.reference
-    if normalize:
+    if canonicalize:
         reference = _canonicalize_tree(case.problem, reference)
 
     flat_samples = case.iter_samples()
     targets = [
-        _canonicalize_tree(case.problem, params) if normalize else params
+        _canonicalize_tree(case.problem, params) if canonicalize else params
         for _, _, params in flat_samples
     ]
 
@@ -752,7 +751,7 @@ def run_posterior_benchmark(
     objective_values: list[float] = []
     start = time.perf_counter()
     for pass_idx in range(barycenter_passes):
-        scheduler = build_solver_sequence(
+        solver_sequence = build_solver_sequence(
             objective=objective,
             objective_kwargs=resolve_calibration_kwargs(
                 objective_kwargs,
@@ -764,7 +763,7 @@ def run_posterior_benchmark(
             schedule=schedule,
         )
         ref_data = case.problem.materialize(
-            reference, backend=scheduler.backend, cache=True
+            reference, backend=solver_sequence.backend, cache=True
         )
         aligned_flat = []
         objective_values = []
@@ -773,7 +772,7 @@ def run_posterior_benchmark(
                 case.problem,
                 reference,
                 target,
-                scheduler=scheduler,
+                solver_sequence=solver_sequence,
                 ref_data=ref_data,
                 rng_key=jax.random.fold_in(
                     jax.random.PRNGKey(rng_seed), pass_idx * len(targets) + index
@@ -823,7 +822,7 @@ __all__ = [
     "evaluate_posterior_metrics",
     "load_experiment_posterior_case",
     "make_synthetic_mlp_posterior_case",
-    "make_synthetic_transformer_posterior_case",
+    "make_synthetic_layernorm_mha_transformer_posterior_case",
     "run_posterior_benchmark",
     "split_rhat",
 ]

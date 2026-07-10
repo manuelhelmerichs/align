@@ -1,4 +1,4 @@
-"""Modern (LLaMA-style) transformer recipe: RMSNorm + RoPE + GQA.
+"""LLaMA-style transformer recipe: RMSNorm + RoPE + GQA.
 
 Targets pre-norm decoder trees with RMSNorm (scale only, no bias), rotary
 position embeddings on the qk circuit, grouped-query attention, and bias-free
@@ -8,19 +8,19 @@ projections. Attention kernels are stored kv-group-structured: ``query`` as
 head_dim, d_model)``. Flat ``(d, H, dk)`` layouts with query head ``i`` in kv
 group ``i // (H/G)`` reshape losslessly into this form.
 
-The symmetry model (derived in the modern-transformer subsection of
+The symmetry model (derived in the RMSNorm/RoPE/GQA subsection of
 docs/theory.md) differs from the LayerNorm/GPT family in three ways:
 
 - the RMSNorm residual stream carries a full orthogonal symmetry: the stream
   group declares ``signed_permutation`` by default (``orthogonal`` via
   ``stream_transform_family`` for Procrustes alignment), and the exact per-channel
   post-norm scale symmetry of each RMSNorm ``scale`` against its consumers is
-  recorded as ``rms_norm`` constraints (canonicalized by ``scale_normalize``
+  recorded as ``RMSNormScaleConstraint`` records (handled by canonicalization
   via signed gamma folding),
 - RoPE restricts the qk intra-head symmetry to per-frequency-pair scaled
   rotations: the qk groups declare ``rotation_pairs`` (no permutations);
   solvers update them by the closed-form per-pair rotation projection and
-  the normalization plan balances the pair scales,
+  the canonicalization plan balances the pair scales,
 - GQA quotients the head symmetry into kv-group permutations times per-group
   query-head permutations (the wreath product), emitted by
   :class:`~align.architectures.rules.GQARoPEAttentionRule`; vo groups
@@ -41,7 +41,7 @@ from typing import Any
 
 import numpy as np
 
-from ..symmetry import GraphConstraint, SymmetryGraph
+from ..symmetry import RMSNormScaleConstraint, SymmetryGraph
 from ..symmetry.tensor_ops import _descend, _maybe_descend
 from .graph_builder import SymmetryGraphBuilder
 from .recipe import ArchitectureRecipe, register_recipe
@@ -94,7 +94,7 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
     def __post_init__(self) -> None:
         if self.stream_transform_family not in ("signed_permutation", "orthogonal"):
             raise ValueError(
-                "modern_transformer stream_transform_family must be "
+                "rmsnorm_gqa_rope_transformer stream_transform_family must be "
                 "'signed_permutation' or 'orthogonal', got "
                 f"{self.stream_transform_family!r}."
             )
@@ -254,7 +254,7 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
 
     # -- composition -------------------------------------------------------
 
-    def build_problem(self, params: Mapping[str, Any]) -> SymmetryGraph:
+    def build_graph(self, params: Mapping[str, Any]) -> SymmetryGraph:
         root_path = self._root_path()
         subtree = _maybe_descend(params, root_path) if root_path else params
         if not isinstance(subtree, Mapping):
@@ -338,7 +338,7 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
             layernorm_paths=tuple(_full(path) for path in norm_paths),
             feature_leaves=tuple(_full(path) for path in embedding_leaves),
             transform_family=self.stream_transform_family,
-        ).build(builder)
+        ).add_to(builder)
 
         rms_constraints: list[tuple[tuple[str, ...], list[tuple[str, int]]]] = []
         for scope in block_scopes:
@@ -348,7 +348,7 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
                 component_id=f"{block_name}/attention",
                 module_path=_full(module_path),
                 stream_group="stream",
-            ).build(builder)
+            ).add_to(builder)
 
             norms, ffn_layers = block_layers[scope]
             if len(norms) != 2:
@@ -369,7 +369,7 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
                 layer_paths=tuple(_full(layer.path) for layer in ffn_layers),
                 input_group="stream",
                 output_group="stream",
-            ).build(builder)
+            ).add_to(builder)
 
             # Convention: the first RMSNorm (natural order) feeds attention,
             # the second feeds the FFN — the standard pre-norm block layout.
@@ -384,10 +384,10 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
         head_consumers: list[tuple[tuple[str, ...], int]] = []
         for index, chain in enumerate(outside_chains):
             DenseChainRule(
-                component_id="head" if index == 0 else f"head_{index}",
+                component_id=("classifier" if index == 0 else f"classifier_{index}"),
                 layer_paths=tuple(_full(layer.path) for layer in chain),
                 input_group="stream",
-            ).build(builder)
+            ).add_to(builder)
             head_consumers.append(((*_full(chain[0].path), "kernel"), 0))
         rms_constraints.append((_full(outside_norms[0]), head_consumers))
 
@@ -395,13 +395,9 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
             scale_id = builder.tensor((*norm_path, "scale"))
             consumer_ids = [(builder.tensor(path), axis) for path, axis in consumers]
             builder.add_constraint(
-                GraphConstraint(
-                    kind="rms_norm",
-                    tensors=(scale_id, *(tid for tid, _ in consumer_ids)),
-                    metadata={
-                        "scale": scale_id,
-                        "consumers": tuple(consumer_ids),
-                    },
+                RMSNormScaleConstraint(
+                    scale=scale_id,
+                    consumers=tuple(consumer_ids),
                 )
             )
 

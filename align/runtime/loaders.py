@@ -4,8 +4,8 @@ from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
+from ..sample_manifest import SampleManifest, SampleRecord
 from ..samples import WeightSample, create_sample_codec
-from ..state import SampleManifest, SampleRecord
 
 _PREFETCH_EXECUTOR: ThreadPoolExecutor | None = None
 _PREFETCH_WORKERS = 2

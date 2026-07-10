@@ -10,7 +10,7 @@ from queue import Empty
 from typing import Any
 
 from .._jax_platforms import is_gpu_platform
-from .common import _WORKER_HEARTBEAT_INTERVAL
+from .resources import _WORKER_HEARTBEAT_INTERVAL
 
 
 def worker_process_main(job: dict[str, object], command_queue, progress_queue) -> None:

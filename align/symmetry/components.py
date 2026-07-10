@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 
+from .constraints import MHACircuitConstraint
 from .graph import SymmetryGraph
 from .tensor_ops import _canonical_axis, binding_axis_interval
 
@@ -85,7 +86,7 @@ def describe_symmetry(problem: SymmetryGraph) -> dict[str, Any]:
     attention_groups = {
         group_id
         for constraint in problem.constraints
-        if constraint.kind == "attention_block"
+        if isinstance(constraint, MHACircuitConstraint)
         for group_id in constraint.groups
     }
 

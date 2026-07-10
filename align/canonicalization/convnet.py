@@ -35,12 +35,10 @@ from ..symmetry import SymmetryGraph, binding_axis_interval
 from ..symmetry.tensor_ops import _descend, binding_selector
 
 
-def has_conv_stack_block(problem: SymmetryGraph) -> bool:
-    """True if the problem contains a ``conv_stack`` component."""
+def has_convnet_component(problem: SymmetryGraph) -> bool:
+    """True if the graph contains a ``convnet`` component."""
 
-    return any(
-        component.kind == "conv_stack" for component in problem.components.values()
-    )
+    return any(component.kind == "convnet" for component in problem.components.values())
 
 
 def _multiply_axis_interval(
@@ -62,7 +60,7 @@ def _multiply_axis_interval(
     return tensor.at[indexer].multiply(factors)
 
 
-def conv_stack_producer_scales(
+def convnet_producer_scales(
     problem: SymmetryGraph,
     params: Mapping[str, Any],
     *,
@@ -108,7 +106,7 @@ def conv_stack_producer_scales(
                         f"{binding.tensor_id!r} consuming group {other.group!r}, "
                         "which is not normalized yet (a residual cycle of "
                         "bare convs). This has no one-shot canonical scale; "
-                        "attach normalization layers or disable the normalize "
+                        "attach normalization layers or disable the canonicalize "
                         "stage."
                     )
                 o_axis, o_start, o_stop = binding_axis_interval(spec.shape, other)
@@ -135,4 +133,4 @@ def conv_stack_producer_scales(
     return scales
 
 
-__all__ = ["conv_stack_producer_scales", "has_conv_stack_block"]
+__all__ = ["convnet_producer_scales", "has_convnet_component"]

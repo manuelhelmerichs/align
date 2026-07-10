@@ -115,7 +115,7 @@ def reference_stability_diagnostic(
                 "Canonicalized clouds have different sample counts."
             ) from exc
 
-        moved = problem.apply(current.params, frame_state)
+        moved = problem.apply_transforms(current.params, frame_state)
         shift_total += _tree_distance(previous.params, moved)
         spread_total += _tree_distance(previous.params, previous_mean.params)
         count += 1

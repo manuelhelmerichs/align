@@ -11,7 +11,7 @@ delegated to symmetry rules:
   LayerNorm-based stacks; orthogonal stream symmetry is out of scope),
 - :class:`~align.architectures.rules.MHAAttentionRule` per block: the
   inter-head group plus per-slot qk/vo intra-head groups and the
-  ``attention_block`` constraint,
+  typed ``MHACircuitConstraint``,
 - :class:`~align.architectures.rules.DenseChainRule` for FFN chains
   (stream-tied ends) and trailing classifier chains.
 
@@ -262,7 +262,7 @@ class LayerNormMHATransformerRecipe(ArchitectureRecipe):
 
     # -- composition -------------------------------------------------------
 
-    def build_problem(self, params: Mapping[str, Any]) -> SymmetryGraph:
+    def build_graph(self, params: Mapping[str, Any]) -> SymmetryGraph:
         root_path = self._root_path()
         subtree = _maybe_descend(params, root_path) if root_path else params
         if not isinstance(subtree, Mapping):
@@ -322,7 +322,7 @@ class LayerNormMHATransformerRecipe(ArchitectureRecipe):
             d_model=d_model,
             layernorm_paths=tuple(_full(path) for path in layernorm_paths),
             feature_leaves=tuple(_full(path) for path in embedding_leaves),
-        ).build(builder)
+        ).add_to(builder)
 
         for scope in block_scopes:
             block_name = "/".join(scope)
@@ -331,7 +331,7 @@ class LayerNormMHATransformerRecipe(ArchitectureRecipe):
                 component_id=f"{block_name}/attention",
                 module_path=_full(module.path),
                 stream_group="stream",
-            ).build(builder)
+            ).add_to(builder)
 
             ffn_layers = block_layers[scope][1]
             if ffn_layers:
@@ -346,14 +346,14 @@ class LayerNormMHATransformerRecipe(ArchitectureRecipe):
                     layer_paths=tuple(_full(layer.path) for layer in ffn_layers),
                     input_group="stream",
                     output_group="stream",
-                ).build(builder)
+                ).add_to(builder)
 
         for index, chain in enumerate(self._chain_dense_layers(outside_dense, d_model)):
             DenseChainRule(
-                component_id="head" if index == 0 else f"head_{index}",
+                component_id=("classifier" if index == 0 else f"classifier_{index}"),
                 layer_paths=tuple(_full(layer.path) for layer in chain),
                 input_group="stream",
-            ).build(builder)
+            ).add_to(builder)
 
         builder.metadata.update(
             {

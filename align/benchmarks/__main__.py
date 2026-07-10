@@ -62,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compare.add_argument(
         "--cases",
-        default="dense_mlp,residual_conv,split_concat",
+        default="mlp,residual_conv,split_concat",
         help="Comma-separated synthetic orbit case names.",
     )
     compare.add_argument(
@@ -103,9 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Schedule name from the default grid, or a JSON list of steps.",
     )
     posterior.add_argument(
-        "--normalize",
+        "--canonicalize",
         action="store_true",
-        help="Scale-normalize samples before rebasin (dense MLPs only).",
+        help="Scale-canonicalize samples before matching (dense MLPs only).",
     )
     posterior.add_argument(
         "--barycenter-passes",
@@ -113,7 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=2,
         help="Barycenter refinement passes: re-align against the mean of the "
         "previous pass's aligned samples (1 = plain single-reference "
-        "rebasin; default 2 — single-reference canonicalization is "
+        "matching; default 2 — single-reference canonicalization is "
         "reference-dependent at moderate posterior noise).",
     )
     posterior.add_argument("--output", type=Path, help="Write the JSON report here.")
@@ -126,9 +126,11 @@ def _add_experiment_arguments(
 ) -> None:
     group = parser.add_argument_group("experiment posterior")
     group.add_argument("--experiment-root", type=Path, required=required)
-    group.add_argument("--architecture", help="Adapter name, e.g. dense_mlp or resnet.")
     group.add_argument(
-        "--adapter-kwargs", default="{}", help="JSON dict of adapter kwargs."
+        "--architecture", help="Recipe name, e.g. mlp or residual_convnet."
+    )
+    group.add_argument(
+        "--recipe-kwargs", default="{}", help="JSON dict of recipe kwargs."
     )
     group.add_argument("--samples-dir", type=Path)
     group.add_argument("--tree-path", type=Path)
@@ -172,7 +174,7 @@ def _load_experiment_case(args: argparse.Namespace):
     return load_experiment_posterior_case(
         args.experiment_root,
         architecture=args.architecture,
-        adapter_kwargs=_parse_json_dict(args.adapter_kwargs, flag="--adapter-kwargs"),
+        recipe_kwargs=_parse_json_dict(args.recipe_kwargs, flag="--recipe-kwargs"),
         samples_dir=args.samples_dir,
         tree_path=args.tree_path,
         chain_indices=_parse_int_list(args.chain_indices),
@@ -254,7 +256,7 @@ def _run_posterior(args: argparse.Namespace) -> int:
         objective_kwargs=_parse_json_dict(
             args.objective_kwargs, flag="--objective-kwargs"
         ),
-        normalize=args.normalize,
+        canonicalize=args.canonicalize,
         barycenter_passes=args.barycenter_passes,
     )
     _emit([record], label="experiment-posterior", output=args.output)

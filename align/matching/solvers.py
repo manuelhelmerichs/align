@@ -102,7 +102,7 @@ def update_group_transform(
     elif group.transform_family == "rotation_pairs":
         updated = solve_rotation_pairs_maximize(signed)
     else:  # pragma: no cover - guarded by problem validation
-        raise ValueError(f"Unknown group transform class {group.transform_family!r}.")
+        raise ValueError(f"Unknown group transform family {group.transform_family!r}.")
     previous = as_permutation_matrix(
         state.matrices[group_id], size=group.size, dtype=np.float64
     )
@@ -111,7 +111,7 @@ def update_group_transform(
 
 
 class LAPGroupSolver:
-    """Exact class-dispatched update for one group (LAP and its extensions)."""
+    """Exact transform-family-dispatched update for one group."""
 
     name = "lap"
 
@@ -137,7 +137,7 @@ class ProcrustesGroupSolver:
         group = problem.groups[group_id]
         if group.transform_family != "orthogonal":
             raise ValueError(
-                f"Group {group_id!r} declares transform class "
+                f"Group {group_id!r} declares transform family "
                 f"{group.transform_family!r}; the procrustes solver only updates "
                 "'orthogonal' groups."
             )

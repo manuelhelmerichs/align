@@ -7,8 +7,7 @@ validation, the scale-canonicalization math kernel, and the graph-driven
 """
 
 from .activations import SUPPORTED_ACTIVATIONS, validate_activation
-from .dense import DenseLayer
-from .kernel import compute_incoming_norms
+from .dense import DenseLayer, compute_incoming_norms
 from .scale import ScaleCanonicalizer
 from .state import ScaleState
 

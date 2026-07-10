@@ -1,6 +1,6 @@
-"""Composable component rules: the unit of alignment-problem construction.
+"""Composable component rules for symmetry-graph construction.
 
-A component rule emits one named component (its permutation groups, axis bindings,
+A component rule emits one named component (its symmetry groups, axis bindings,
 constraints, and :class:`~align.symmetry.ComponentSpec`) into a shared
 :class:`~align.architectures.graph_builder.SymmetryGraphBuilder`. Architecture recipes are
 thin recipes that discover where components live in a parameter tree and compose
@@ -17,7 +17,7 @@ from typing import Any, ClassVar
 
 import numpy as np
 
-from ..symmetry import GraphConstraint
+from ..symmetry import GQARoPECircuitConstraint, MHACircuitConstraint
 from ..symmetry.tensor_ops import _descend
 from .graph_builder import SymmetryGraphBuilder
 
@@ -71,12 +71,12 @@ def is_dense_module(node: Any) -> bool:
 
 
 class SymmetryRule(ABC):
-    """Builds one component of an alignment problem into a :class:`SymmetryGraphBuilder`."""
+    """Adds one symmetry component to a :class:`SymmetryGraphBuilder`."""
 
     kind: ClassVar[str]
 
     @abstractmethod
-    def build(self, builder: SymmetryGraphBuilder):
+    def add_to(self, builder: SymmetryGraphBuilder):
         """Emit the component's groups, bindings, constraints, and component spec."""
 
 
@@ -90,14 +90,14 @@ class DenseChainRule(SymmetryRule):
     component spec is emitted only when the chain has hidden junctions.
     """
 
-    kind: ClassVar[str] = "dense_stack"
+    kind: ClassVar[str] = "dense_chain"
 
     component_id: str
     layer_paths: tuple[tuple[str, ...], ...]
     input_group: str | None = None
     output_group: str | None = None
 
-    def build(self, builder: SymmetryGraphBuilder) -> tuple[str, ...]:
+    def add_to(self, builder: SymmetryGraphBuilder) -> tuple[str, ...]:
         if not self.layer_paths:
             raise ValueError(f"Dense component {self.component_id!r} has no layers.")
         layers: list[tuple[tuple[str, ...], int, int, bool]] = []
@@ -166,7 +166,7 @@ class MHAAttentionRule(SymmetryRule):
     Emits the wreath-product structure: a head group shared by q/k/v/out, one
     qk intra group per head slot (selector bindings on q and k), one vo intra
     group per slot (v and out), the stream in/out bindings, and the
-    ``attention_block`` constraint consumed by the structured LAP update.
+    typed circuit constraint consumed by the structured LAP update.
 
     Intra-head binding roles encode the exact diagonal circuit symmetry for
     the scale action: query/value carry ``out`` (divided by the group scale)
@@ -175,13 +175,13 @@ class MHAAttentionRule(SymmetryRule):
     exactly. Permutations ignore roles, so matching is unaffected.
     """
 
-    kind: ClassVar[str] = "attention"
+    kind: ClassVar[str] = "mha"
 
     component_id: str
     module_path: tuple[str, ...]
     stream_group: str
 
-    def build(self, builder: SymmetryGraphBuilder) -> tuple[str, ...]:
+    def add_to(self, builder: SymmetryGraphBuilder) -> tuple[str, ...]:
         module = _descend(builder.params, self.module_path)
         if not is_attention_module(module):
             raise ValueError(
@@ -283,18 +283,14 @@ class MHAAttentionRule(SymmetryRule):
 
         all_groups = (heads_group, *qk_groups, *vo_groups)
         builder.add_constraint(
-            GraphConstraint(
-                kind="attention_block",
-                groups=all_groups,
-                tensors=tuple(role_tensor_ids[name] for name in _ATTENTION_CHILDREN),
-                metadata={
-                    "head_group": heads_group,
-                    "qk_groups": tuple(qk_groups),
-                    "vo_groups": tuple(vo_groups),
-                    "tensors": dict(role_tensor_ids),
-                    "num_heads": num_heads,
-                    "head_dim": head_dim,
-                },
+            MHACircuitConstraint(
+                head_group=heads_group,
+                qk_groups=tuple(qk_groups),
+                vo_groups=tuple(vo_groups),
+                query=role_tensor_ids["query"],
+                key=role_tensor_ids["key"],
+                value=role_tensor_ids["value"],
+                out=role_tensor_ids["out"],
             )
         )
         builder.add_component(
@@ -316,9 +312,9 @@ class GQARoPEAttentionRule(SymmetryRule):
     kernels), one signed vo intra group per kv slot, and one qk
     ``rotation_pairs`` group per kv slot: rotary embeddings restrict the qk
     circuit symmetry to per frequency-pair scaled rotations (see the
-    modern-transformer subsection of docs/theory.md), so the qk groups carry
+    RMSNorm/RoPE/GQA subsection of docs/theory.md), so the qk groups carry
     no permutations — solvers update them by the closed-form per-pair
-    rotation projection, and the normalization plan balances the pair scales
+    rotation projection, and the canonicalization plan balances the pair scales
     through the same bindings.
 
     Expected kernel layout (flat ``(d, H, dk)`` trees reshape losslessly with
@@ -327,13 +323,13 @@ class GQARoPEAttentionRule(SymmetryRule):
     the exact RoPE symmetry model assumes bias-free projections (LLaMA-style).
     """
 
-    kind: ClassVar[str] = "gqa_attention"
+    kind: ClassVar[str] = "gqa_rope"
 
     component_id: str
     module_path: tuple[str, ...]
     stream_group: str
 
-    def build(self, builder: SymmetryGraphBuilder) -> tuple[str, ...]:
+    def add_to(self, builder: SymmetryGraphBuilder) -> tuple[str, ...]:
         module = _descend(builder.params, self.module_path)
         if not is_attention_module(module):
             raise ValueError(
@@ -433,21 +429,18 @@ class GQARoPEAttentionRule(SymmetryRule):
 
         all_groups = (kv_group, *qh_groups, *qk_groups, *vo_groups)
         builder.add_constraint(
-            GraphConstraint(
-                kind="gqa_attention_block",
-                groups=all_groups,
-                tensors=tuple(role_tensor_ids[name] for name in _ATTENTION_CHILDREN),
-                metadata={
-                    "kv_group": kv_group,
-                    "query_head_groups": tuple(qh_groups),
-                    "qk_groups": tuple(qk_groups),
-                    "vo_groups": tuple(vo_groups),
-                    "tensors": dict(role_tensor_ids),
-                    "num_kv_groups": num_kv_groups,
-                    "heads_per_group": heads_per_group,
-                    "head_dim": head_dim,
-                    "rope_pairing": "half",
-                },
+            GQARoPECircuitConstraint(
+                kv_group=kv_group,
+                query_head_groups=tuple(qh_groups),
+                qk_groups=tuple(qk_groups),
+                vo_groups=tuple(vo_groups),
+                query=role_tensor_ids["query"],
+                key=role_tensor_ids["key"],
+                value=role_tensor_ids["value"],
+                out=role_tensor_ids["out"],
+                num_kv_groups=num_kv_groups,
+                heads_per_group=heads_per_group,
+                head_dim=head_dim,
             )
         )
         builder.add_component(
@@ -487,7 +480,7 @@ class ResidualStreamRule(SymmetryRule):
     group_id: str = "stream"
     transform_family: str = "permutation"
 
-    def build(self, builder: SymmetryGraphBuilder) -> str:
+    def add_to(self, builder: SymmetryGraphBuilder) -> str:
         builder.add_group(
             self.group_id, self.d_model, transform_family=self.transform_family
         )

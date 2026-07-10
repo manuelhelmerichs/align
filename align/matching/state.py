@@ -274,7 +274,8 @@ class TransformState:
         permutations, rotations, and orthogonal matrices (which are not
         binary) are stored as ``float32``. The distinction is content-based,
         so artifacts stay self-describing and every transform family
-        round-trips exactly through :func:`align.artifacts.write_transforms_artifact`.
+        round-trips exactly through
+        :func:`align.runtime.artifacts.write_transforms_artifact`.
         """
 
         artifacts: dict[str, np.ndarray] = {}

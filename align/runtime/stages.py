@@ -15,8 +15,8 @@ from ..matching import (
     match_batch,
     match_sample,
 )
+from ..sample_manifest import SampleManifest, SampleRecord
 from ..samples import ParamTree, WeightSample
-from ..state import SampleManifest, SampleRecord
 
 _LOG = logging.getLogger(__name__)
 
@@ -26,8 +26,9 @@ class StageResult:
     """Container for per-stage outputs."""
 
     sample: WeightSample
-    artifacts: dict[str, Any]
-    aux: dict[str, Any] | None = None
+    transforms: Mapping[str, Any] | None = None
+    scales: Mapping[str, Any] | None = None
+    diagnostics: dict[str, Any] | None = None
 
     @property
     def params(self):
@@ -97,22 +98,22 @@ class CanonicalizeExecutor(StageExecutor):
         from ..canonicalization import ScaleCanonicalizer
 
         self.recipe = get_recipe(self.family, **self.recipe_kwargs)
-        self.problem = self.recipe.build_problem(ref_sample.params)
+        self.problem = self.recipe.build_graph(ref_sample.params)
         self.canonicalizer = ScaleCanonicalizer()
 
     def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
         if self.recipe is None or self.problem is None or self.canonicalizer is None:
             raise RuntimeError("CanonicalizeExecutor not prepared.")
 
-        canonical_params, scale_factors, aux = self.canonicalizer.canonicalize(
+        canonical_params, scales, diagnostics = self.canonicalizer.canonicalize(
             self.problem,
             sample.params,
             **self.config.method_kwargs,
         )
         return StageResult(
             sample=sample.with_params(canonical_params),
-            artifacts={"scale_factors": scale_factors},
-            aux=dict(aux or {}),
+            scales=scales,
+            diagnostics=dict(diagnostics or {}),
         )
 
     def process_batch(
@@ -161,20 +162,20 @@ class MatchExecutor(StageExecutor):
         self.ref_sample: WeightSample | None = None
         self.ref_data = None
         self.ref_backend = None
-        self.scheduler = None
+        self.solver_sequence = None
         self.family = family
         self.recipe_kwargs = dict(recipe_kwargs)
 
     def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
         self.recipe = get_recipe(self.family, **self.recipe_kwargs)
-        self.problem = self.recipe.build_problem(ref_sample.params)
+        self.problem = self.recipe.build_graph(ref_sample.params)
         self.ref_sample = ref_sample
-        self.scheduler = build_solver_sequence(
+        self.solver_sequence = build_solver_sequence(
             objective=self.config.objective.type,
             objective_kwargs=self.config.objective.kwargs,
             schedule=self.config.solvers,
         )
-        backend = self.scheduler.backend
+        backend = self.solver_sequence.backend
         self.ref_backend = backend
         self.ref_data = self.problem.materialize(
             ref_sample.params, backend=backend, cache=True
@@ -189,17 +190,21 @@ class MatchExecutor(StageExecutor):
         self,
         sample: WeightSample,
         params: ParamTree,
-        perms: Mapping[str, Any],
-        aux: dict[str, Any] | None,
+        transforms: Mapping[str, Any],
+        diagnostics: dict[str, Any] | None,
     ) -> StageResult:
-        aux_payload = dict(aux or {})
-        aux_payload["objective"] = self.config.objective.type
-        aux_payload["solvers"] = self.config.solvers_payload()
-        aux_payload["barycenter_passes"] = self.config.barycenter_passes
+        diagnostics_payload = dict(diagnostics or {})
+        diagnostics_payload["objective"] = self.config.objective.type
+        diagnostics_payload["solvers"] = self.config.solvers_payload()
+        diagnostics_payload["barycenter_passes"] = self.config.barycenter_passes
+        diagnostics_payload["transform_families"] = {
+            group_id: group.transform_family
+            for group_id, group in self.problem.groups.items()
+        }
         return StageResult(
             sample=sample.with_params(params),
-            artifacts={"permutations": perms},
-            aux=aux_payload,
+            transforms=transforms,
+            diagnostics=diagnostics_payload,
         )
 
     def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
@@ -207,16 +212,16 @@ class MatchExecutor(StageExecutor):
             self.recipe is None
             or self.problem is None
             or self.ref_sample is None
-            or self.scheduler is None
+            or self.solver_sequence is None
             or self.ref_data is None
         ):
             raise RuntimeError("MatchExecutor not prepared.")
 
-        folded_params, perms, aux_info = match_sample(
+        folded_params, transforms, aux_info = match_sample(
             self.problem,
             self.ref_sample.params,
             sample.params,
-            scheduler=self.scheduler,
+            solver_sequence=self.solver_sequence,
             rng_key=self._rng_for_record(record),
             ref_data=self.ref_data,
             ref_backend=self.ref_backend,
@@ -225,7 +230,7 @@ class MatchExecutor(StageExecutor):
                 and record.index == self.reference_index
             ),
         )
-        return self._stage_result(sample, folded_params, perms, aux_info)
+        return self._stage_result(sample, folded_params, transforms, aux_info)
 
     def process_batch(
         self,
@@ -236,7 +241,7 @@ class MatchExecutor(StageExecutor):
             self.recipe is None
             or self.problem is None
             or self.ref_sample is None
-            or self.scheduler is None
+            or self.solver_sequence is None
             or self.ref_data is None
         ):
             raise RuntimeError("MatchExecutor not prepared.")
@@ -260,7 +265,7 @@ class MatchExecutor(StageExecutor):
             idx for idx in range(len(record_list)) if results[idx] is None
         ]
         if non_ref_positions:
-            if not self.scheduler.supports_batching:
+            if not self.solver_sequence.supports_batching:
                 for pos in non_ref_positions:
                     results[pos] = self.process_single(
                         record_list[pos], sample_batch[pos]
@@ -276,30 +281,30 @@ class MatchExecutor(StageExecutor):
                 self.problem,
                 self.ref_sample.params,
                 target_params,
-                scheduler=self.scheduler,
+                solver_sequence=self.solver_sequence,
                 ref_data=self.ref_data,
                 ref_backend=self.ref_backend,
                 rng_key=rng_key,
             )
             for pos, result in zip(non_ref_positions, batch_results, strict=True):
-                folded_params, perms, aux = result
+                folded_params, transforms, aux = result
                 results[pos] = self._stage_result(
-                    sample_batch[pos], folded_params, perms, aux
+                    sample_batch[pos], folded_params, transforms, aux
                 )
 
         return [res for res in results if res is not None]
 
     @property
     def supports_batching(self) -> bool:
-        if self.scheduler is None:
+        if self.solver_sequence is None:
             return False
-        return bool(self.scheduler.supports_batching)
+        return bool(self.solver_sequence.supports_batching)
 
     @property
     def prefers_gpu(self) -> bool:
-        if self.scheduler is None:
+        if self.solver_sequence is None:
             return any(step.solver == "sinkhorn" for step in self.config.solvers)
-        return bool(self.scheduler.prefers_gpu)
+        return bool(self.solver_sequence.prefers_gpu)
 
 
 __all__ = [

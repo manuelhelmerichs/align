@@ -1,4 +1,4 @@
-"""Shared constants and helpers for runtime components."""
+"""Runtime resource limits, progress intervals, and worker timeouts."""
 
 import os
 

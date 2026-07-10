@@ -1,4 +1,4 @@
-"""Plain CNN architecture recipe: conv stack -> flatten -> dense chain.
+"""Plain ConvNet architecture recipe: conv stack -> flatten -> dense chain.
 
 Targets LeNet-style trees (e.g. the bayesmates ``lenetti`` family): a sequence
 of convolutions (optionally separated by parameter-free, channel-preserving
@@ -18,7 +18,7 @@ contributes an independent linear term).
 
 Scale symmetries: bare conv channels and dense hidden units carry the usual
 positive-homogeneous scale symmetry, handled by the conv producer-energy plan
-(the ``conv_stack`` component selects it); non-homogeneous activations (e.g. the
+(the ``convnet`` component selects it); non-homogeneous activations (e.g. the
 GELU lenetti) are rejected loudly by that plan, which is correct — they have
 no scale symmetry.
 """
@@ -50,8 +50,8 @@ def _shape(node: Any) -> tuple[int, ...]:
 class ConvNetRecipe(ArchitectureRecipe):
     """Recipe for plain conv->flatten->dense parameter trees.
 
-    Emits one ``conv_stack`` component (conv channel groups, named by module
-    scope path) plus one ``fcn`` dense-stack component, tied together by the
+    Emits one ``features`` component of kind ``convnet`` (channel groups named by module
+    scope path) plus one ``classifier`` dense-chain component, tied together by the
     flatten-boundary interval bindings described in the module docstring.
     """
 
@@ -89,7 +89,7 @@ class ConvNetRecipe(ArchitectureRecipe):
             else:
                 raise ValueError(
                     f"convnet recipe found module {name!r} with a {rank}-D kernel "
-                    "under the layer root; only 4-D conv and 2-D dense kernels "
+                    "under the parameter root; only 4-D conv and 2-D dense kernels "
                     "are supported."
                 )
         if not conv_names:
@@ -111,7 +111,7 @@ class ConvNetRecipe(ArchitectureRecipe):
             [(*root, name) for name in dense_names],
         )
 
-    def build_problem(self, params: Mapping[str, Any]) -> SymmetryGraph:
+    def build_graph(self, params: Mapping[str, Any]) -> SymmetryGraph:
         conv_paths, dense_paths = self._discover(params)
         builder = SymmetryGraphBuilder(params, architecture=self.name)
 
@@ -123,7 +123,7 @@ class ConvNetRecipe(ArchitectureRecipe):
             in_channels, out_channels = kernel_shape[2], kernel_shape[3]
             if previous_out is not None and in_channels != previous_out:
                 raise ValueError(
-                    f"CNN conv layers do not chain: {'/'.join(path)} expects "
+                    f"ConvNet layers do not chain: {'/'.join(path)} expects "
                     f"{in_channels} input channels, previous conv produced "
                     f"{previous_out}. Channel-mixing ops between convs are "
                     "unsupported."
@@ -159,17 +159,17 @@ class ConvNetRecipe(ArchitectureRecipe):
             )
 
         builder.add_component(
-            "conv_stack",
-            "conv_stack",
+            "features",
+            "convnet",
             tuple(conv_groups),
             metadata={
                 "conv_layers": ["/".join(path) for path in conv_paths],
                 "spatial_positions": spatial_positions,
             },
         )
-        DenseChainRule(component_id="fcn", layer_paths=tuple(dense_paths)).build(
-            builder
-        )
+        DenseChainRule(
+            component_id="classifier", layer_paths=tuple(dense_paths)
+        ).add_to(builder)
 
         builder.metadata["conv_paths"] = conv_paths
         builder.metadata["dense_paths"] = dense_paths

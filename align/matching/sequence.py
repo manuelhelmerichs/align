@@ -55,30 +55,30 @@ def _check_permute_only_folded(problem, *data_mappings) -> None:
 class SolverSequence:
     """Run an explicit sequence of hard and soft alignment solvers."""
 
-    def __init__(self, objective, schedule: Sequence[SolverStep]) -> None:
-        if not schedule:
-            raise ValueError("Matching schedule must contain at least one solver step.")
+    def __init__(self, objective, steps: Sequence[SolverStep]) -> None:
+        if not steps:
+            raise ValueError("Solver sequence must contain at least one step.")
         self.objective = objective
-        self.schedule = tuple(schedule)
-        for step in self.schedule:
+        self.steps = tuple(steps)
+        for step in self.steps:
             if step.solver not in {"lap", "procrustes", "sinkhorn"}:
                 raise ValueError(f"Unknown matching solver {step.solver!r}.")
 
     @classmethod
-    def from_config(cls, objective, schedule) -> SolverSequence:
+    def from_steps(cls, objective, steps) -> SolverSequence:
         steps = [
             step if isinstance(step, SolverStep) else SolverStep.from_mapping(step)
-            for step in schedule
+            for step in steps
         ]
         return cls(objective, steps)
 
     @property
     def prefers_gpu(self) -> bool:
-        return any(step.solver == "sinkhorn" for step in self.schedule)
+        return any(step.solver == "sinkhorn" for step in self.steps)
 
     @property
     def supports_batching(self) -> bool:
-        return all(step.solver == "sinkhorn" for step in self.schedule)
+        return all(step.solver == "sinkhorn" for step in self.steps)
 
     @property
     def backend(self) -> str:
@@ -98,7 +98,7 @@ class SolverSequence:
         )
         _check_permute_only_folded(problem, ref_data, target_data)
         aux_steps: list[dict[str, Any]] = []
-        for index, step in enumerate(self.schedule):
+        for index, step in enumerate(self.steps):
             if step.solver == "lap":
                 state, aux = self._run_lap_step(
                     problem, ref_data, target_data, state, step
@@ -126,7 +126,7 @@ class SolverSequence:
         values = self.objective.value(problem, ref_data, target_data, state)
         aux_payload = {
             "objective": getattr(self.objective, "name", type(self.objective).__name__),
-            "schedule": [step.to_dict() for step in self.schedule],
+            "solvers": [step.to_dict() for step in self.steps],
             "steps": aux_steps,
             "objective_final": float(np.ravel(np.asarray(values))[0]),
         }
@@ -169,7 +169,7 @@ class SolverSequence:
         _check_permute_only_folded(problem, ref_data, target_data)
         state = TransformState.identity(problem, backend="jax")
         aux_steps: list[dict[str, Any]] = []
-        for index, step in enumerate(self.schedule):
+        for index, step in enumerate(self.steps):
             step_key = (
                 jax.random.fold_in(rng_key, index) if rng_key is not None else None
             )
@@ -198,7 +198,7 @@ class SolverSequence:
                     "objective": getattr(
                         self.objective, "name", type(self.objective).__name__
                     ),
-                    "schedule": [step.to_dict() for step in self.schedule],
+                    "solvers": [step.to_dict() for step in self.steps],
                     "steps": sample_steps,
                     "objective_final": float(losses[sample_idx]),
                 }

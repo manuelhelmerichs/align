@@ -27,17 +27,19 @@ from typing import Any
 
 import jax.numpy as jnp
 
-from ..symmetry import GraphConstraint, SymmetryGraph
+from ..symmetry import MHACircuitConstraint, SymmetryGraph
 from ..symmetry.tensor_ops import _descend
 
 
-def attention_constraints(problem: SymmetryGraph) -> tuple[GraphConstraint, ...]:
-    """Return the problem's ``attention_block`` constraints."""
+def mha_circuit_constraints(
+    problem: SymmetryGraph,
+) -> tuple[MHACircuitConstraint, ...]:
+    """Return the graph's MHA circuit constraints."""
 
     return tuple(
         constraint
         for constraint in problem.constraints
-        if constraint.kind == "attention_block"
+        if isinstance(constraint, MHACircuitConstraint)
     )
 
 
@@ -92,9 +94,10 @@ def attention_balancing_scales(
     """
 
     scales: dict[str, jnp.ndarray] = {}
-    for constraint in attention_constraints(problem):
-        metadata = constraint.metadata
-        tensor_ids = dict(metadata["tensors"])
+    for constraint in mha_circuit_constraints(problem):
+        tensor_ids = {
+            role: getattr(constraint, role) for role in ("query", "key", "value", "out")
+        }
         query_energy = _projection_energy(
             problem,
             params,
@@ -120,11 +123,11 @@ def attention_balancing_scales(
 
         qk_factors = ((query_energy + epsilon) / (key_energy + epsilon)) ** 0.25
         vo_factors = ((value_energy + epsilon) / (out_energy + epsilon)) ** 0.25
-        for slot, group_id in enumerate(metadata["qk_groups"]):
+        for slot, group_id in enumerate(constraint.qk_groups):
             scales[group_id] = qk_factors[slot]
-        for slot, group_id in enumerate(metadata["vo_groups"]):
+        for slot, group_id in enumerate(constraint.vo_groups):
             scales[group_id] = vo_factors[slot]
     return scales
 
 
-__all__ = ["attention_balancing_scales", "attention_constraints"]
+__all__ = ["attention_balancing_scales", "mha_circuit_constraints"]

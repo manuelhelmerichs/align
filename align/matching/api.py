@@ -29,11 +29,11 @@ def build_solver_sequence(
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[SolverStep | Mapping[str, Any]] | None = None,
 ) -> SolverSequence:
-    """Construct an objective and scheduler from config-like values."""
+    """Construct an objective and solver_sequence from config-like values."""
 
     objective_obj = get_objective(objective, **dict(objective_kwargs or {}))
     steps = schedule or default_lap_schedule()
-    return SolverSequence.from_config(objective_obj, steps)
+    return SolverSequence.from_steps(objective_obj, steps)
 
 
 def match_sample(
@@ -41,7 +41,7 @@ def match_sample(
     ref_params: ParamTree,
     params: ParamTree,
     *,
-    scheduler: SolverSequence | None = None,
+    solver_sequence: SolverSequence | None = None,
     objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[SolverStep | Mapping[str, Any]] | None = None,
@@ -52,12 +52,12 @@ def match_sample(
 ) -> tuple[ParamTree, Mapping[str, Any], dict[str, Any] | None]:
     """Matching one target parameter tree using an ``SymmetryGraph``."""
 
-    scheduler = scheduler or build_solver_sequence(
+    solver_sequence = solver_sequence or build_solver_sequence(
         objective=objective,
         objective_kwargs=objective_kwargs,
         schedule=schedule,
     )
-    backend = ref_backend or scheduler.backend
+    backend = ref_backend or solver_sequence.backend
     if ref_data is None:
         ref_data = problem.materialize(ref_params, backend=backend, cache=True)
 
@@ -66,13 +66,13 @@ def match_sample(
         return params, state.to_artifacts(), {"reference": True}
 
     target_data = problem.materialize(params, backend=backend, cache=False)
-    state, aux_info = scheduler.solve(
+    state, aux_info = solver_sequence.solve(
         problem,
         ref_data,
         target_data,
         rng_key=rng_key,
     )
-    aligned_params = problem.apply(params, state)
+    aligned_params = problem.apply_transforms(params, state)
     return aligned_params, state.to_artifacts(), aux_info
 
 
@@ -81,7 +81,7 @@ def match_batch(
     ref_params: ParamTree,
     params_batch: Sequence[ParamTree],
     *,
-    scheduler: SolverSequence | None = None,
+    solver_sequence: SolverSequence | None = None,
     objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[SolverStep | Mapping[str, Any]] | None = None,
@@ -93,16 +93,16 @@ def match_batch(
 
     if not params_batch:
         return []
-    scheduler = scheduler or build_solver_sequence(
+    solver_sequence = solver_sequence or build_solver_sequence(
         objective=objective,
         objective_kwargs=objective_kwargs,
         schedule=schedule,
     )
-    backend = ref_backend or scheduler.backend
+    backend = ref_backend or solver_sequence.backend
     if ref_data is None:
         ref_data = problem.materialize(ref_params, backend=backend, cache=True)
 
-    states, aux_batch = scheduler.solve_batch(
+    states, aux_batch = solver_sequence.solve_batch(
         problem,
         ref_data,
         params_batch,
@@ -111,7 +111,7 @@ def match_batch(
     )
     results = []
     for params, state, aux in zip(params_batch, states, aux_batch, strict=True):
-        aligned_params = problem.apply(params, state)
+        aligned_params = problem.apply_transforms(params, state)
         results.append((aligned_params, state.to_artifacts(), aux))
     return results
 
@@ -124,7 +124,7 @@ def match_component_across(
     target_params: ParamTree,
     target_block: str,
     *,
-    scheduler: SolverSequence | None = None,
+    solver_sequence: SolverSequence | None = None,
     objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[SolverStep | Mapping[str, Any]] | None = None,
@@ -145,22 +145,22 @@ def match_component_across(
         ref_sub, ref_block, target_sub, target_block
     )
 
-    scheduler = scheduler or build_solver_sequence(
+    solver_sequence = solver_sequence or build_solver_sequence(
         objective=objective,
         objective_kwargs=objective_kwargs,
         schedule=schedule,
     )
-    backend = scheduler.backend
+    backend = solver_sequence.backend
     ref_data_own = ref_sub.materialize(ref_params, backend=backend, cache=True)
     ref_data = {tensor_map[ref_id]: ref_data_own[ref_id] for ref_id in ref_sub.tensors}
     target_data = target_sub.materialize(target_params, backend=backend, cache=False)
-    state, aux_info = scheduler.solve(
+    state, aux_info = solver_sequence.solve(
         target_sub,
         ref_data,
         target_data,
         rng_key=rng_key,
     )
-    aligned_params = target_sub.apply(target_params, state)
+    aligned_params = target_sub.apply_transforms(target_params, state)
     aux_payload = dict(aux_info or {})
     aux_payload["ref_block"] = ref_block
     aux_payload["target_block"] = target_block

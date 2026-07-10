@@ -1,8 +1,9 @@
-"""Permutation symmetry removal (matching) for graph-native alignment problems.
+"""Matrix-valued symmetry matching over graph-native alignment data.
 
 Builds on the shared ``align.symmetry`` graph core: objectives score the graph
-tensor distance, solvers (LAP/Sinkhorn) optimize permutations, the scheduler
-runs a solver schedule, and :class:`TransformState` carries the solution. The
+tensor distance, solvers optimize supported transform families, a fixed
+:class:`SolverSequence` runs the configured steps, and :class:`TransformState`
+carries the solution. The
 :mod:`align.matching.api` surface ties these together for callers.
 """
 

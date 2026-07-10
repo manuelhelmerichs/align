@@ -8,7 +8,12 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 
-from ..symmetry import apply_matrix_to_axis, binding_axis_interval
+from ..symmetry import (
+    GQARoPECircuitConstraint,
+    MHACircuitConstraint,
+    apply_matrix_to_axis,
+    binding_axis_interval,
+)
 from ..symmetry.tensor_ops import (
     binding_indexer,
     binding_selector,
@@ -206,9 +211,8 @@ def _require_lap_linearizable(problem, group_id: str) -> None:
     """Reject groups whose exact hard update is not a linear assignment."""
 
     for constraint in problem.constraints:
-        if (
-            constraint.kind == "attention_block"
-            and constraint.metadata.get("head_group") == group_id
+        if isinstance(constraint, MHACircuitConstraint) and (
+            constraint.head_group == group_id
         ):
             raise UnsupportedGroupLinearization(
                 f"Group {group_id!r} is an attention head group; its generic "
@@ -217,9 +221,8 @@ def _require_lap_linearizable(problem, group_id: str) -> None:
                 "(lap schedules do this automatically) or a Sinkhorn "
                 "schedule."
             )
-        if (
-            constraint.kind == "gqa_attention_block"
-            and constraint.metadata.get("kv_group") == group_id
+        if isinstance(constraint, GQARoPECircuitConstraint) and (
+            constraint.kv_group == group_id
         ):
             raise UnsupportedGroupLinearization(
                 f"Group {group_id!r} is a GQA kv-group head group; its "

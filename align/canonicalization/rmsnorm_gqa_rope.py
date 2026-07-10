@@ -1,7 +1,7 @@
-"""Modern-transformer scale canonicalization: RMSNorm gamma, RoPE qk pairs, vo.
+"""RMSNorm/RoPE/GQA scale canonicalization: gamma, qk pairs, and vo circuits.
 
 Three exact diagonal symmetries coexist in the RMSNorm + RoPE + GQA family
-(derivations in the modern-transformer subsection of docs/theory.md):
+(derivations in the RMSNorm/RoPE/GQA subsection of docs/theory.md):
 
 - **RMSNorm post-norm scale.** ``RMSNorm(x) = gamma * x / rms(x)`` depends on
   ``gamma`` only linearly, so per channel ``gamma_c -> gamma_c / s_c`` with
@@ -13,7 +13,7 @@ Three exact diagonal symmetries coexist in the RMSNorm + RoPE + GQA family
   ``+1``: this removes both the scale and the sign freedom (consumers absorb
   the signs) and is the precondition for orthogonal stream alignment. The
   residual stream itself carries no per-channel scale symmetry (rescaling a
-  stream channel changes ``rms``), so these scales live on ``rms_norm``
+  stream channel changes ``rms``), so these scales live on typed RMSNorm-scale
   constraints, not on the stream group; they are applied by a dedicated
   helper because the touched axes are also stream-bound.
 
@@ -44,38 +44,44 @@ from typing import Any
 
 import jax.numpy as jnp
 
-from ..symmetry import GraphConstraint, SymmetryGraph
+from ..symmetry import (
+    GQARoPECircuitConstraint,
+    RMSNormScaleConstraint,
+    SymmetryGraph,
+)
 from ..symmetry.tensor_ops import _descend
 from ._tree import replace_paths
 
 
-def rms_norm_constraints(problem: SymmetryGraph) -> tuple[GraphConstraint, ...]:
-    """Return the problem's ``rms_norm`` constraints."""
-
-    return tuple(
-        constraint
-        for constraint in problem.constraints
-        if constraint.kind == "rms_norm"
-    )
-
-
-def gqa_attention_constraints(
+def rmsnorm_scale_constraints(
     problem: SymmetryGraph,
-) -> tuple[GraphConstraint, ...]:
-    """Return the problem's ``gqa_attention_block`` constraints."""
+) -> tuple[RMSNormScaleConstraint, ...]:
+    """Return the graph's RMSNorm scale constraints."""
 
     return tuple(
         constraint
         for constraint in problem.constraints
-        if constraint.kind == "gqa_attention_block"
+        if isinstance(constraint, RMSNormScaleConstraint)
     )
 
 
-def has_modern_transformer_plan(problem: SymmetryGraph) -> bool:
+def gqa_rope_circuit_constraints(
+    problem: SymmetryGraph,
+) -> tuple[GQARoPECircuitConstraint, ...]:
+    """Return the graph's GQA + RoPE circuit constraints."""
+
+    return tuple(
+        constraint
+        for constraint in problem.constraints
+        if isinstance(constraint, GQARoPECircuitConstraint)
+    )
+
+
+def has_rmsnorm_gqa_rope_transformer_plan(problem: SymmetryGraph) -> bool:
     """True if the problem carries RMSNorm or GQA attention constraints."""
 
-    return bool(rms_norm_constraints(problem)) or bool(
-        gqa_attention_constraints(problem)
+    return bool(rmsnorm_scale_constraints(problem)) or bool(
+        gqa_rope_circuit_constraints(problem)
     )
 
 
@@ -102,8 +108,8 @@ def rms_gamma_scales(
     """
 
     scales: dict[str, jnp.ndarray] = {}
-    for constraint in rms_norm_constraints(problem):
-        scale_id = str(constraint.metadata["scale"])
+    for constraint in rmsnorm_scale_constraints(problem):
+        scale_id = constraint.scale
         gamma = jnp.asarray(_descend(params, problem.tensors[scale_id].path))
         energy = jnp.square(gamma)
         signs = jnp.where(gamma < 0.0, -1.0, 1.0)
@@ -120,21 +126,21 @@ def apply_rms_gamma_scales(
 ) -> Mapping[str, Any]:
     """Apply the exact RMSNorm post-norm scale symmetry.
 
-    For each ``rms_norm`` constraint whose scale tensor id appears in
+    For each RMSNorm scale constraint whose tensor id appears in
     ``scales``: divide gamma by ``s`` and multiply every recorded consumer
     kernel along its stream input axis by ``s``.
     """
 
     replacements: list[tuple[tuple[str, ...], Any]] = []
-    for constraint in rms_norm_constraints(problem):
-        scale_id = str(constraint.metadata["scale"])
+    for constraint in rmsnorm_scale_constraints(problem):
+        scale_id = constraint.scale
         if scale_id not in scales:
             continue
         factors = jnp.asarray(scales[scale_id])
         gamma_path = problem.tensors[scale_id].path
         gamma = jnp.asarray(_descend(params, gamma_path))
         replacements.append((gamma_path, gamma / factors))
-        for tensor_id, axis in constraint.metadata["consumers"]:
+        for tensor_id, axis in constraint.consumers:
             path = problem.tensors[str(tensor_id)].path
             tensor = jnp.asarray(_descend(params, path))
             replacements.append((path, _multiply_axis(tensor, factors, axis=int(axis))))
@@ -164,10 +170,11 @@ def qk_pair_scales(
     """
 
     scales: dict[str, jnp.ndarray] = {}
-    for constraint in gqa_attention_constraints(problem):
-        metadata = constraint.metadata
-        tensors = dict(metadata["tensors"])
-        half = int(metadata["head_dim"]) // 2
+    for constraint in gqa_rope_circuit_constraints(problem):
+        tensors = {
+            role: getattr(constraint, role) for role in ("query", "key", "value", "out")
+        }
+        half = constraint.head_dim // 2
         query = jnp.asarray(_descend(params, problem.tensors[tensors["query"]].path))
         key = jnp.asarray(_descend(params, problem.tensors[tensors["key"]].path))
         query_sq = jnp.square(query)
@@ -176,7 +183,7 @@ def qk_pair_scales(
         query_energy = jnp.sum(query_sq[..., :half] + query_sq[..., half:], axis=(0, 2))
         key_energy = jnp.sum(key_sq[..., :half] + key_sq[..., half:], axis=0)
         factors = ((query_energy + epsilon) / (key_energy + epsilon)) ** 0.25
-        for slot, group_id in enumerate(metadata["qk_groups"]):
+        for slot, group_id in enumerate(constraint.qk_groups):
             scales[group_id] = _pair_tiled(factors[slot])
     return scales
 
@@ -198,25 +205,26 @@ def gqa_vo_balancing_scales(
     """
 
     scales: dict[str, jnp.ndarray] = {}
-    for constraint in gqa_attention_constraints(problem):
-        metadata = constraint.metadata
-        tensors = dict(metadata["tensors"])
+    for constraint in gqa_rope_circuit_constraints(problem):
+        tensors = {
+            role: getattr(constraint, role) for role in ("query", "key", "value", "out")
+        }
         value = jnp.asarray(_descend(params, problem.tensors[tensors["value"]].path))
         out = jnp.asarray(_descend(params, problem.tensors[tensors["out"]].path))
         value_energy = jnp.sum(jnp.square(value), axis=0)  # (G, dk)
         out_energy = jnp.sum(jnp.square(out), axis=(1, 3))  # (G, dk)
         factors = ((value_energy + epsilon) / (out_energy + epsilon)) ** 0.25
-        for slot, group_id in enumerate(metadata["vo_groups"]):
+        for slot, group_id in enumerate(constraint.vo_groups):
             scales[group_id] = factors[slot]
     return scales
 
 
 __all__ = [
     "apply_rms_gamma_scales",
-    "gqa_attention_constraints",
+    "gqa_rope_circuit_constraints",
     "gqa_vo_balancing_scales",
-    "has_modern_transformer_plan",
+    "has_rmsnorm_gqa_rope_transformer_plan",
     "qk_pair_scales",
     "rms_gamma_scales",
-    "rms_norm_constraints",
+    "rmsnorm_scale_constraints",
 ]
