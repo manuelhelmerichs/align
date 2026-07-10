@@ -1,7 +1,7 @@
-"""Scale symmetry removal: normalization of dense ReLU-style MLPs.
+"""Scale symmetry removal: canonicalization of dense ReLU-style MLPs.
 
 Bundles the dense-layer representation (:class:`DenseLayer`), activation
-validation, the scale-normalization math kernel, and the graph-driven
+validation, the scale-canonicalization math kernel, and the graph-driven
 :class:`ScaleCanonicalizer`/:class:`ScaleState` that apply it over an
 ``align.symmetry.SymmetryGraph``.
 """

@@ -1,3 +1,5 @@
+schema_version: 2
+
 paths:
   experiment_root: results/example_smile_resnet_run
   samples_dir: null
@@ -5,57 +7,54 @@ paths:
   output_dir: null
   sample_format: pytree_npz
 
-architecture: resnet
-adapter:
-  layer_root: core
+architecture:
+  family: residual_convnet
+  parameter_root: core
   batch_stats_root: batch_stats
-  module_graph: null
-  residual_joins: []
+  residual_topology: null
+  residual_connections: []
+
+pipeline: [canonicalize, match]
 
 selection:
   chain_indices: null
   samples_per_chain: null
   sample_step: 1
   max_total: null
-  ref_chain: 0
-  ref_sample: 0
+  reference_chain: 0
+  reference_sample: 0
 
-normalize:
-  enabled: true
-  method: scale_normalize
-  scale_normalize:
-    # FRN/TLU (and BN/ReLU) stacks carry the exact post-normalization
-    # affine scale symmetry: gamma/beta/tau are canonicalized to unit
-    # joint energy per channel group, consumers absorb the factors.
-    activation: tlu
+canonicalize:
+  # FRN/TLU (and BN/ReLU) stacks carry the exact post-normalization affine
+  # scale symmetry: gamma/beta/tau are canonicalized to unit joint energy per
+  # channel group, consumers absorb the factors.
+  activation: tlu
 
-rebasin:
-  enabled: true
-  objective: l2_weight
-  objective_kwargs: {}
-  layer_root: core
+match:
+  objective:
+    type: euclidean
   seed: 0
-  refine_passes: 2
-  schedule:
+  barycenter_passes: 2
+  solvers:
     - solver: sinkhorn
       tau: 0.1
-      n_sinkhorn_iters: 50
-      lr: 0.01
+      sinkhorn_iterations: 50
+      learning_rate: 0.01
       max_steps: 200
-      tol: 1.0e-05
+      tolerance: 1.0e-05
       init_scale: 0.01
       record_loss_history: false
     # Add a final LAP polish only for groups known to be LAP-compatible:
     # - solver: lap
     #   groups: [core/Conv_1]
     #   max_sweeps: 5
-    #   tol: 0.0
+    #   tolerance: 0.0
 
 runtime:
   resume: false
   dry_run: false
   list_samples: false
-  list_problems: false
+  describe_symmetry: false
   validate_only: false
   force_cpu: false
   force_gpu: false

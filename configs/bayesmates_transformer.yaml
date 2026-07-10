@@ -1,13 +1,15 @@
 # Transformer alignment example (bayesmates GPT layout).
 #
-# Inspect the block decomposition first:
-#   uv run align configs/examples/bayesmates_transformer.yaml --list-problems
+# Inspect the weight-space symmetry first:
+#   uv run align configs/examples/bayesmates_transformer.yaml --describe-symmetry
 #
-# The schedule below demonstrates per-block solver configuration (issue #12):
-# attention blocks and the residual stream run first, FFN blocks afterwards,
-# then a final sweep over everything. A single `- solver: lap` step over all
-# groups is equally valid; `lap` routes attention head groups through the
-# structured circuit-cost update automatically.
+# The schedule below demonstrates per-component solver configuration: attention
+# components and the residual stream run first, FFN components afterwards, then
+# a final sweep over everything. A single `- solver: lap` step over all groups
+# is equally valid; `lap` routes attention head groups through the structured
+# circuit-cost update automatically.
+
+schema_version: 2
 
 paths:
   experiment_root: /Users/manuel/Projects/align/data/bayesmates_module_graph_samples/bayesmates_gpt_tiny
@@ -16,53 +18,50 @@ paths:
   output_dir: null
   sample_format: pytree_npz
 
-architecture: transformer
-adapter:
-  layer_root: ""  # GPT blocks sit at the tree root; use "core" for ViT.
+architecture:
+  family: layernorm_mha_transformer
+  parameter_root: ""  # GPT blocks sit at the tree root; use "core" for ViT.
+
+pipeline: [canonicalize, match]
 
 selection:
   chain_indices: null
   samples_per_chain: null
   sample_step: 1
   max_total: null
-  ref_chain: 0
-  ref_sample: 0
+  reference_chain: 0
+  reference_sample: 0
 
-normalize:
-  enabled: true
-  method: scale_normalize
-  scale_normalize:
-    # Attention circuits carry an exact diagonal scale symmetry per
-    # intra-head dimension (qk and vo); normalization balances the
-    # query/key and value/out energies. GELU FFN hidden units have no
-    # scale symmetry and stay untouched.
-    activation: gelu
+canonicalize:
+  # Attention circuits carry an exact diagonal scale symmetry per intra-head
+  # dimension (qk and vo); canonicalization balances the query/key and
+  # value/out energies. GELU FFN hidden units have no scale symmetry and stay
+  # untouched.
+  activation: gelu
 
-rebasin:
-  enabled: true
-  objective: l2_weight
-  objective_kwargs: {}
-  layer_root: null
+match:
+  objective:
+    type: euclidean
   seed: 0
-  refine_passes: 2
-  schedule:
+  barycenter_passes: 2
+  solvers:
     - solver: lap
       max_sweeps: 5
-      tol: 0.0
-      blocks: ["stream", "*/attention"]
+      tolerance: 0.0
+      components: ["stream", "*/attention"]
     - solver: lap
       max_sweeps: 5
-      tol: 0.0
-      blocks: ["*/ffn"]
+      tolerance: 0.0
+      components: ["*/ffn"]
     - solver: lap
       max_sweeps: 10
-      tol: 0.0
+      tolerance: 0.0
 
 runtime:
   resume: false
   dry_run: false
   list_samples: false
-  list_problems: false
+  describe_symmetry: false
   validate_only: false
   force_cpu: true
   force_gpu: false

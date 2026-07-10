@@ -47,7 +47,7 @@ def _check_permute_only_folded(problem, *data_mappings) -> None:
                     f"class, but {binding.tensor_id!r} is not folded to 1 "
                     "(max deviation "
                     f"{float(np.max(np.abs(tensor - 1.0))):.3g}). Run scale "
-                    "normalization (RMSNorm gamma folding) before rebasin, or "
+                    "canonicalization (RMSNorm gamma folding) before matching, or "
                     "declare the stream as 'signed_permutation'."
                 )
 
@@ -57,12 +57,12 @@ class SolverSequence:
 
     def __init__(self, objective, schedule: Sequence[SolverStep]) -> None:
         if not schedule:
-            raise ValueError("Rebasin schedule must contain at least one solver step.")
+            raise ValueError("Matching schedule must contain at least one solver step.")
         self.objective = objective
         self.schedule = tuple(schedule)
         for step in self.schedule:
             if step.solver not in {"lap", "procrustes", "sinkhorn"}:
-                raise ValueError(f"Unknown rebasin solver {step.solver!r}.")
+                raise ValueError(f"Unknown matching solver {step.solver!r}.")
 
     @classmethod
     def from_config(cls, objective, schedule) -> SolverSequence:

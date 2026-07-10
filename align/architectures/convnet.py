@@ -88,20 +88,20 @@ class ConvNetRecipe(ArchitectureRecipe):
                 dense_names.append(str(name))
             else:
                 raise ValueError(
-                    f"CNN adapter found module {name!r} with a {rank}-D kernel "
+                    f"convnet recipe found module {name!r} with a {rank}-D kernel "
                     "under the layer root; only 4-D conv and 2-D dense kernels "
                     "are supported."
                 )
         if not conv_names:
             raise ValueError(
                 f"No conv layers (4-D kernels) discovered under "
-                f"'{self.parameter_root}'; use the dense_mlp adapter for pure "
+                f"'{self.parameter_root}'; use the mlp recipe for pure "
                 "dense trees."
             )
         if not dense_names:
             raise ValueError(
                 f"No dense layers (2-D kernels) discovered under "
-                f"'{self.parameter_root}'; the CNN adapter needs a dense chain "
+                f"'{self.parameter_root}'; the convnet recipe needs a dense chain "
                 "after the flatten."
             )
         conv_names.sort(key=_natural_key)

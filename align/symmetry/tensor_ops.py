@@ -2,7 +2,7 @@
 
 These helpers are backend-agnostic (NumPy or ``jax.numpy``) and underpin both the
 graph problem (axis bindings, scale/permutation actions) and the architecture
-adapters that emit it.
+recipes that emit it.
 """
 
 from collections.abc import Mapping, Sequence

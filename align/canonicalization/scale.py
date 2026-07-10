@@ -1,12 +1,11 @@
-"""Graph-driven scale normalization.
+"""Graph-driven scale canonicalization.
 
 The :class:`ScaleCanonicalizer` is the deterministic canonicalization counterpart of
-the rebasin solver stack: it reads producer/consumer axis roles off an
+the matching solver stack: it reads producer/consumer axis roles off an
 :class:`~align.symmetry.SymmetryGraph`, computes positive per-group scale
 vectors, and applies the symmetry through
 :meth:`align.symmetry.SymmetryGraph.apply_scales`. Degenerate-neuron cleanup
-and optional classification-head rescaling remain explicit post-passes because
-they are not positive scale symmetries.
+remains an explicit post-pass because it is not a positive scale symmetry.
 
 Plans are dispatched on problem structure:
 
@@ -21,12 +20,12 @@ Plans are dispatched on problem structure:
   per intra-head dimension. This symmetry is activation-independent; all
   other groups (stream, heads, GELU FFN hidden units) carry no per-channel
   scale symmetry and stay at identity.
-- **Dense chain normalization** for linear ReLU-MLP graphs (each permutation
+- **Dense chain canonicalization** for linear ReLU-MLP graphs (each permutation
   group has a single ``out``-role producer kernel, kernels are 2-D, and the
   groups form a single chain feeding one output head). Residual ties and
   branches give a group multiple ``out``-role producers and are rejected;
   convolutional kernels are rejected as non-dense. Two canonical forms are
-  available via ``mode``: ``balanced`` (default) picks the minimum-norm orbit
+  available via ``strategy``: ``balanced`` (default) picks the minimum-norm orbit
   representative by equalizing each hidden unit's incoming and outgoing
   energies (a convex fixed point, the same philosophy as attention circuit
   balancing), while ``unit_norm`` normalizes incoming norms to 1
@@ -90,7 +89,7 @@ def _dense_scale_plan(problem: SymmetryGraph) -> _DenseScalePlan:
     tensors = problem.tensors
     if not problem.group_order:
         raise ValueError(
-            "Scale normalization requires at least one hidden permutation group."
+            "Scale canonicalization requires at least one hidden permutation group."
         )
     sites: list[_DenseScaleSite] = []
     producer_kernel_ids: set[str] = set()
@@ -118,44 +117,44 @@ def _dense_scale_plan(problem: SymmetryGraph) -> _DenseScalePlan:
         )
         if not kernel_ids:
             raise ValueError(
-                f"Scale normalization requires group {group_id!r} to have an "
+                f"Scale canonicalization requires group {group_id!r} to have an "
                 "out-role producer kernel, but none was found."
             )
         if len(kernel_ids) > 1:
             raise ValueError(
-                f"Scale normalization is undefined for group {group_id!r}: it has "
+                f"Scale canonicalization is undefined for group {group_id!r}: it has "
                 f"{len(kernel_ids)} out-role producers ({', '.join(kernel_ids)}). "
                 "Residual ties and branches need explicit shared-scale semantics; "
-                "disable the normalize stage for this architecture."
+                "drop the canonicalize stage for this architecture."
             )
         kernel_id = kernel_ids[0]
         kernel_shape = tensors[kernel_id].shape
         if len(kernel_shape) != 2:
             raise ValueError(
-                f"Scale normalization only supports 2-D dense kernels, but the "
+                f"Scale canonicalization only supports 2-D dense kernels, but the "
                 f"producer for group {group_id!r} ({kernel_id}) has shape "
                 f"{kernel_shape}. Convolutional / non-dense architectures are "
-                "unsupported; disable the normalize stage."
+                "unsupported; drop the canonicalize stage."
             )
         kernel_out_bindings = [
             binding for binding in out_bindings if binding.tensor_id == kernel_id
         ]
         if len(kernel_out_bindings) != 1:
             raise ValueError(
-                f"Scale normalization requires group {group_id!r} to bind exactly "
+                f"Scale canonicalization requires group {group_id!r} to bind exactly "
                 f"one producer output axis on {kernel_id}, found "
                 f"{len(kernel_out_bindings)}."
             )
         out_axis, _, _ = binding_axis_interval(kernel_shape, kernel_out_bindings[0])
         if out_axis != 1:
             raise ValueError(
-                "Scale normalization expects dense producer kernels with the "
+                "Scale canonicalization expects dense producer kernels with the "
                 f"group on axis 1, but {kernel_id} binds group {group_id!r} on "
                 f"axis {out_axis}."
             )
         if len(bias_ids) != 1:
             raise ValueError(
-                f"Scale normalization requires exactly one out-role bias for group "
+                f"Scale canonicalization requires exactly one out-role bias for group "
                 f"{group_id!r}, found {len(bias_ids)}."
             )
         bias_id = bias_ids[0]
@@ -164,7 +163,7 @@ def _dense_scale_plan(problem: SymmetryGraph) -> _DenseScalePlan:
         ]
         if len(bias_bindings) != 1:
             raise ValueError(
-                f"Scale normalization requires group {group_id!r} to bind exactly "
+                f"Scale canonicalization requires group {group_id!r} to bind exactly "
                 f"one producer bias axis on {bias_id}, found {len(bias_bindings)}."
             )
         in_bindings = [
@@ -176,21 +175,21 @@ def _dense_scale_plan(problem: SymmetryGraph) -> _DenseScalePlan:
         if previous_group is not None:
             if len(in_bindings) != 1 or in_bindings[0].group != previous_group:
                 raise ValueError(
-                    "Scale normalization requires a single linear chain, but the "
+                    "Scale canonicalization requires a single linear chain, but the "
                     f"producer for group {group_id!r} does not consume the previous "
                     f"group {previous_group!r}."
                 )
             in_axis, _, _ = binding_axis_interval(kernel_shape, in_bindings[0])
             if in_axis != 0:
                 raise ValueError(
-                    "Scale normalization expects dense producer kernels with the "
+                    "Scale canonicalization expects dense producer kernels with the "
                     f"previous group on axis 0, but {kernel_id} binds group "
                     f"{previous_group!r} on axis {in_axis}."
                 )
             in_binding = in_bindings[0]
         elif in_bindings:
             raise ValueError(
-                "Scale normalization requires a single linear chain, but the first "
+                "Scale canonicalization requires a single linear chain, but the first "
                 f"producer for group {group_id!r} consumes another hidden group."
             )
         producer_kernel_ids.add(kernel_id)
@@ -216,7 +215,7 @@ def _dense_scale_plan(problem: SymmetryGraph) -> _DenseScalePlan:
     )
     if len(head_ids) != 1:
         raise ValueError(
-            "Scale normalization requires exactly one output head consuming the "
+            "Scale canonicalization requires exactly one output head consuming the "
             f"last group {last_group!r}, found {len(head_ids)}: {head_ids}."
         )
     head_path = tensors[head_ids[0]].path
@@ -308,7 +307,7 @@ def _balanced_group_scales(
     producer column and bias by ``s``, multiply the consumer row by ``s``,
     with the balanced update ``s = ((E_out + eps) / (E_in + eps))^(1/4)``)
     converges to the unique minimum-norm representative. Degenerate units
-    (mask from the raw incoming energy, as in ``unit_norm`` mode) keep scale 1
+    (mask from the raw incoming energy, as in ``unit_norm`` strategy) keep scale 1
     so the post-passes see the same contract.
     """
 

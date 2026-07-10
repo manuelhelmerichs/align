@@ -1,7 +1,7 @@
 """Dense-layer data structures used by dense MLP utilities.
 
 This module intentionally centralizes dense-layer representations so that
-architecture adapters and normalization do not depend on `align.matching` for
+architecture recipes and canonicalization do not depend on `align.matching` for
 dense-specific helpers.
 """
 

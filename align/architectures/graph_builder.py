@@ -1,9 +1,9 @@
-"""Shared problem accumulator used by component adapters.
+"""Shared problem accumulator used by component rules.
 
 A :class:`SymmetryGraphBuilder` collects groups, tensors, bindings, constraints, and
-component specs while component adapters run, then assembles and validates the final
+component specs while component rules run, then assembles and validates the final
 :class:`~align.symmetry.SymmetryGraph`. Tensor specs are derived from the
-parameter tree the builder was created for, so component adapters only pass paths.
+parameter tree the builder was created for, so component rules only pass paths.
 """
 
 from collections.abc import Mapping
@@ -23,7 +23,7 @@ from ..symmetry.tensor_ops import _descend
 
 
 class SymmetryGraphBuilder:
-    """Accumulates one alignment problem across component adapters."""
+    """Accumulates one alignment problem across component rules."""
 
     def __init__(self, params: Mapping[str, Any], *, architecture: str) -> None:
         self.params = params

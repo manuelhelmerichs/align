@@ -1,3 +1,5 @@
+schema_version: 2
+
 paths:
   experiment_root: results/example_mile_or_smile_run
   samples_dir: null
@@ -5,49 +7,41 @@ paths:
   output_dir: null
   sample_format: pytree_npz
 
-architecture: dense_mlp
-adapter:
-  layer_root: params.fcn
+architecture:
+  family: mlp
+  parameter_root: params.fcn
+
+pipeline: [canonicalize, match]
 
 selection:
   chain_indices: null
   samples_per_chain: null
   sample_step: 1
   max_total: null
-  ref_chain: 0
-  ref_sample: 0
+  reference_chain: 0
+  reference_sample: 0
 
-normalize:
-  enabled: true
-  method: scale_normalize
-  layer_root: params.fcn
-  task_type: regression
-  num_classes: null
-  scale_normalize:
-    epsilon: 1e-8
-    degenerate_handling: preserve
-    normalize_biases: true
-    activation: relu
-    activation_kwargs: {}
-    classification_head_rescale: false
+canonicalize:
+  epsilon: 1e-8
+  degenerate_channels: preserve
+  include_bias_in_norm: true
+  activation: relu
 
-rebasin:
-  enabled: true
-  objective: l2_weight
-  objective_kwargs: {}
-  layer_root: params.fcn
+match:
+  objective:
+    type: euclidean
   seed: 0
-  refine_passes: 2
-  schedule:
+  barycenter_passes: 2
+  solvers:
     - solver: lap
       max_sweeps: 25
-      tol: 0.0
+      tolerance: 0.0
 
 runtime:
   resume: false
   dry_run: false
   list_samples: false
-  list_problems: false
+  describe_symmetry: false
   validate_only: false
   force_cpu: true
   force_gpu: false

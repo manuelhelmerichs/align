@@ -1,4 +1,4 @@
-"""Scale-normalization math kernel for dense ReLU-style MLPs."""
+"""Scale-canonicalization math kernel for dense ReLU-style MLPs."""
 
 import jax
 import jax.numpy as jnp

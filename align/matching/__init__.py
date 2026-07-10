@@ -1,4 +1,4 @@
-"""Permutation symmetry removal (rebasin) for graph-native alignment problems.
+"""Permutation symmetry removal (matching) for graph-native alignment problems.
 
 Builds on the shared ``align.symmetry`` graph core: objectives score the graph
 tensor distance, solvers (LAP/Sinkhorn) optimize permutations, the scheduler

@@ -86,7 +86,7 @@ def conv_stack_producer_scales(
         ]
         if not producers:
             raise ValueError(
-                f"Conv-stack scale normalization found no scale-carrying "
+                f"Conv-stack scale canonicalization found no scale-carrying "
                 f"producers for group {group_id!r}; the graph marks every "
                 "producer as scale-exempt."
             )
@@ -95,7 +95,7 @@ def conv_stack_producer_scales(
             spec = problem.tensors[binding.tensor_id]
             if binding_selector(spec.shape, binding):
                 raise ValueError(
-                    "Conv-stack scale normalization does not support "
+                    "Conv-stack scale canonicalization does not support "
                     f"selector-restricted producer bindings ({binding.tensor_id})."
                 )
             tensor = jnp.asarray(_descend(params, spec.path))

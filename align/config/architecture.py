@@ -1,7 +1,7 @@
 """Discriminated architecture-recipe selection configuration.
 
 The ``architecture`` mapping names a recipe ``family`` and carries exactly the
-discovery options that family accepts; there is no separate free-form adapter
+discovery options that family accepts; there is no separate free-form options
 mapping.
 """
 
@@ -26,7 +26,9 @@ _FAMILY_OPTIONS: dict[str, frozenset[str]] = {
         }
     ),
     "layernorm_mha_transformer": frozenset({"parameter_root"}),
-    "rmsnorm_gqa_rope_transformer": frozenset({"parameter_root"}),
+    "rmsnorm_gqa_rope_transformer": frozenset(
+        {"parameter_root", "stream_transform_family"}
+    ),
 }
 
 

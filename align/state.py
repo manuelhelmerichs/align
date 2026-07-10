@@ -223,7 +223,7 @@ class _SharedSampleRecordList(Sequence[SampleRecord]):
 
 @dataclass
 class SampleManifest:
-    """Immutable list of all samples participating in a rebasin run."""
+    """Immutable list of all samples participating in a matching run."""
 
     samples_dir: Path
     tree_path: Path

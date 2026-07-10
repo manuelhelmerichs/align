@@ -84,7 +84,7 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
     ``stream_transform_family`` selects the modeled stream symmetry class:
     ``signed_permutation`` (default; exact, discrete, no preconditions) or
     ``orthogonal`` (the stream's full symmetry — enables ``procrustes``
-    schedule steps, and requires gamma-folded parameters at rebasin time).
+    schedule steps, and requires gamma-folded parameters at matching time).
     """
 
     name: str = "rmsnorm_gqa_rope_transformer"
@@ -138,7 +138,7 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
             if is_layernorm_module(module):
                 raise ValueError(
                     f"Norm module {'/'.join(path)} carries a bias; this is a "
-                    "LayerNorm stack — use the 'transformer' adapter."
+                    "LayerNorm stack — use the 'layernorm_mha_transformer' recipe."
                 )
             raise ValueError(f"{'/'.join(path)} is not an RMSNorm module.")
 
@@ -276,8 +276,8 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
                 raise ValueError(
                     f"Attention module {'/'.join(path)} query kernel must be "
                     "(d_model, kv_groups, heads_per_group, head_dim), got "
-                    f"{q_shape}. Flat-head layouts belong to the 'transformer' "
-                    "adapter."
+                    f"{q_shape}. Flat-head layouts belong to the "
+                    "'layernorm_mha_transformer' recipe."
                 )
             if d_model is None:
                 d_model = q_shape[0]

@@ -5,8 +5,8 @@ live in a parameter tree and composes
 :class:`~align.architectures.rules.SymmetryRule` instances, which perform all
 problem construction through a shared
 :class:`~align.architectures.graph_builder.SymmetryGraphBuilder`. The resulting
-:class:`~align.symmetry.SymmetryGraph` is consumed by both the rebasin
-(permutation) and normalization (scale) stages. Concrete recipes live
+:class:`~align.symmetry.SymmetryGraph` is consumed by both the matching
+(permutation) and canonicalization (scale) stages. Concrete recipes live
 alongside this module under ``align.architectures``.
 """
 
@@ -21,7 +21,7 @@ class ArchitectureRecipe(ABC):
 
     Implementations locate component instances (dense stacks, attention modules,
     conv stacks, the residual stream) in a parameter tree and delegate
-    construction to component adapters. Config and CLI select recipes by ``name``.
+    construction to component rules. Config and CLI select recipes by ``name``.
     """
 
     name: str
@@ -54,39 +54,39 @@ def register_recipe(cls: type[ArchitectureRecipe]) -> type[ArchitectureRecipe]:
     """Decorator to register an ArchitectureRecipe implementation."""
 
     if not getattr(cls, "name", None):
-        raise ValueError("Adapter classes must define a 'name' attribute.")
+        raise ValueError("Recipe classes must define a 'name' attribute.")
     _RECIPES[cls.name] = cls
     return cls
 
 
-def _load_builtin_adapter(name: str) -> type[ArchitectureRecipe] | None:
-    """Import and return the requested built-in adapter class, if known."""
+def _load_builtin_recipe(name: str) -> type[ArchitectureRecipe] | None:
+    """Import and return the requested built-in recipe class, if known."""
     module_spec = _BUILTIN_RECIPES.get(name)
     if module_spec is None:
         return None
 
     module_name, class_name = module_spec
     module = importlib.import_module(module_name)
-    adapter_cls = getattr(module, class_name)
-    if not isinstance(adapter_cls, type) or not issubclass(
-        adapter_cls, ArchitectureRecipe
+    recipe_cls = getattr(module, class_name)
+    if not isinstance(recipe_cls, type) or not issubclass(
+        recipe_cls, ArchitectureRecipe
     ):
         raise TypeError(
-            f"Built-in adapter '{name}' resolved to invalid class {class_name!r}."
+            f"Built-in recipe '{name}' resolved to invalid class {class_name!r}."
         )
-    _RECIPES.setdefault(name, adapter_cls)
-    return adapter_cls
+    _RECIPES.setdefault(name, recipe_cls)
+    return recipe_cls
 
 
 def get_recipe(name: str, **kwargs: Any) -> ArchitectureRecipe:
-    adapter_cls = _RECIPES.get(name)
-    if adapter_cls is None:
-        adapter_cls = _load_builtin_adapter(name)
-    if adapter_cls is None:  # pragma: no cover - defensive
+    recipe_cls = _RECIPES.get(name)
+    if recipe_cls is None:
+        recipe_cls = _load_builtin_recipe(name)
+    if recipe_cls is None:  # pragma: no cover - defensive
         raise ValueError(
-            f"Unknown architecture adapter '{name}'. Available: {available_recipes()}"
+            f"Unknown architecture recipe '{name}'. Available: {available_recipes()}"
         )
-    return adapter_cls(**kwargs)
+    return recipe_cls(**kwargs)
 
 
 def available_recipes() -> list[str]:

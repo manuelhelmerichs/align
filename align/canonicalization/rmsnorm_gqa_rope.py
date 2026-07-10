@@ -24,7 +24,7 @@ Three exact diagonal symmetries coexist in the RMSNorm + RoPE + GQA family
   energies, ``s = ((E_q + eps) / (E_k + eps))^{1/4}`` (query divided, key
   multiplied), applied through the qk ``rotation_pairs`` groups' role
   bindings via :meth:`SymmetryGraph.apply_scales` with pair-tiled
-  vectors. The rotation *angle* is matched by the rebasin rotation
+  vectors. The rotation *angle* is matched by the matching rotation
   projection, not canonicalized here.
 
 - **vo circuit scale.** As in flat attention: ``(W^V) D^{-1}`` with

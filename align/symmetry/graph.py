@@ -210,7 +210,7 @@ class MaterializedTensors(Mapping[str, Any]):
 
 @dataclass
 class SymmetryGraph:
-    """Architecture adapter output consumed by graph-native rebasin solvers."""
+    """Architecture recipe output consumed by graph-native matching solvers."""
 
     groups: dict[str, SymmetryGroup]
     tensors: dict[str, TensorSpec]

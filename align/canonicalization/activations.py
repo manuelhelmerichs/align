@@ -1,4 +1,4 @@
-"""Activation validation for positive-homogeneous scale normalization."""
+"""Activation validation for positive-homogeneous scale canonicalization."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def validate_activation(
     name: str,
     activation_kwargs: Mapping[str, Any] | None = None,
 ) -> str:
-    """Validate and normalize an activation name for scale normalization."""
+    """Validate and normalize an activation name for scale canonicalization."""
 
     key = str(name).lower()
     if key not in SUPPORTED_ACTIVATIONS:
@@ -38,7 +38,7 @@ def validate_activation(
         raise ValueError(f"Unknown activation '{name}'. Available: {available}")
     if activation_kwargs:
         raise ValueError(
-            "scale_normalize.activation_kwargs is currently unsupported; "
+            "activation_kwargs is currently unsupported; "
             f"{key} uses the shared positive-homogeneous norm formula."
         )
     return key

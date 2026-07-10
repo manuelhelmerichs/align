@@ -119,7 +119,7 @@ class StagePipeline:
         records: Sequence[SampleRecord],
         samples: Sequence[WeightSample],
     ) -> list[SampleAlignmentResult]:
-        """Run a batch whose final stage is a batchable rebasin executor."""
+        """Run a batch whose final stage is a batchable matching executor."""
 
         if not self.stages or self.stages[-1][0] != "match":
             raise ValueError("Batched execution requires match as the final stage.")
@@ -165,7 +165,7 @@ class StagePipeline:
         batch_size: int,
         on_record_start: Callable[[SampleRecord], None] | None = None,
     ) -> None:
-        """Load and run records sequentially or with a batched final rebasin."""
+        """Load and run records sequentially or with a batched final matching."""
 
         if self.can_batch_match(batch_size):
             self._run_records_batched(

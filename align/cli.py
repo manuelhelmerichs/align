@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-gpu", action="store_true")
     parser.add_argument("--parallelism", type=int)
     parser.add_argument(
-        "--device-ids", help="Comma-separated device IDs for rebasin batching."
+        "--device-ids", help="Comma-separated device IDs for matching batching."
     )
     parser.add_argument("--per-device-batch", type=int)
     parser.add_argument("--verbosity", choices=["quiet", "info", "debug"])

@@ -1,4 +1,4 @@
-"""Rebasin API surface backed by the graph-native alignment core."""
+"""Matching API surface backed by the graph-native alignment core."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def match_sample(
     ref_backend: str | None = None,
     is_reference: bool = False,
 ) -> tuple[ParamTree, Mapping[str, Any], dict[str, Any] | None]:
-    """Rebasin one target parameter tree using an ``SymmetryGraph``."""
+    """Matching one target parameter tree using an ``SymmetryGraph``."""
 
     scheduler = scheduler or build_solver_sequence(
         objective=objective,
@@ -89,7 +89,7 @@ def match_batch(
     ref_data: Mapping[str, Any] | None = None,
     ref_backend: str | None = None,
 ) -> list[tuple[ParamTree, Mapping[str, Any], dict[str, Any] | None]]:
-    """Rebasin a sequence of target parameter trees."""
+    """Matching a sequence of target parameter trees."""
 
     if not params_batch:
         return []

@@ -78,7 +78,7 @@ def describe_symmetry(problem: SymmetryGraph) -> dict[str, Any]:
     """Return a JSON-friendly listing of the problem's components.
 
     Problems without declared components are reported as one implicit component ``all``
-    so the listing is uniform for older adapters.
+    so the listing is uniform for older recipes.
     """
 
     repeated = problem.repeated_group_terms()

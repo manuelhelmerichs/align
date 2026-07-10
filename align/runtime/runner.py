@@ -457,7 +457,7 @@ class AlignmentRunner:
                 self._progress_bar_uses_tqdm = getattr(bar, "uses_tqdm", False)
                 if use_batched:
                     self.progress_logger.info(
-                        "Using batched rebasin with batch_size=%d", batch_size
+                        "Using batched matching with batch_size=%d", batch_size
                     )
                 pipeline.run_records(
                     pending,

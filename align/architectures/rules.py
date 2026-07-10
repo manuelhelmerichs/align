@@ -1,10 +1,10 @@
-"""Composable component adapters: the unit of alignment-problem construction.
+"""Composable component rules: the unit of alignment-problem construction.
 
-A component adapter emits one named component (its permutation groups, axis bindings,
+A component rule emits one named component (its permutation groups, axis bindings,
 constraints, and :class:`~align.symmetry.ComponentSpec`) into a shared
-:class:`~align.architectures.graph_builder.SymmetryGraphBuilder`. Architecture adapters are
+:class:`~align.architectures.graph_builder.SymmetryGraphBuilder`. Architecture recipes are
 thin recipes that discover where components live in a parameter tree and compose
-component adapters; all actual construction happens here. Because identical components
+component rules; all actual construction happens here. Because identical components
 from different architectures share emission code, their component signatures match
 by construction and can be aligned across networks
 (:func:`align.matching.match_component_across`).
@@ -172,7 +172,7 @@ class MHAAttentionRule(SymmetryRule):
     the scale action: query/value carry ``out`` (divided by the group scale)
     while key and the out kernel carry ``in`` (multiplied), so
     ``apply_scales`` preserves ``q·k`` scores and the value/out contraction
-    exactly. Permutations ignore roles, so rebasin is unaffected.
+    exactly. Permutations ignore roles, so matching is unaffected.
     """
 
     kind: ClassVar[str] = "attention"
