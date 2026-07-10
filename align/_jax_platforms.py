@@ -44,7 +44,6 @@ def configure_jax_platforms(
             env_updates["JAX_PLATFORMS"] = "cpu"
             pref = "cpu"
 
-    env_updates["ALIGN_PLATFORM_CHOICE"] = pref
     os.environ.update(env_updates)
     _normalize_jax_platform_env()
     return pref

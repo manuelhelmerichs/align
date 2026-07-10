@@ -8,15 +8,15 @@ from typing import Any
 
 import jax
 
-from ..architectures import get_adapter
-from ..config.stages import NormalizeConfig, RebasinConfig
-from ..rebasin import (
-    build_scheduler,
-    rebasin_batch,
-    rebasin_single_sample,
+from ..architectures import get_recipe
+from ..config.stages import CanonicalizeConfig, MatchConfig
+from ..matching import (
+    build_solver_sequence,
+    match_batch,
+    match_sample,
 )
+from ..sample_manifest import SampleManifest, SampleRecord
 from ..samples import ParamTree, WeightSample
-from ..state import SampleManifest, SampleRecord
 
 _LOG = logging.getLogger(__name__)
 
@@ -26,21 +26,16 @@ class StageResult:
     """Container for per-stage outputs."""
 
     sample: WeightSample
-    artifacts: dict[str, Any]
-    aux: dict[str, Any] | None = None
-
-    @property
-    def params(self):
-        """Convenience access to the canonical parameter PyTree."""
-
-        return self.sample.params
+    transforms: Mapping[str, Any] | None = None
+    scales: Mapping[str, Any] | None = None
+    diagnostics: dict[str, Any] | None = None
 
 
 class StageExecutor(ABC):
-    """Abstract interface for pipeline stages (normalize, rebasin)."""
+    """Abstract interface for pipeline stages (canonicalize, match)."""
 
     @abstractmethod
-    def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
+    def prepare(self, manifest: SampleManifest, reference_sample: WeightSample) -> None:
         """Perform any one-time setup using the reference sample."""
 
     @abstractmethod
@@ -76,50 +71,75 @@ class StageExecutor(ABC):
         return self.process_single(record, sample).sample
 
 
-class NormalizeExecutor(StageExecutor):
-    """Executes the normalization stage."""
+def prepare_stage_executors(
+    stages: Sequence[tuple[str, StageExecutor]],
+    manifest: SampleManifest,
+    reference_sample: WeightSample,
+    *,
+    match_reference: WeightSample | None = None,
+) -> list[tuple[str, StageExecutor]]:
+    """Prepare executors in pipeline order, threading the reference through.
+
+    Each non-match stage transforms the reference so later stages prepare
+    against the already-aligned reference. The match stage instead uses
+    ``match_reference`` when given (barycenter refinement passes), and never
+    advances the reference itself.
+    """
+
+    reference_current = reference_sample
+    for name, executor in stages:
+        stage_reference = (
+            match_reference
+            if name == "match" and match_reference is not None
+            else reference_current
+        )
+        executor.prepare(manifest, stage_reference)
+        if name == "match":
+            reference_current = stage_reference
+        else:
+            reference_current = executor.reference_output(
+                manifest.reference_record, reference_current
+            )
+    return list(stages)
+
+
+class CanonicalizeExecutor(StageExecutor):
+    """Executes the canonicalize stage."""
 
     def __init__(
         self,
-        config: NormalizeConfig,
+        config: CanonicalizeConfig,
         *,
-        architecture: str,
-        adapter_kwargs: Mapping[str, Any],
+        family: str,
+        recipe_kwargs: Mapping[str, Any],
     ) -> None:
         self.config = config
-        self.architecture = architecture
-        self.adapter_kwargs = dict(adapter_kwargs)
-        self.adapter = None
-        self.problem = None
-        self.normalizer = None
+        self.family = family
+        self.recipe_kwargs = dict(recipe_kwargs)
+        self.recipe = None
+        self.graph = None
+        self.canonicalizer = None
 
-    def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
-        from ..normalization import ScaleNormalizer
+    def prepare(self, manifest: SampleManifest, reference_sample: WeightSample) -> None:
+        from ..canonicalization import ScaleCanonicalizer
 
-        adapter_kwargs = dict(self.adapter_kwargs)
-        if self.config.layer_root:
-            adapter_kwargs.setdefault("layer_root", self.config.layer_root)
-        self.adapter = get_adapter(self.architecture, **adapter_kwargs)
-        self.problem = self.adapter.build_problem(ref_sample.params)
-        self.normalizer = ScaleNormalizer()
+        self.recipe = get_recipe(self.family, **self.recipe_kwargs)
+        self.graph = self.recipe.build_graph(reference_sample.params)
+        self.canonicalizer = ScaleCanonicalizer()
 
     def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
-        if self.adapter is None or self.problem is None or self.normalizer is None:
-            raise RuntimeError("NormalizeExecutor not prepared.")
+        if self.recipe is None or self.graph is None or self.canonicalizer is None:
+            raise RuntimeError("CanonicalizeExecutor not prepared.")
 
-        normalized_params, scale_factors, aux = self.normalizer.normalize(
-            self.problem,
+        canonical_params, scales, diagnostics = self.canonicalizer.canonicalize(
+            self.graph,
             sample.params,
-            task_type=self.config.task_type,
-            num_classes=self.config.num_classes,
-            **self.config.method_kwargs,
+            **self.config.canonicalizer_kwargs,
         )
-        aux_payload = dict(aux or {})
-        aux_payload["method"] = self.config.method
         return StageResult(
-            sample=sample.with_params(normalized_params),
-            artifacts={"scale_factors": scale_factors},
-            aux=aux_payload,
+            sample=sample.with_params(canonical_params),
+            scales=scales,
+            diagnostics=dict(diagnostics or {}),
         )
 
     def process_batch(
@@ -141,19 +161,19 @@ class NormalizeExecutor(StageExecutor):
         return False
 
 
-class RebasinExecutor(StageExecutor):
-    """Executes the rebasin stage."""
+class MatchExecutor(StageExecutor):
+    """Executes the match stage."""
 
     def __init__(
         self,
-        config: RebasinConfig,
+        config: MatchConfig,
         *,
         reference_index: int | None,
         seed: int | None = None,
         rng_offset: int = 0,
         batch_size: int = 1,
-        architecture: str,
-        adapter_kwargs: Mapping[str, Any],
+        family: str,
+        recipe_kwargs: Mapping[str, Any],
     ) -> None:
         self.config = config
         self.reference_index = (
@@ -163,31 +183,28 @@ class RebasinExecutor(StageExecutor):
         self.rng_offset = int(rng_offset)
         self.batch_size = max(1, int(batch_size))
 
-        self.adapter = None
-        self.problem = None
-        self.ref_sample: WeightSample | None = None
-        self.ref_data = None
-        self.ref_backend = None
-        self.scheduler = None
-        self.architecture = architecture
-        self.adapter_kwargs = dict(adapter_kwargs)
+        self.recipe = None
+        self.graph = None
+        self.reference_sample: WeightSample | None = None
+        self.reference_data = None
+        self.reference_backend = None
+        self.solver_sequence = None
+        self.family = family
+        self.recipe_kwargs = dict(recipe_kwargs)
 
-    def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
-        adapter_kwargs = dict(self.adapter_kwargs)
-        if self.config.layer_root:
-            adapter_kwargs.setdefault("layer_root", self.config.layer_root)
-        self.adapter = get_adapter(self.architecture, **adapter_kwargs)
-        self.problem = self.adapter.build_problem(ref_sample.params)
-        self.ref_sample = ref_sample
-        self.scheduler = build_scheduler(
-            objective=self.config.objective,
-            objective_kwargs=self.config.objective_kwargs,
-            schedule=self.config.schedule,
+    def prepare(self, manifest: SampleManifest, reference_sample: WeightSample) -> None:
+        self.recipe = get_recipe(self.family, **self.recipe_kwargs)
+        self.graph = self.recipe.build_graph(reference_sample.params)
+        self.reference_sample = reference_sample
+        self.solver_sequence = build_solver_sequence(
+            objective=self.config.objective.type,
+            objective_kwargs=self.config.objective.kwargs,
+            schedule=self.config.solvers,
         )
-        backend = self.scheduler.backend
-        self.ref_backend = backend
-        self.ref_data = self.problem.materialize(
-            ref_sample.params, backend=backend, cache=True
+        backend = self.solver_sequence.backend
+        self.reference_backend = backend
+        self.reference_data = self.graph.materialize(
+            reference_sample.params, backend=backend, cache=True
         )
 
     def _rng_for_record(self, record: SampleRecord) -> jax.Array | None:
@@ -199,43 +216,47 @@ class RebasinExecutor(StageExecutor):
         self,
         sample: WeightSample,
         params: ParamTree,
-        perms: Mapping[str, Any],
-        aux: dict[str, Any] | None,
+        transforms: Mapping[str, Any],
+        diagnostics: dict[str, Any] | None,
     ) -> StageResult:
-        aux_payload = dict(aux or {})
-        aux_payload["objective"] = self.config.objective
-        aux_payload["schedule"] = self.config.schedule_payload()
-        aux_payload["refine_passes"] = self.config.refine_passes
+        diagnostics_payload = dict(diagnostics or {})
+        diagnostics_payload["objective"] = self.config.objective.type
+        diagnostics_payload["solvers"] = self.config.solvers_payload()
+        diagnostics_payload["barycenter_passes"] = self.config.barycenter_passes
+        diagnostics_payload["transform_families"] = {
+            group_id: group.transform_family
+            for group_id, group in self.graph.groups.items()
+        }
         return StageResult(
             sample=sample.with_params(params),
-            artifacts={"permutations": perms},
-            aux=aux_payload,
+            transforms=transforms,
+            diagnostics=diagnostics_payload,
         )
 
     def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
         if (
-            self.adapter is None
-            or self.problem is None
-            or self.ref_sample is None
-            or self.scheduler is None
-            or self.ref_data is None
+            self.recipe is None
+            or self.graph is None
+            or self.reference_sample is None
+            or self.solver_sequence is None
+            or self.reference_data is None
         ):
-            raise RuntimeError("RebasinExecutor not prepared.")
+            raise RuntimeError("MatchExecutor not prepared.")
 
-        folded_params, perms, aux_info = rebasin_single_sample(
-            self.problem,
-            self.ref_sample.params,
+        aligned_params, transforms, aux_info = match_sample(
+            self.graph,
+            self.reference_sample.params,
             sample.params,
-            scheduler=self.scheduler,
+            solver_sequence=self.solver_sequence,
             rng_key=self._rng_for_record(record),
-            ref_data=self.ref_data,
-            ref_backend=self.ref_backend,
+            reference_data=self.reference_data,
+            reference_backend=self.reference_backend,
             is_reference=(
                 self.reference_index is not None
                 and record.index == self.reference_index
             ),
         )
-        return self._stage_result(sample, folded_params, perms, aux_info)
+        return self._stage_result(sample, aligned_params, transforms, aux_info)
 
     def process_batch(
         self,
@@ -243,13 +264,13 @@ class RebasinExecutor(StageExecutor):
         samples: Sequence[WeightSample],
     ) -> list[StageResult]:
         if (
-            self.adapter is None
-            or self.problem is None
-            or self.ref_sample is None
-            or self.scheduler is None
-            or self.ref_data is None
+            self.recipe is None
+            or self.graph is None
+            or self.reference_sample is None
+            or self.solver_sequence is None
+            or self.reference_data is None
         ):
-            raise RuntimeError("RebasinExecutor not prepared.")
+            raise RuntimeError("MatchExecutor not prepared.")
 
         record_list = list(records)
         sample_batch = list(samples)
@@ -258,63 +279,63 @@ class RebasinExecutor(StageExecutor):
 
         results: list[StageResult | None] = [None] * len(record_list)
 
-        ref_positions = [
+        reference_positions = [
             idx
             for idx, rec in enumerate(record_list)
             if self.reference_index is not None and rec.index == self.reference_index
         ]
-        for pos in ref_positions:
+        for pos in reference_positions:
             results[pos] = self.process_single(record_list[pos], sample_batch[pos])
 
-        non_ref_positions = [
+        target_positions = [
             idx for idx in range(len(record_list)) if results[idx] is None
         ]
-        if non_ref_positions:
-            if not self.scheduler.supports_batching:
-                for pos in non_ref_positions:
+        if target_positions:
+            if not self.solver_sequence.supports_batching:
+                for pos in target_positions:
                     results[pos] = self.process_single(
                         record_list[pos], sample_batch[pos]
                     )
                 return [res for res in results if res is not None]
 
-            target_records = [record_list[idx] for idx in non_ref_positions]
-            target_samples = [sample_batch[idx] for idx in non_ref_positions]
+            target_records = [record_list[idx] for idx in target_positions]
+            target_samples = [sample_batch[idx] for idx in target_positions]
             target_params = [sample.params for sample in target_samples]
-            rng_keys = [self._rng_for_record(rec) for rec in target_records]
-            rng_key = rng_keys[0] if rng_keys else None
-            batch_results = rebasin_batch(
-                self.problem,
-                self.ref_sample.params,
+            rng_key = self._rng_for_record(target_records[0])
+            batch_results = match_batch(
+                self.graph,
+                self.reference_sample.params,
                 target_params,
-                scheduler=self.scheduler,
-                ref_data=self.ref_data,
-                ref_backend=self.ref_backend,
+                solver_sequence=self.solver_sequence,
+                reference_data=self.reference_data,
+                reference_backend=self.reference_backend,
                 rng_key=rng_key,
             )
-            for pos, result in zip(non_ref_positions, batch_results, strict=True):
-                folded_params, perms, aux = result
+            for pos, result in zip(target_positions, batch_results, strict=True):
+                aligned_params, transforms, aux = result
                 results[pos] = self._stage_result(
-                    sample_batch[pos], folded_params, perms, aux
+                    sample_batch[pos], aligned_params, transforms, aux
                 )
 
         return [res for res in results if res is not None]
 
     @property
     def supports_batching(self) -> bool:
-        if self.scheduler is None:
+        if self.solver_sequence is None:
             return False
-        return bool(self.scheduler.supports_batching)
+        return bool(self.solver_sequence.supports_batching)
 
     @property
     def prefers_gpu(self) -> bool:
-        if self.scheduler is None:
-            return any(step.solver == "sinkhorn" for step in self.config.schedule)
-        return bool(self.scheduler.prefers_gpu)
+        if self.solver_sequence is None:
+            return any(step.solver == "sinkhorn" for step in self.config.solvers)
+        return bool(self.solver_sequence.prefers_gpu)
 
 
 __all__ = [
     "StageResult",
     "StageExecutor",
-    "NormalizeExecutor",
-    "RebasinExecutor",
+    "CanonicalizeExecutor",
+    "MatchExecutor",
+    "prepare_stage_executors",
 ]

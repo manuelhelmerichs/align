@@ -1,0 +1,64 @@
+paths:
+  experiment_root: results/example_smile_residual_convnet_run
+  samples_dir: null
+  tree_path: null
+  output_dir: null
+  sample_format: pytree_npz
+
+architecture:
+  family: residual_convnet
+  parameter_root: core
+  batch_stats_root: batch_stats
+  residual_topology: null
+  residual_connections: []
+
+pipeline: [canonicalize, match]
+
+selection:
+  chain_indices: null
+  samples_per_chain: null
+  sample_step: 1
+  max_total: null
+  reference_chain: 0
+  reference_sample: 0
+
+canonicalize:
+  # FRN/TLU (and BN/ReLU) stacks carry the exact post-normalization affine
+  # scale symmetry: gamma/beta/tau are canonicalized to unit joint energy per
+  # channel group, consumers absorb the factors.
+  activation: tlu
+
+match:
+  objective:
+    type: euclidean
+  seed: 0
+  barycenter_passes: 2
+  solvers:
+    - solver: sinkhorn
+      tau: 0.1
+      sinkhorn_iterations: 50
+      learning_rate: 0.01
+      max_steps: 200
+      tolerance: 1.0e-05
+      init_scale: 0.01
+      record_loss_history: false
+    # Add a final LAP polish only for groups known to be LAP-compatible:
+    # - solver: lap
+    #   groups: [core/Conv_1]
+    #   max_sweeps: 5
+    #   tolerance: 0.0
+
+runtime:
+  resume: false
+  dry_run: false
+  list_samples: false
+  describe_symmetry: false
+  validate_only: false
+  force_cpu: false
+  force_gpu: false
+  parallelism: null
+  device_ids: null
+  per_device_batch: 128
+  verbosity: info
+  validate_artifacts_on_resume: true
+  save_intermediate: false

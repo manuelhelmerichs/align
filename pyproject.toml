@@ -1,7 +1,7 @@
 [project]
 name = "align"
 version = "0.1.0"
-description = "Align posterior neural-network weight samples by normalizing scale symmetries and rebasining permutation symmetries."
+description = "Align posterior neural-network weight samples by canonicalizing scales and matching symmetry transforms."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [

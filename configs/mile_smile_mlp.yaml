@@ -1,0 +1,51 @@
+paths:
+  experiment_root: results/example_mile_or_smile_run
+  samples_dir: null
+  tree_path: null
+  output_dir: null
+  sample_format: pytree_npz
+
+architecture:
+  family: mlp
+  parameter_root: params.fcn
+
+pipeline: [canonicalize, match]
+
+selection:
+  chain_indices: null
+  samples_per_chain: null
+  sample_step: 1
+  max_total: null
+  reference_chain: 0
+  reference_sample: 0
+
+canonicalize:
+  epsilon: 1e-8
+  degenerate_channels: preserve
+  include_bias_in_norm: true
+  activation: relu
+
+match:
+  objective:
+    type: euclidean
+  seed: 0
+  barycenter_passes: 2
+  solvers:
+    - solver: lap
+      max_sweeps: 25
+      tolerance: 0.0
+
+runtime:
+  resume: false
+  dry_run: false
+  list_samples: false
+  describe_symmetry: false
+  validate_only: false
+  force_cpu: true
+  force_gpu: false
+  parallelism: null
+  device_ids: null
+  per_device_batch: 1
+  verbosity: info
+  validate_artifacts_on_resume: true
+  save_intermediate: false

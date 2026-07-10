@@ -1,0 +1,71 @@
+# LayerNorm + MHA transformer example (Bayesmates GPT layout).
+#
+# Inspect the weight-space symmetry first:
+#   uv run align configs/examples/layernorm_mha_transformer.yaml --describe-symmetry
+#
+# The schedule below demonstrates per-component solver configuration: attention
+# components and the residual stream run first, FFN components afterwards, then
+# a final sweep over everything. A single `- solver: lap` step over all groups
+# is equally valid; `lap` routes attention head groups through the structured
+# circuit-cost update automatically.
+
+paths:
+  experiment_root: /Users/manuel/Projects/align/data/bayesmates_module_graph_samples/bayesmates_gpt_tiny
+  samples_dir: null
+  tree_path: null
+  output_dir: null
+  sample_format: pytree_npz
+
+architecture:
+  family: layernorm_mha_transformer
+  parameter_root: ""  # GPT blocks sit at the tree root; use "core" for ViT.
+
+pipeline: [canonicalize, match]
+
+selection:
+  chain_indices: null
+  samples_per_chain: null
+  sample_step: 1
+  max_total: null
+  reference_chain: 0
+  reference_sample: 0
+
+canonicalize:
+  # Attention circuits carry an exact diagonal scale symmetry per intra-head
+  # dimension (qk and vo); canonicalization balances the query/key and
+  # value/out energies. GELU FFN hidden units have no scale symmetry and stay
+  # untouched.
+  activation: gelu
+
+match:
+  objective:
+    type: euclidean
+  seed: 0
+  barycenter_passes: 2
+  solvers:
+    - solver: lap
+      max_sweeps: 5
+      tolerance: 0.0
+      components: ["stream", "*/attention"]
+    - solver: lap
+      max_sweeps: 5
+      tolerance: 0.0
+      components: ["*/ffn"]
+    - solver: lap
+      max_sweeps: 10
+      tolerance: 0.0
+
+runtime:
+  resume: false
+  dry_run: false
+  list_samples: false
+  describe_symmetry: false
+  validate_only: false
+  force_cpu: true
+  force_gpu: false
+  parallelism: null
+  device_ids: null
+  per_device_batch: 1
+  verbosity: info
+  validate_artifacts_on_resume: true
+  save_intermediate: false

@@ -14,7 +14,7 @@ _RUNTIME_FIELDS = frozenset(
         "resume",
         "dry_run",
         "list_samples",
-        "list_problems",
+        "describe_symmetry",
         "validate_only",
         "force_cpu",
         "force_gpu",
@@ -45,7 +45,7 @@ class RuntimeConfig:
     resume: bool = False
     dry_run: bool = False
     list_samples: bool = False
-    list_problems: bool = False
+    describe_symmetry: bool = False
     validate_only: bool = False
     force_cpu: bool = False
     force_gpu: bool = False
@@ -68,8 +68,8 @@ class RuntimeConfig:
             list_samples=_require_bool(
                 "runtime.list_samples", payload.get("list_samples", False)
             ),
-            list_problems=_require_bool(
-                "runtime.list_problems", payload.get("list_problems", False)
+            describe_symmetry=_require_bool(
+                "runtime.describe_symmetry", payload.get("describe_symmetry", False)
             ),
             validate_only=_require_bool(
                 "runtime.validate_only", payload.get("validate_only", False)

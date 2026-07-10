@@ -157,13 +157,10 @@ def create_sample_codec(
 ) -> WeightSampleCodec:
     """Create the codec for a configured sample format."""
 
-    normalized = normalize_sample_format(sample_format)
-    if normalized == DEFAULT_SAMPLE_FORMAT:
-        if tree_path is None:
-            raise ValueError("tree_path is required for sample_format='pytree_npz'.")
-        return PyTreeNpzCodec(tree_path)
-    available = ", ".join([DEFAULT_SAMPLE_FORMAT])
-    raise ValueError(f"Unknown sample format '{normalized}'. Available: {available}")
+    normalize_sample_format(sample_format)
+    if tree_path is None:
+        raise ValueError("tree_path is required for sample_format='pytree_npz'.")
+    return PyTreeNpzCodec(tree_path)
 
 
 __all__ = [

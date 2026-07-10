@@ -4,8 +4,8 @@ from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
+from ..sample_manifest import SampleManifest, SampleRecord
 from ..samples import WeightSample, create_sample_codec
-from ..state import SampleManifest, SampleRecord
 
 _PREFETCH_EXECUTOR: ThreadPoolExecutor | None = None
 _PREFETCH_WORKERS = 2
@@ -21,12 +21,11 @@ def _get_prefetch_executor() -> ThreadPoolExecutor:
 class SampleLoader:
     """Lazy loader that materializes canonical weight samples on demand."""
 
-    def __init__(self, manifest: SampleManifest, tree_path: Path | None = None):
+    def __init__(self, manifest: SampleManifest):
         self.manifest = manifest
-        self.tree_path = Path(tree_path or manifest.tree_path)
         self.codec = create_sample_codec(
             manifest.sample_format,
-            tree_path=self.tree_path,
+            tree_path=Path(manifest.tree_path),
         )
 
     def load(self, record: SampleRecord) -> WeightSample:

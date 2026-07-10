@@ -25,29 +25,29 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from align.rebasin.objectives import UnsupportedGroupLinearization
+from align.matching.objectives import UnsupportedGroupLinearization
 
 from .posterior import (
     PosteriorBenchmarkCase,
+    make_synthetic_layernorm_mha_transformer_posterior_case,
     make_synthetic_mlp_posterior_case,
-    make_synthetic_modern_transformer_posterior_case,
-    make_synthetic_transformer_posterior_case,
+    make_synthetic_rmsnorm_gqa_rope_transformer_posterior_case,
     run_posterior_benchmark,
 )
 from .synthetic import (
     SyntheticOrbitCase,
     default_schedule_grid,
-    make_dense_mlp_orbit_case,
     make_frn_residual_conv_orbit_case,
-    make_modern_transformer_orbit_case,
-    make_modern_transformer_orthogonal_orbit_case,
-    make_modern_transformer_rotated_orbit_case,
-    make_modern_transformer_scaled_orbit_case,
+    make_layernorm_mha_transformer_orbit_case,
+    make_layernorm_mha_transformer_scaled_orbit_case,
+    make_mlp_orbit_case,
     make_residual_conv_orbit_case,
+    make_rmsnorm_gqa_rope_transformer_orbit_case,
+    make_rmsnorm_gqa_rope_transformer_orthogonal_orbit_case,
+    make_rmsnorm_gqa_rope_transformer_rotated_orbit_case,
+    make_rmsnorm_gqa_rope_transformer_scaled_orbit_case,
     make_split_concat_conv_orbit_case,
-    make_transformer_orbit_case,
-    make_transformer_scaled_orbit_case,
-    measure_rebasin_performance,
+    measure_matching_performance,
     run_alignment_benchmark,
 )
 
@@ -55,21 +55,21 @@ Schedule = Sequence[Mapping[str, Any]]
 CaseFactory = Callable[..., SyntheticOrbitCase]
 
 ORBIT_CASE_FACTORIES: dict[str, CaseFactory] = {
-    "dense_mlp": make_dense_mlp_orbit_case,
+    "mlp": make_mlp_orbit_case,
     "residual_conv": make_residual_conv_orbit_case,
     "frn_residual_conv": make_frn_residual_conv_orbit_case,
     "split_concat": make_split_concat_conv_orbit_case,
-    "transformer": make_transformer_orbit_case,
-    "transformer_scaled": make_transformer_scaled_orbit_case,
-    "modern_transformer": make_modern_transformer_orbit_case,
-    "modern_transformer_scaled": make_modern_transformer_scaled_orbit_case,
-    "modern_transformer_rotated": make_modern_transformer_rotated_orbit_case,
-    "modern_transformer_orthogonal": make_modern_transformer_orthogonal_orbit_case,
+    "layernorm_mha_transformer": make_layernorm_mha_transformer_orbit_case,
+    "layernorm_mha_transformer_scaled": make_layernorm_mha_transformer_scaled_orbit_case,
+    "rmsnorm_gqa_rope_transformer": make_rmsnorm_gqa_rope_transformer_orbit_case,
+    "rmsnorm_gqa_rope_transformer_scaled": make_rmsnorm_gqa_rope_transformer_scaled_orbit_case,
+    "rmsnorm_gqa_rope_transformer_rotated": make_rmsnorm_gqa_rope_transformer_rotated_orbit_case,
+    "rmsnorm_gqa_rope_transformer_orthogonal": make_rmsnorm_gqa_rope_transformer_orthogonal_orbit_case,
 }
 
-# Cases whose scale symmetry the normalizer can remove before rebasin.
+# Cases whose scale symmetry the canonicalizer can remove before matching.
 _NORMALIZABLE_CASES = frozenset(
-    {"dense_mlp", "frn_residual_conv", "transformer_scaled"}
+    {"mlp", "frn_residual_conv", "layernorm_mha_transformer_scaled"}
 )
 
 
@@ -108,7 +108,7 @@ def _orbit_record(
     schedule: Schedule,
     objective: str,
     objective_kwargs: Mapping[str, Any] | None,
-    normalize: bool,
+    canonicalize: bool,
     seed: int,
 ) -> BenchmarkRecord:
     record = BenchmarkRecord(
@@ -120,7 +120,7 @@ def _orbit_record(
             "schedule_steps": [dict(step) for step in schedule],
             "objective": objective,
             "objective_kwargs": dict(objective_kwargs or {}),
-            "normalize": normalize,
+            "canonicalize": canonicalize,
             "seed": seed,
         },
     )
@@ -131,7 +131,7 @@ def _orbit_record(
             objective=objective,
             objective_kwargs=objective_kwargs,
             schedule=schedule,
-            normalize=normalize,
+            canonicalize=canonicalize,
             rng_seed=seed,
         )
     except (UnsupportedGroupLinearization, NotImplementedError) as exc:
@@ -149,9 +149,9 @@ def _posterior_record(
     schedule: Schedule,
     objective: str,
     objective_kwargs: Mapping[str, Any] | None,
-    normalize: bool,
+    canonicalize: bool,
     rng_seed: int = 0,
-    refine_passes: int = 2,
+    barycenter_passes: int = 2,
 ) -> BenchmarkRecord:
     record = BenchmarkRecord(
         name=f"posterior/{case_label}/{schedule_name}/{objective}",
@@ -162,9 +162,9 @@ def _posterior_record(
             "schedule_steps": [dict(step) for step in schedule],
             "objective": objective,
             "objective_kwargs": dict(objective_kwargs or {}),
-            "normalize": normalize,
+            "canonicalize": canonicalize,
             "seed": rng_seed,
-            "refine_passes": refine_passes,
+            "barycenter_passes": barycenter_passes,
         },
     )
     try:
@@ -173,9 +173,9 @@ def _posterior_record(
             objective=objective,
             objective_kwargs=objective_kwargs,
             schedule=schedule,
-            normalize=normalize,
+            canonicalize=canonicalize,
             rng_seed=rng_seed,
-            refine_passes=refine_passes,
+            barycenter_passes=barycenter_passes,
         )
     except (UnsupportedGroupLinearization, NotImplementedError) as exc:
         record.skipped = str(exc)
@@ -206,7 +206,7 @@ def _performance_record(
     schedule: Schedule,
     objective: str,
     objective_kwargs: Mapping[str, Any] | None,
-    normalize: bool,
+    canonicalize: bool,
     seed: int = 0,
 ) -> BenchmarkRecord:
     record = BenchmarkRecord(
@@ -218,18 +218,18 @@ def _performance_record(
             "schedule_steps": [dict(step) for step in schedule],
             "objective": objective,
             "objective_kwargs": dict(objective_kwargs or {}),
-            "normalize": normalize,
+            "canonicalize": canonicalize,
             "seed": seed,
         },
     )
     case = ORBIT_CASE_FACTORIES[case_name](seed=seed)
     try:
-        measurement = measure_rebasin_performance(
+        measurement = measure_matching_performance(
             case,
             objective=objective,
             objective_kwargs=objective_kwargs,
             schedule=schedule,
-            normalize=normalize,
+            canonicalize=canonicalize,
             rng_seed=seed,
         )
     except (UnsupportedGroupLinearization, NotImplementedError) as exc:
@@ -254,12 +254,12 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
         for schedule_name in ("lap", "sinkhorn", "lap_sinkhorn_lap"):
             records.append(
                 _orbit_record(
-                    case_name="dense_mlp",
+                    case_name="mlp",
                     schedule_name=schedule_name,
                     schedule=schedules[schedule_name],
-                    objective="l2_weight",
+                    objective="euclidean",
                     objective_kwargs=None,
-                    normalize=True,
+                    canonicalize=True,
                     seed=seed,
                 )
             )
@@ -268,9 +268,9 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
             case_name="residual_conv",
             schedule_name="lap",
             schedule=schedules["lap"],
-            objective="l2_weight",
+            objective="euclidean",
             objective_kwargs=None,
-            normalize=False,
+            canonicalize=False,
             seed=0,
         )
     )
@@ -283,9 +283,9 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
                 case_name="frn_residual_conv",
                 schedule_name="lap_sinkhorn_lap",
                 schedule=schedules["lap_sinkhorn_lap"],
-                objective="l2_weight",
+                objective="euclidean",
                 objective_kwargs=None,
-                normalize=True,
+                canonicalize=True,
                 seed=seed,
             )
         )
@@ -295,60 +295,60 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
                 case_name="split_concat",
                 schedule_name=schedule_name,
                 schedule=schedules[schedule_name],
-                objective="l2_weight",
+                objective="euclidean",
                 objective_kwargs=None,
-                normalize=False,
+                canonicalize=False,
                 seed=0,
             )
         )
     for seed in orbit_seeds:
         records.append(
             _orbit_record(
-                case_name="transformer",
+                case_name="layernorm_mha_transformer",
                 schedule_name="lap",
                 schedule=schedules["lap"],
-                objective="l2_weight",
+                objective="euclidean",
                 objective_kwargs=None,
-                normalize=False,
+                canonicalize=False,
                 seed=seed,
             )
         )
     for seed in orbit_seeds:
         records.append(
             _orbit_record(
-                case_name="transformer_scaled",
+                case_name="layernorm_mha_transformer_scaled",
                 schedule_name="lap",
                 schedule=schedules["lap"],
-                objective="l2_weight",
+                objective="euclidean",
                 objective_kwargs=None,
-                normalize=True,
+                canonicalize=True,
                 seed=seed,
             )
         )
     for seed in orbit_seeds:
         records.append(
             _orbit_record(
-                case_name="modern_transformer",
+                case_name="rmsnorm_gqa_rope_transformer",
                 schedule_name="lap",
                 schedule=schedules["lap"],
-                objective="l2_weight",
+                objective="euclidean",
                 objective_kwargs=None,
-                normalize=False,
+                canonicalize=False,
                 seed=seed,
             )
         )
     # As with the FRN residual case, plain LAP coordinate descent can stall
-    # on some seeds of the scaled modern-transformer orbit; the regression
+    # on some seeds of the scaled RMSNorm/RoPE/GQA orbit; the regression
     # pin uses the mixed schedule.
     for seed in orbit_seeds:
         records.append(
             _orbit_record(
-                case_name="modern_transformer_scaled",
+                case_name="rmsnorm_gqa_rope_transformer_scaled",
                 schedule_name="lap_sinkhorn_lap",
                 schedule=schedules["lap_sinkhorn_lap"],
-                objective="l2_weight",
+                objective="euclidean",
                 objective_kwargs=None,
-                normalize=True,
+                canonicalize=True,
                 seed=seed,
             )
         )
@@ -358,12 +358,12 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
     for seed in orbit_seeds:
         records.append(
             _orbit_record(
-                case_name="modern_transformer_rotated",
+                case_name="rmsnorm_gqa_rope_transformer_rotated",
                 schedule_name="lap",
                 schedule=schedules["lap"],
-                objective="l2_weight",
+                objective="euclidean",
                 objective_kwargs=None,
-                normalize=True,
+                canonicalize=True,
                 seed=seed,
             )
         )
@@ -372,12 +372,12 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
     for seed in orbit_seeds:
         records.append(
             _orbit_record(
-                case_name="modern_transformer_orthogonal",
+                case_name="rmsnorm_gqa_rope_transformer_orthogonal",
                 schedule_name="procrustes",
-                schedule=[{"solver": "procrustes", "max_sweeps": 5, "tol": 0.0}],
-                objective="l2_weight",
+                schedule=[{"solver": "procrustes", "max_sweeps": 5, "tolerance": 0.0}],
+                objective="euclidean",
                 objective_kwargs=None,
-                normalize=True,
+                canonicalize=True,
                 seed=seed,
             )
         )
@@ -391,14 +391,14 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
             case_label="synthetic_mlp",
             schedule_name="lap",
             schedule=schedules["lap"],
-            objective="l2_weight",
+            objective="euclidean",
             objective_kwargs=None,
-            normalize=True,
+            canonicalize=True,
         )
     )
     # Laplace-shaped (inverse-Fisher) noise: the regime where the Fisher
     # metric beats plain L2. The after-gap threshold of 0.2 encodes that
-    # advantage: l2_weight scores ~0.36 on the full-mode cell.
+    # advantage: euclidean scores ~0.36 on the full-mode cell.
     anisotropic_case = make_synthetic_mlp_posterior_case(
         seed=0,
         noise_mode="inverse_fisher",
@@ -412,49 +412,51 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
             case_label="synthetic_mlp_anisotropic",
             schedule_name="lap",
             schedule=schedules["lap"],
-            objective="fisher_l2",
+            objective="diagonal_fisher",
             objective_kwargs={"calibration": "fisher"},
-            normalize=True,
+            canonicalize=True,
         )
     )
-    transformer_posterior_case = make_synthetic_transformer_posterior_case(
-        seed=0, n_chains=2 if fast else 3, n_samples=6 if fast else 8
+    layernorm_mha_transformer_posterior_case = (
+        make_synthetic_layernorm_mha_transformer_posterior_case(
+            seed=0, n_chains=2 if fast else 3, n_samples=6 if fast else 8
+        )
     )
     records.append(
         _posterior_record(
-            case=transformer_posterior_case,
-            case_label="synthetic_transformer",
+            case=layernorm_mha_transformer_posterior_case,
+            case_label="synthetic_layernorm_mha_transformer",
             schedule_name="lap",
             schedule=schedules["lap"],
-            objective="l2_weight",
+            objective="euclidean",
             objective_kwargs=None,
-            normalize=True,
+            canonicalize=True,
         )
     )
 
-    modern_posterior_case = make_synthetic_modern_transformer_posterior_case(
+    modern_posterior_case = make_synthetic_rmsnorm_gqa_rope_transformer_posterior_case(
         seed=0, n_chains=2 if fast else 3, n_samples=6 if fast else 8
     )
     records.append(
         _posterior_record(
             case=modern_posterior_case,
-            case_label="synthetic_modern_transformer",
+            case_label="synthetic_rmsnorm_gqa_rope_transformer",
             schedule_name="lap",
             schedule=schedules["lap"],
-            objective="l2_weight",
+            objective="euclidean",
             objective_kwargs=None,
-            normalize=True,
+            canonicalize=True,
         )
     )
 
     records.append(
         _performance_record(
-            case_name="dense_mlp",
+            case_name="mlp",
             schedule_name="lap",
             schedule=schedules["lap"],
-            objective="l2_weight",
+            objective="euclidean",
             objective_kwargs=None,
-            normalize=True,
+            canonicalize=True,
         )
     )
     return records
@@ -465,53 +467,53 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
 # metrics are reported but unbounded because they are machine-dependent.
 DEFAULT_THRESHOLDS: dict[str, dict[str, dict[str, float]]] = {
     # Validity allows float32 orthogonality residuals from continuous
-    # (rotation/orthogonal) group transforms; discrete groups sit at 0.
+    # (rotation/orthogonal) group transform_family; discrete groups sit at 0.
     "orbit/*": {
         "function_drift_max": {"max": 1e-4},
-        "permutation_validity_error": {"max": 1e-5},
+        "transform_validity_error": {"max": 1e-5},
         "residual_constraint_violations": {"max": 0.0},
     },
-    "orbit/dense_mlp/*": {
-        "recovered_permutation_error": {"max": 0.0},
+    "orbit/mlp/*": {
+        "recovered_transform_error": {"max": 0.0},
         "optimality_gap": {"max": 1e-4},
     },
     "orbit/residual_conv/*": {
-        "recovered_permutation_error": {"max": 0.0},
+        "recovered_transform_error": {"max": 0.0},
         "optimality_gap": {"max": 1e-4},
     },
     "orbit/frn_residual_conv/*": {
-        "recovered_permutation_error": {"max": 0.0},
+        "recovered_transform_error": {"max": 0.0},
         "optimality_gap": {"max": 1e-4},
     },
     "orbit/split_concat/lap/*": {
-        "recovered_permutation_error": {"max": 0.0},
+        "recovered_transform_error": {"max": 0.0},
         "optimality_gap": {"max": 1e-4},
     },
     "orbit/split_concat/sinkhorn/*": {
         "optimality_gap": {"max": 1e-4},
     },
-    "orbit/transformer/*": {
-        "recovered_permutation_error": {"max": 0.0},
+    "orbit/layernorm_mha_transformer/*": {
+        "recovered_transform_error": {"max": 0.0},
         "optimality_gap": {"max": 1e-4},
     },
-    "orbit/transformer_scaled/*": {
-        "recovered_permutation_error": {"max": 0.0},
+    "orbit/layernorm_mha_transformer_scaled/*": {
+        "recovered_transform_error": {"max": 0.0},
         "optimality_gap": {"max": 1e-4},
     },
-    "orbit/modern_transformer/*": {
-        "recovered_permutation_error": {"max": 0.0},
+    "orbit/rmsnorm_gqa_rope_transformer/*": {
+        "recovered_transform_error": {"max": 0.0},
         "optimality_gap": {"max": 1e-4},
     },
-    "orbit/modern_transformer_scaled/*": {
-        "recovered_permutation_error": {"max": 0.0},
+    "orbit/rmsnorm_gqa_rope_transformer_scaled/*": {
+        "recovered_transform_error": {"max": 0.0},
         "optimality_gap": {"max": 1e-4},
     },
-    "orbit/modern_transformer_rotated/*": {
-        "recovered_permutation_error": {"max": 1e-4},
+    "orbit/rmsnorm_gqa_rope_transformer_rotated/*": {
+        "recovered_transform_error": {"max": 1e-4},
         "optimality_gap": {"max": 1e-4},
     },
-    "orbit/modern_transformer_orthogonal/*": {
-        "recovered_permutation_error": {"max": 1e-4},
+    "orbit/rmsnorm_gqa_rope_transformer_orthogonal/*": {
+        "recovered_transform_error": {"max": 1e-4},
         "optimality_gap": {"max": 1e-4},
     },
     "posterior/synthetic_mlp/*": {
@@ -531,15 +533,15 @@ DEFAULT_THRESHOLDS: dict[str, dict[str, dict[str, float]]] = {
     # The transformer case has ~1.2k parameters, so the *max* split R-hat is
     # dominated by order statistics of the noise floor; the mean is the
     # collapse signal (goes from >10 to ~1 only when circuit scales are
-    # normalized before rebasin).
-    "posterior/synthetic_transformer/*": {
+    # canonicalized before matching).
+    "posterior/synthetic_layernorm_mha_transformer/*": {
         "before_split_rhat_mean": {"min": 10.0},
         "after_split_rhat_mean": {"max": 1.2},
         "before_weight_averaging_gap": {"min": 0.2},
         "after_weight_averaging_gap": {"max": 0.15},
         "function_drift_max": {"max": 1e-3},
     },
-    "posterior/synthetic_modern_transformer/*": {
+    "posterior/synthetic_rmsnorm_gqa_rope_transformer/*": {
         "before_split_rhat_mean": {"min": 5.0},
         "after_split_rhat_mean": {"max": 1.2},
         "before_weight_averaging_gap": {"min": 0.2},
@@ -617,7 +619,7 @@ def run_objective_comparison(
     *,
     objectives: Mapping[str, Mapping[str, Any]],
     schedules: Mapping[str, Schedule] | None = None,
-    cases: Sequence[str] = ("dense_mlp", "residual_conv", "split_concat"),
+    cases: Sequence[str] = ("mlp", "residual_conv", "split_concat"),
     seeds: Sequence[int] = (0,),
     include_posterior: bool = True,
     posterior_case: PosteriorBenchmarkCase | None = None,
@@ -635,7 +637,7 @@ def run_objective_comparison(
     for objective, objective_kwargs in objectives.items():
         for schedule_name, schedule in schedules.items():
             for case_name in cases:
-                normalize = case_name in _NORMALIZABLE_CASES
+                canonicalize = case_name in _NORMALIZABLE_CASES
                 for seed in seeds:
                     records.append(
                         _orbit_record(
@@ -644,7 +646,7 @@ def run_objective_comparison(
                             schedule=schedule,
                             objective=objective,
                             objective_kwargs=objective_kwargs,
-                            normalize=normalize,
+                            canonicalize=canonicalize,
                             seed=seed,
                         )
                     )
@@ -656,7 +658,7 @@ def run_objective_comparison(
                             schedule=schedule,
                             objective=objective,
                             objective_kwargs=objective_kwargs,
-                            normalize=normalize,
+                            canonicalize=canonicalize,
                         )
                     )
             if include_posterior:
@@ -671,7 +673,7 @@ def run_objective_comparison(
                         schedule=schedule,
                         objective=objective,
                         objective_kwargs=objective_kwargs,
-                        normalize=posterior_case is None,
+                        canonicalize=posterior_case is None,
                     )
                 )
     return records
@@ -682,7 +684,7 @@ _MARKDOWN_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
         ("function_drift_max", "drift"),
         ("distance_after", "dist after"),
         ("optimality_gap", "gap"),
-        ("recovered_permutation_error", "perm err"),
+        ("recovered_transform_error", "perm err"),
     ),
     "posterior": (
         ("before_split_rhat_max", "rhat before"),

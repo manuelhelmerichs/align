@@ -62,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compare.add_argument(
         "--cases",
-        default="dense_mlp,residual_conv,split_concat",
+        default="mlp,residual_conv,split_concat",
         help="Comma-separated synthetic orbit case names.",
     )
     compare.add_argument(
@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_experiment_arguments(posterior, required=True)
     posterior.add_argument(
-        "--objective", default="l2_weight", help="Objective name (default l2_weight)."
+        "--objective", default="euclidean", help="Objective name (default euclidean)."
     )
     posterior.add_argument(
         "--objective-kwargs",
@@ -103,17 +103,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Schedule name from the default grid, or a JSON list of steps.",
     )
     posterior.add_argument(
-        "--normalize",
+        "--canonicalize",
         action="store_true",
-        help="Scale-normalize samples before rebasin (dense MLPs only).",
+        help="Scale-canonicalize samples before matching (dense MLPs only).",
     )
     posterior.add_argument(
-        "--refine-passes",
+        "--barycenter-passes",
         type=int,
         default=2,
         help="Barycenter refinement passes: re-align against the mean of the "
         "previous pass's aligned samples (1 = plain single-reference "
-        "rebasin; default 2 — single-reference canonicalization is "
+        "matching; default 2 — single-reference canonicalization is "
         "reference-dependent at moderate posterior noise).",
     )
     posterior.add_argument("--output", type=Path, help="Write the JSON report here.")
@@ -126,9 +126,11 @@ def _add_experiment_arguments(
 ) -> None:
     group = parser.add_argument_group("experiment posterior")
     group.add_argument("--experiment-root", type=Path, required=required)
-    group.add_argument("--architecture", help="Adapter name, e.g. dense_mlp or resnet.")
     group.add_argument(
-        "--adapter-kwargs", default="{}", help="JSON dict of adapter kwargs."
+        "--architecture", help="Recipe name, e.g. mlp or residual_convnet."
+    )
+    group.add_argument(
+        "--recipe-kwargs", default="{}", help="JSON dict of recipe kwargs."
     )
     group.add_argument("--samples-dir", type=Path)
     group.add_argument("--tree-path", type=Path)
@@ -136,8 +138,8 @@ def _add_experiment_arguments(
     group.add_argument("--samples-per-chain", type=int)
     group.add_argument("--sample-step", type=int, default=1)
     group.add_argument("--max-total", type=int)
-    group.add_argument("--ref-chain", type=int, default=0)
-    group.add_argument("--ref-sample", type=int, default=0)
+    group.add_argument("--reference-chain", type=int, default=0)
+    group.add_argument("--reference-sample", type=int, default=0)
 
 
 def _parse_json_dict(text: str, *, flag: str) -> dict[str, Any]:
@@ -172,15 +174,15 @@ def _load_experiment_case(args: argparse.Namespace):
     return load_experiment_posterior_case(
         args.experiment_root,
         architecture=args.architecture,
-        adapter_kwargs=_parse_json_dict(args.adapter_kwargs, flag="--adapter-kwargs"),
+        recipe_kwargs=_parse_json_dict(args.recipe_kwargs, flag="--recipe-kwargs"),
         samples_dir=args.samples_dir,
         tree_path=args.tree_path,
         chain_indices=_parse_int_list(args.chain_indices),
         samples_per_chain=args.samples_per_chain,
         sample_step=args.sample_step,
         max_total=args.max_total,
-        ref_chain=args.ref_chain,
-        ref_sample=args.ref_sample,
+        reference_chain=args.reference_chain,
+        reference_sample=args.reference_sample,
     )
 
 
@@ -254,8 +256,8 @@ def _run_posterior(args: argparse.Namespace) -> int:
         objective_kwargs=_parse_json_dict(
             args.objective_kwargs, flag="--objective-kwargs"
         ),
-        normalize=args.normalize,
-        refine_passes=args.refine_passes,
+        canonicalize=args.canonicalize,
+        barycenter_passes=args.barycenter_passes,
     )
     _emit([record], label="experiment-posterior", output=args.output)
     return 0 if record.skipped is None else 1

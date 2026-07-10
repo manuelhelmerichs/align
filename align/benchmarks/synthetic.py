@@ -2,7 +2,7 @@
 
 The cases in this module are intentionally small and deterministic. They test
 known group actions rather than learned checkpoints, so a zero optimality gap is
-mathematically known for the exact-orbit problems.
+mathematically known for the exact-orbit cases.
 """
 
 from __future__ import annotations
@@ -17,25 +17,27 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from align.alignment import (
-    AlignmentProblem,
-    AxisBinding,
-    PermutationGroup,
-    TensorSpec,
-)
 from align.architectures import (
-    ArchitectureAdapter,
-    DenseMLPAdapter,
-    ModernTransformerAdapter,
-    ResNetAdapter,
-    TransformerAdapter,
+    ArchitectureRecipe,
+    LayerNormMHATransformerRecipe,
+    MLPRecipe,
+    ResidualConvNetRecipe,
+    RMSNormGQARoPETransformerRecipe,
 )
-from align.normalization import ScaleNormalizer, ScaleState
-from align.rebasin import (
-    PermutationState,
+from align.canonicalization import ScaleCanonicalizer, ScaleState
+from align.matching import (
+    TransformState,
     default_lap_schedule,
-    rebasin_single_sample,
+    match_sample,
     resolve_calibration_kwargs,
+)
+from align.symmetry import (
+    AxisBinding,
+    GQARoPECircuitConstraint,
+    MHACircuitConstraint,
+    SymmetryGraph,
+    SymmetryGroup,
+    TensorSpec,
 )
 
 ParamTree = Mapping[str, Any]
@@ -47,14 +49,14 @@ class SyntheticOrbitCase:
     """A synthetic pair of functionally equivalent parameter trees."""
 
     name: str
-    adapter: ArchitectureAdapter | None
-    problem: AlignmentProblem
+    recipe: ArchitectureRecipe | None
+    graph: SymmetryGraph
     reference: ParamTree
     target: ParamTree
     inputs: jax.Array
     apply_fn: ApplyFn
-    expected_permutations: Mapping[str, np.ndarray]
-    expected_residual_ties: tuple[tuple[str, ...], ...] = ()
+    expected_transforms: Mapping[str, np.ndarray]
+    expected_residual_channel_ties: tuple[tuple[str, ...], ...] = ()
     known_optimum_distance: float | None = 0.0
 
 
@@ -67,8 +69,8 @@ class AlignmentBenchmarkMetrics:
     distance_after: float
     distance_reduction: float
     optimality_gap: float | None
-    permutation_validity_error: float
-    recovered_permutation_error: float
+    transform_validity_error: float
+    recovered_transform_error: float
     residual_constraint_violations: int
 
 
@@ -77,14 +79,14 @@ class AlignmentBenchmarkResult:
     """Output of an alignment benchmark run."""
 
     aligned_params: ParamTree
-    permutations: Mapping[str, Any]
-    aux: dict[str, Any] | None
+    transforms: Mapping[str, Any]
+    diagnostics: dict[str, Any] | None
     metrics: AlignmentBenchmarkMetrics
 
 
 @dataclass(frozen=True)
 class PerformanceMeasurement:
-    """Basic timing and memory measurements for a rebasin benchmark."""
+    """Basic timing and memory measurements for a matching benchmark."""
 
     cold_time_s: float
     warm_throughput_samples_s: float
@@ -146,7 +148,7 @@ def tree_l2_distance(left: ParamTree, right: ParamTree) -> float:
     return float(np.sqrt(total))
 
 
-def dense_mlp_apply(params: ParamTree, x: jax.Array) -> jax.Array:
+def mlp_apply(params: ParamTree, x: jax.Array) -> jax.Array:
     """Evaluate a ReLU MLP stored with Flax Dense kernels ``(in_dim, out_dim)``."""
 
     layers = params["params"]["fcn"]  # type: ignore[index]
@@ -278,20 +280,20 @@ def make_frn_residual_conv_params(
 
 
 def make_frn_residual_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
-    """FRN/TLU residual case whose target carries known affine scales + perms.
+    """FRN/TLU residual case whose target carries known affine scales + transforms.
 
     The forward transform composes random positive per-channel scales on both
     channel groups (the exact post-norm affine symmetry: FRN gamma/beta/tau
     divided, consumers multiplied, conv kernels and eps untouched) with random
     channel permutations. ``known_optimum_distance`` of 0 presumes
-    ``normalize=True``: permutation-only rebasin cannot remove the affine
+    ``canonicalize=True``: permutation-only matching cannot remove the affine
     scales.
     """
 
     key = jax.random.PRNGKey(seed)
     param_key, input_key = jax.random.split(key)
     reference = make_frn_residual_conv_params(param_key)
-    module_graph = {
+    residual_topology = {
         "nodes": [
             {
                 "name": "residual_add",
@@ -300,32 +302,36 @@ def make_frn_residual_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
             }
         ]
     }
-    adapter = ResNetAdapter(layer_root="core", module_graph=module_graph)
-    problem = adapter.build_problem(reference)
+    recipe = ResidualConvNetRecipe(
+        parameter_root="core", residual_topology=residual_topology
+    )
+    graph = recipe.build_graph(reference)
 
     rng = np.random.default_rng(seed + 977)
     scales = {
         group_id: np.exp(rng.uniform(-1.0, 1.0, size=group.size)).astype(np.float32)
-        for group_id, group in problem.groups.items()
+        for group_id, group in graph.groups.items()
     }
     forward_perms = {
         group_id: permutation_matrix(rng.permutation(group.size))
-        for group_id, group in problem.groups.items()
+        for group_id, group in graph.groups.items()
     }
-    scaled = problem.apply_scales(reference, _scale_state(problem, scales))
-    target = problem.apply(scaled, PermutationState.from_perms(problem, forward_perms))
+    scaled = graph.apply_scales(reference, _scale_state(graph, scales))
+    target = graph.apply_transforms(
+        scaled, TransformState.from_transforms(graph, forward_perms)
+    )
     inputs = jax.random.normal(input_key, (7, 3, 3, 2), dtype=jnp.float32)
 
     return SyntheticOrbitCase(
         name=f"frn_residual_conv_orbit_seed_{seed}",
-        adapter=adapter,
-        problem=problem,
+        recipe=recipe,
+        graph=graph,
         reference=reference,
         target=target,
         inputs=inputs,
         apply_fn=_frn_residual_conv_apply,
-        expected_permutations=_inverse_permutations(forward_perms),
-        expected_residual_ties=(("core/Conv_0", "core/Conv_2"),),
+        expected_transforms=_inverse_permutations(forward_perms),
+        expected_residual_channel_ties=(("core/Conv_0", "core/Conv_2"),),
     )
 
 
@@ -410,10 +416,10 @@ def mhdpa_apply(
     return out
 
 
-def gpt_transformer_apply(params: ParamTree, tokens: jax.Array) -> jax.Array:
+def layernorm_mha_transformer_apply(params: ParamTree, tokens: jax.Array) -> jax.Array:
     """Forward pass matching the bayesmates GPT layout and semantics.
 
-    Note the bayesmates block is not standard pre-LN: each LayerNorm *replaces*
+    Note the bayesmates component is not standard pre-LN: each LayerNorm *replaces*
     the stream (``x = LN(x); x = x + attn(x)``).
     """
 
@@ -427,14 +433,14 @@ def gpt_transformer_apply(params: ParamTree, tokens: jax.Array) -> jax.Array:
         key=_natural_key,
     )
     for name in block_names:
-        block = params[name]  # type: ignore[index]
-        x = _layer_norm(x, block["LayerNorm_0"])
-        attention = block["MaskedMultiHeadSelfAttention_0"][
+        component = params[name]  # type: ignore[index]
+        x = _layer_norm(x, component["LayerNorm_0"])
+        attention = component["MaskedMultiHeadSelfAttention_0"][
             "MultiHeadDotProductAttention_0"
         ]
         x = x + mhdpa_apply(attention, x, causal=True)
-        x = _layer_norm(x, block["LayerNorm_1"])
-        ffn = block["FullyConnected_0"]
+        x = _layer_norm(x, component["LayerNorm_1"])
+        ffn = component["FullyConnected_0"]
         hidden = _gelu(
             x @ jnp.asarray(ffn["FFN_layer0"]["kernel"])
             + jnp.asarray(ffn["FFN_layer0"]["bias"])
@@ -448,7 +454,7 @@ def gpt_transformer_apply(params: ParamTree, tokens: jax.Array) -> jax.Array:
     return x @ jnp.asarray(params["DenseLogits"]["kernel"])  # type: ignore[index]
 
 
-def make_gpt_style_params(
+def make_layernorm_mha_transformer_params(
     *,
     key: jax.Array,
     vocab_size: int = 7,
@@ -533,10 +539,10 @@ def make_gpt_style_params(
     return params
 
 
-def make_transformer_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+def make_layernorm_mha_transformer_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
     """GPT-style case whose target is a known symmetry copy of the reference.
 
-    The forward permutations cover the residual stream, per-block head
+    The forward permutations cover the residual stream, per-component head
     permutations, per-slot qk/vo intra-head permutations, and FFN hidden
     permutations. Expected aligning permutations are the wreath-product
     inverse: intra expectations are transposed *and* re-indexed by the head
@@ -546,31 +552,31 @@ def make_transformer_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
 
     key = jax.random.PRNGKey(seed)
     param_key, input_key, perm_key = jax.random.split(key, 3)
-    reference = make_gpt_style_params(key=param_key)
-    adapter = TransformerAdapter()
-    problem = adapter.build_problem(reference)
+    reference = make_layernorm_mha_transformer_params(key=param_key)
+    recipe = LayerNormMHATransformerRecipe()
+    graph = recipe.build_graph(reference)
 
     rng = np.random.default_rng(int(jax.random.randint(perm_key, (), 0, 2**31 - 1)))
     forward_perms = {
         group_id: permutation_matrix(rng.permutation(group.size))
-        for group_id, group in problem.groups.items()
+        for group_id, group in graph.groups.items()
     }
-    target = problem.apply(
-        reference, PermutationState.from_perms(problem, forward_perms)
+    target = graph.apply_transforms(
+        reference, TransformState.from_transforms(graph, forward_perms)
     )
 
     expected: dict[str, np.ndarray] = {}
-    attention_blocks = {
-        constraint.metadata["head_group"]: constraint.metadata
-        for constraint in problem.constraints
-        if constraint.kind == "attention_block"
+    attention_circuits = {
+        constraint.head_group: constraint
+        for constraint in graph.constraints
+        if isinstance(constraint, MHACircuitConstraint)
     }
     intra_reindex: dict[str, str] = {}
-    for metadata in attention_blocks.values():
-        head_matrix = np.asarray(forward_perms[metadata["head_group"]])
+    for constraint in attention_circuits.values():
+        head_matrix = np.asarray(forward_perms[constraint.head_group])
         sigma = np.argmax(head_matrix, axis=1)  # new slot i took old head sigma[i]
         sigma_inv = np.argsort(sigma)
-        for slot_groups in (metadata["qk_groups"], metadata["vo_groups"]):
+        for slot_groups in (constraint.qk_groups, constraint.vo_groups):
             for slot, group_id in enumerate(slot_groups):
                 intra_reindex[group_id] = slot_groups[int(sigma_inv[slot])]
     for group_id in forward_perms:
@@ -579,55 +585,57 @@ def make_transformer_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
 
     tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
     return SyntheticOrbitCase(
-        name=f"transformer_exact_orbit_seed_{seed}",
-        adapter=adapter,
-        problem=problem,
+        name=f"layernorm_mha_transformer_exact_orbit_seed_{seed}",
+        recipe=recipe,
+        graph=graph,
         reference=reference,
         target=target,
         inputs=tokens,
-        apply_fn=gpt_transformer_apply,
-        expected_permutations=expected,
+        apply_fn=layernorm_mha_transformer_apply,
+        expected_transforms=expected,
     )
 
 
-def make_transformer_scaled_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+def make_layernorm_mha_transformer_scaled_orbit_case(
+    seed: int = 0,
+) -> SyntheticOrbitCase:
     """Transformer orbit whose target also carries qk/vo circuit scales.
 
     The target composes the known permutation copy with random positive
     diagonal scales on every intra-head qk/vo group (the exact attention
-    circuit symmetry). Permutation-only rebasin cannot reach the reference;
-    balancing normalization removes the scales first, after which the
+    circuit symmetry). Permutation-only matching cannot reach the reference;
+    balancing canonicalization removes the scales first, after which the
     expected permutations are those of the pure-permutation case.
-    ``known_optimum_distance`` of 0 therefore presumes ``normalize=True``.
+    ``known_optimum_distance`` of 0 therefore presumes ``canonicalize=True``.
     """
 
-    case = make_transformer_orbit_case(seed=seed)
+    case = make_layernorm_mha_transformer_orbit_case(seed=seed)
     rng = np.random.default_rng(seed + 977)
     intra_groups = [
         group_id
-        for constraint in case.problem.constraints
-        if constraint.kind == "attention_block"
+        for constraint in case.graph.constraints
+        if isinstance(constraint, MHACircuitConstraint)
         for group_id in (
-            *constraint.metadata["qk_groups"],
-            *constraint.metadata["vo_groups"],
+            *constraint.qk_groups,
+            *constraint.vo_groups,
         )
     ]
     scales = {
         group_id: np.exp(
-            rng.uniform(-1.5, 1.5, size=case.problem.groups[group_id].size)
+            rng.uniform(-1.5, 1.5, size=case.graph.groups[group_id].size)
         ).astype(np.float32)
         for group_id in intra_groups
     }
-    target = case.problem.apply_scales(case.target, _scale_state(case.problem, scales))
+    target = case.graph.apply_scales(case.target, _scale_state(case.graph, scales))
     return SyntheticOrbitCase(
-        name=f"transformer_scaled_orbit_seed_{seed}",
-        adapter=case.adapter,
-        problem=case.problem,
+        name=f"layernorm_mha_transformer_scaled_orbit_seed_{seed}",
+        recipe=case.recipe,
+        graph=case.graph,
         reference=case.reference,
         target=target,
         inputs=case.inputs,
         apply_fn=case.apply_fn,
-        expected_permutations=case.expected_permutations,
+        expected_transforms=case.expected_transforms,
     )
 
 
@@ -684,10 +692,12 @@ def gqa_attention_apply(module: Mapping[str, Any], x: jax.Array) -> jax.Array:
     return jnp.einsum("btgrk,grkd->btd", context, jnp.asarray(module["out"]["kernel"]))
 
 
-def modern_transformer_apply(params: ParamTree, tokens: jax.Array) -> jax.Array:
+def rmsnorm_gqa_rope_transformer_apply(
+    params: ParamTree, tokens: jax.Array
+) -> jax.Array:
     """Forward pass for the RMSNorm + RoPE + GQA reference decoder.
 
-    Standard pre-norm residual blocks (``x = x + attn(RMS(x))``, then
+    Standard pre-norm residual components (``x = x + attn(RMS(x))``, then
     ``x = x + ffn(RMS(x))``), GELU FFN, final RMSNorm, bias-free logits head.
     No positional embedding: positions enter only through RoPE.
     """
@@ -698,18 +708,18 @@ def modern_transformer_apply(params: ParamTree, tokens: jax.Array) -> jax.Array:
         key=_natural_key,
     )
     for name in block_names:
-        block = params[name]  # type: ignore[index]
-        h = _rms_norm(x, block["RMSNorm_0"]["scale"])
-        x = x + gqa_attention_apply(block["GQAttention_0"], h)
-        h = _rms_norm(x, block["RMSNorm_1"]["scale"])
-        ffn = block["FFN_0"]
+        component = params[name]  # type: ignore[index]
+        h = _rms_norm(x, component["RMSNorm_0"]["scale"])
+        x = x + gqa_attention_apply(component["GQAttention_0"], h)
+        h = _rms_norm(x, component["RMSNorm_1"]["scale"])
+        ffn = component["FFN_0"]
         hidden = _gelu(h @ jnp.asarray(ffn["FFN_layer0"]["kernel"]))
         x = x + hidden @ jnp.asarray(ffn["FFN_layer1"]["kernel"])
     x = _rms_norm(x, params["RMSNorm_f"]["scale"])  # type: ignore[index]
     return x @ jnp.asarray(params["DenseLogits"]["kernel"])  # type: ignore[index]
 
 
-def make_modern_transformer_params(
+def make_rmsnorm_gqa_rope_transformer_params(
     *,
     key: jax.Array,
     vocab_size: int = 7,
@@ -772,21 +782,20 @@ def make_modern_transformer_params(
     return params
 
 
-def _gqa_intra_reindex(problem: AlignmentProblem, forward_perms) -> dict[str, str]:
+def _gqa_intra_reindex(graph: SymmetryGraph, forward_perms) -> dict[str, str]:
     """Reference-slot reindexing of per-slot intra groups by the kv permutation."""
 
     reindex: dict[str, str] = {}
-    for constraint in problem.constraints:
-        if constraint.kind != "gqa_attention_block":
+    for constraint in graph.constraints:
+        if not isinstance(constraint, GQARoPECircuitConstraint):
             continue
-        metadata = constraint.metadata
-        kv_matrix = np.asarray(forward_perms[metadata["kv_group"]])
+        kv_matrix = np.asarray(forward_perms[constraint.kv_group])
         sigma = np.argmax(kv_matrix, axis=1)  # new slot i took old group sigma[i]
         sigma_inv = np.argsort(sigma)
         for slot_groups in (
-            metadata["query_head_groups"],
-            metadata["qk_groups"],
-            metadata["vo_groups"],
+            constraint.query_head_groups,
+            constraint.qk_groups,
+            constraint.vo_groups,
         ):
             for slot, group_id in enumerate(slot_groups):
                 reindex[group_id] = slot_groups[int(sigma_inv[slot])]
@@ -816,7 +825,7 @@ def rotation_pairs_matrix(rng: np.random.Generator, size: int) -> np.ndarray:
     return matrix
 
 
-def _modern_transformer_case(
+def _rmsnorm_gqa_rope_transformer_case(
     seed: int,
     *,
     name: str,
@@ -824,7 +833,7 @@ def _modern_transformer_case(
     rotations: bool,
     scales: bool,
 ) -> SyntheticOrbitCase:
-    """Shared constructor for modern-transformer orbit cases.
+    """Shared constructor for RMSNorm/RoPE/GQA transformer orbit cases.
 
     The forward transform draws, per group and within its declared class:
     permutations everywhere, signed permutations on signed/orthogonal-capable
@@ -832,66 +841,67 @@ def _modern_transformer_case(
     (identity otherwise — rotation groups admit no permutations). ``scales``
     additionally composes the family's exact diagonal scales: RMSNorm gamma
     scales (signed helper), pair-tiled qk scales, and vo scales through
-    ``apply_scales``. Expected aligning transforms are the orthogonal
+    ``apply_scales``. Expected aligning transform_family are the orthogonal
     inverses (transposes), with per-slot groups re-indexed by the kv
     permutation as in the flat-attention case.
     """
 
-    from align.normalization.modern_transformer import (
+    from align.canonicalization.rmsnorm_gqa_rope import (
         apply_rms_gamma_scales,
-        gqa_attention_constraints,
-        rms_norm_constraints,
+        gqa_rope_circuit_constraints,
+        rmsnorm_scale_constraints,
     )
 
     key = jax.random.PRNGKey(seed)
     param_key, input_key, perm_key = jax.random.split(key, 3)
-    reference = make_modern_transformer_params(key=param_key)
-    adapter = ModernTransformerAdapter()
-    problem = adapter.build_problem(reference)
+    reference = make_rmsnorm_gqa_rope_transformer_params(key=param_key)
+    recipe = RMSNormGQARoPETransformerRecipe()
+    graph = recipe.build_graph(reference)
 
     rng = np.random.default_rng(int(jax.random.randint(perm_key, (), 0, 2**31 - 1)))
     forward: dict[str, np.ndarray] = {}
-    for group_id, group in problem.groups.items():
-        if group.transforms == "rotation_pairs":
+    for group_id, group in graph.groups.items():
+        if group.transform_family == "rotation_pairs":
             forward[group_id] = (
                 rotation_pairs_matrix(rng, group.size)
                 if rotations
                 else np.eye(group.size)
             )
-        elif signed and group.transforms in ("signed_permutation", "orthogonal"):
+        elif signed and group.transform_family in ("signed_permutation", "orthogonal"):
             forward[group_id] = signed_permutation_matrix(rng, group.size)
         else:
             forward[group_id] = permutation_matrix(rng.permutation(group.size))
-    target = problem.apply(reference, PermutationState.from_perms(problem, forward))
+    target = graph.apply_transforms(
+        reference, TransformState.from_transforms(graph, forward)
+    )
 
     if scales:
         gamma_scales = {
-            constraint.metadata["scale"]: np.exp(
+            constraint.scale: np.exp(
                 rng.uniform(
                     -1.0,
                     1.0,
-                    size=problem.tensors[constraint.metadata["scale"]].shape[0],
+                    size=graph.tensors[constraint.scale].shape[0],
                 )
             ).astype(np.float32)
-            for constraint in rms_norm_constraints(problem)
+            for constraint in rmsnorm_scale_constraints(graph)
         }
-        target = apply_rms_gamma_scales(problem, target, gamma_scales)
+        target = apply_rms_gamma_scales(graph, target, gamma_scales)
         circuit_scales = {}
-        for constraint in gqa_attention_constraints(problem):
-            metadata = constraint.metadata
-            head_dim = int(metadata["head_dim"])
-            for group_id in metadata["qk_groups"]:
+        for constraint in gqa_rope_circuit_constraints(graph):
+            head_dim = constraint.head_dim
+            for group_id in constraint.qk_groups:
                 pair = np.exp(rng.uniform(-1.0, 1.0, size=head_dim // 2))
                 circuit_scales[group_id] = np.concatenate([pair, pair]).astype(
                     np.float32
                 )
-            for group_id in metadata["vo_groups"]:
+            for group_id in constraint.vo_groups:
                 circuit_scales[group_id] = np.exp(
                     rng.uniform(-1.0, 1.0, size=head_dim)
                 ).astype(np.float32)
-        target = problem.apply_scales(target, _scale_state(problem, circuit_scales))
+        target = graph.apply_scales(target, _scale_state(graph, circuit_scales))
 
-    intra_reindex = _gqa_intra_reindex(problem, forward)
+    intra_reindex = _gqa_intra_reindex(graph, forward)
     expected: dict[str, np.ndarray] = {}
     for group_id in forward:
         source = intra_reindex.get(group_id, group_id)
@@ -900,20 +910,20 @@ def _modern_transformer_case(
     tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
     return SyntheticOrbitCase(
         name=f"{name}_seed_{seed}",
-        adapter=adapter,
-        problem=problem,
+        recipe=recipe,
+        graph=graph,
         reference=reference,
         target=target,
         inputs=tokens,
-        apply_fn=modern_transformer_apply,
-        expected_permutations=expected,
+        apply_fn=rmsnorm_gqa_rope_transformer_apply,
+        expected_transforms=expected,
     )
 
 
-def make_modern_transformer_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+def make_rmsnorm_gqa_rope_transformer_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
     """RMSNorm/RoPE/GQA case whose target is a known permutation copy.
 
-    Forward permutations cover the residual stream, per-block kv-group
+    Forward permutations cover the residual stream, per-component kv-group
     permutations, per-group query-head permutations, and per-group vo
     intra-head permutations; qk rotation groups stay at identity (they admit
     no permutations). Expected aligning permutations follow the
@@ -921,95 +931,103 @@ def make_modern_transformer_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
     expectations are transposed and re-indexed by the kv-group permutation.
     """
 
-    return _modern_transformer_case(
+    return _rmsnorm_gqa_rope_transformer_case(
         seed,
-        name="modern_transformer_exact_orbit",
+        name="rmsnorm_gqa_rope_transformer_exact_orbit",
         signed=False,
         rotations=False,
         scales=False,
     )
 
 
-def make_modern_transformer_scaled_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+def make_rmsnorm_gqa_rope_transformer_scaled_orbit_case(
+    seed: int = 0,
+) -> SyntheticOrbitCase:
     """Orbit carrying the full implemented *discrete* + scale symmetry.
 
     The target composes signed permutations on the stream and vo groups
     (plain permutations elsewhere) with all exact diagonal scales: RMSNorm
     gamma scales, pair-tied qk scales, and vo circuit scales.
-    Permutation-only rebasin cannot reach the reference;
-    ``known_optimum_distance`` of 0 presumes ``normalize=True``. Recovery is
+    Permutation-only matching cannot reach the reference;
+    ``known_optimum_distance`` of 0 presumes ``canonicalize=True``. Recovery is
     exact (signs are discrete).
     """
 
-    return _modern_transformer_case(
+    return _rmsnorm_gqa_rope_transformer_case(
         seed,
-        name="modern_transformer_scaled_orbit",
+        name="rmsnorm_gqa_rope_transformer_scaled_orbit",
         signed=True,
         rotations=False,
         scales=True,
     )
 
 
-def make_modern_transformer_rotated_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+def make_rmsnorm_gqa_rope_transformer_rotated_orbit_case(
+    seed: int = 0,
+) -> SyntheticOrbitCase:
     """Orbit additionally carrying random per-pair qk rotations.
 
     Extends the scaled orbit with random rotations on every qk
     ``rotation_pairs`` group — the full implemented symmetry of the family.
     Rotations are recovered by the closed-form per-pair projection inside
-    ``lap`` sweeps; recovered transforms match the expected transposes up to
+    ``lap`` sweeps; recovered transform_family match the expected transposes up to
     float32 trigonometry rather than exactly.
     """
 
-    return _modern_transformer_case(
+    return _rmsnorm_gqa_rope_transformer_case(
         seed,
-        name="modern_transformer_rotated_orbit",
+        name="rmsnorm_gqa_rope_transformer_rotated_orbit",
         signed=True,
         rotations=True,
         scales=True,
     )
 
 
-def make_modern_transformer_orthogonal_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+def make_rmsnorm_gqa_rope_transformer_orthogonal_orbit_case(
+    seed: int = 0,
+) -> SyntheticOrbitCase:
     """Gamma-folded case whose target is an orthogonal stream copy.
 
-    The reference is the *normalized* base (gammas folded to 1, circuits
+    The reference is the *canonicalized* base (gammas folded to 1, circuits
     balanced); the target applies one random orthogonal matrix to the stream
     group (identity elsewhere), which is exact because the folded gammas are
-    invariant. The adapter declares ``stream_transforms="orthogonal"``, so a
+    invariant. The recipe declares ``stream_transform_family="orthogonal"``, so a
     ``procrustes`` schedule step recovers the stream in closed form.
     """
 
-    from align.normalization import ScaleNormalizer
+    from align.canonicalization import ScaleCanonicalizer
 
     key = jax.random.PRNGKey(seed)
     param_key, input_key, perm_key = jax.random.split(key, 3)
-    base = make_modern_transformer_params(key=param_key)
-    adapter = ModernTransformerAdapter(stream_transforms="orthogonal")
-    problem = adapter.build_problem(base)
-    reference, _, _ = ScaleNormalizer().normalize(problem, base, task_type="regression")
+    base = make_rmsnorm_gqa_rope_transformer_params(key=param_key)
+    recipe = RMSNormGQARoPETransformerRecipe(stream_transform_family="orthogonal")
+    graph = recipe.build_graph(base)
+    reference, _, _ = ScaleCanonicalizer().canonicalize(graph, base)
 
     rng = np.random.default_rng(int(jax.random.randint(perm_key, (), 0, 2**31 - 1)))
-    d_model = problem.groups["stream"].size
+    d_model = graph.groups["stream"].size
     q_matrix, _ = np.linalg.qr(rng.standard_normal((d_model, d_model)))
     forward = {"stream": q_matrix}
-    target = problem.apply(reference, PermutationState.from_perms(problem, forward))
+    target = graph.apply_transforms(
+        reference, TransformState.from_transforms(graph, forward)
+    )
 
     expected = {
         group_id: np.asarray(forward[group_id]).T
         if group_id in forward
         else np.eye(group.size)
-        for group_id, group in problem.groups.items()
+        for group_id, group in graph.groups.items()
     }
     tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
     return SyntheticOrbitCase(
-        name=f"modern_transformer_orthogonal_orbit_seed_{seed}",
-        adapter=adapter,
-        problem=problem,
+        name=f"rmsnorm_gqa_rope_transformer_orthogonal_orbit_seed_{seed}",
+        recipe=recipe,
+        graph=graph,
         reference=reference,
         target=target,
         inputs=tokens,
-        apply_fn=modern_transformer_apply,
-        expected_permutations=expected,
+        apply_fn=rmsnorm_gqa_rope_transformer_apply,
+        expected_transforms=expected,
     )
 
 
@@ -1035,48 +1053,50 @@ def _make_dense_params(
     return {"params": {"fcn": fcn}}
 
 
-def _scale_state(
-    problem: AlignmentProblem, scales: Mapping[str, np.ndarray]
-) -> ScaleState:
+def _scale_state(graph: SymmetryGraph, scales: Mapping[str, np.ndarray]) -> ScaleState:
     """Build a :class:`ScaleState` from per-group positive scale vectors."""
 
-    return ScaleState.from_scales(problem, dict(scales))
+    return ScaleState.from_scales(graph, dict(scales))
 
 
-def _inverse_permutations(perms: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
-    return {gid: np.asarray(perm).T for gid, perm in perms.items()}
+def _inverse_permutations(
+    transforms: Mapping[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    return {gid: np.asarray(perm).T for gid, perm in transforms.items()}
 
 
-def make_dense_mlp_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
+def make_mlp_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
     """Build a dense MLP case with known scales and hidden permutations."""
 
     key = jax.random.PRNGKey(seed)
     param_key, input_key = jax.random.split(key)
     reference = _make_dense_params(key=param_key, sizes=(3, 5, 4, 2))
-    adapter = DenseMLPAdapter()
-    problem = adapter.build_problem(reference)
+    recipe = MLPRecipe()
+    graph = recipe.build_graph(reference)
 
     scales = {
-        "fcn/h0": np.array([1.7, 0.6, 2.3, 1.1, 0.8], dtype=np.float32),
-        "fcn/h1": np.array([0.7, 1.6, 1.2, 2.1], dtype=np.float32),
+        "mlp/h0": np.array([1.7, 0.6, 2.3, 1.1, 0.8], dtype=np.float32),
+        "mlp/h1": np.array([0.7, 1.6, 1.2, 2.1], dtype=np.float32),
     }
     forward_perms = {
-        "fcn/h0": permutation_matrix([2, 4, 1, 0, 3]),
-        "fcn/h1": permutation_matrix([3, 1, 0, 2]),
+        "mlp/h0": permutation_matrix([2, 4, 1, 0, 3]),
+        "mlp/h1": permutation_matrix([3, 1, 0, 2]),
     }
-    scaled = problem.apply_scales(reference, _scale_state(problem, scales))
-    target = problem.apply(scaled, PermutationState.from_perms(problem, forward_perms))
+    scaled = graph.apply_scales(reference, _scale_state(graph, scales))
+    target = graph.apply_transforms(
+        scaled, TransformState.from_transforms(graph, forward_perms)
+    )
     inputs = jax.random.normal(input_key, (13, 3), dtype=jnp.float32)
 
     return SyntheticOrbitCase(
-        name=f"dense_mlp_exact_orbit_seed_{seed}",
-        adapter=adapter,
-        problem=problem,
+        name=f"mlp_exact_orbit_seed_{seed}",
+        recipe=recipe,
+        graph=graph,
         reference=reference,
         target=target,
         inputs=inputs,
-        apply_fn=dense_mlp_apply,
-        expected_permutations=_inverse_permutations(forward_perms),
+        apply_fn=mlp_apply,
+        expected_transforms=_inverse_permutations(forward_perms),
     )
 
 
@@ -1123,7 +1143,7 @@ def make_residual_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
             },
         }
     }
-    module_graph = {
+    residual_topology = {
         "nodes": [
             {
                 "name": "residual_add",
@@ -1132,25 +1152,27 @@ def make_residual_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
             }
         ]
     }
-    adapter = ResNetAdapter(layer_root="core", module_graph=module_graph)
-    problem = adapter.build_problem(reference)
-    group_id = problem.metadata["group_order"][0]
+    recipe = ResidualConvNetRecipe(
+        parameter_root="core", residual_topology=residual_topology
+    )
+    graph = recipe.build_graph(reference)
+    group_id = graph.metadata["group_order"][0]
     forward_perms = {group_id: permutation_matrix([2, 0, 3, 1])}
-    target = problem.apply(
-        reference, PermutationState.from_perms(problem, forward_perms)
+    target = graph.apply_transforms(
+        reference, TransformState.from_transforms(graph, forward_perms)
     )
     inputs = jax.random.normal(input_key, (7, 3, 3, 2), dtype=jnp.float32)
 
     return SyntheticOrbitCase(
         name=f"residual_conv_exact_orbit_seed_{seed}",
-        adapter=adapter,
-        problem=problem,
+        recipe=recipe,
+        graph=graph,
         reference=reference,
         target=target,
         inputs=inputs,
         apply_fn=_residual_conv_apply,
-        expected_permutations=_inverse_permutations(forward_perms),
-        expected_residual_ties=(("core/Conv_0", "core/Conv_2"),),
+        expected_transforms=_inverse_permutations(forward_perms),
+        expected_residual_channel_ties=(("core/Conv_0", "core/Conv_2"),),
     )
 
 
@@ -1205,9 +1227,9 @@ def make_split_concat_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
         }
     }
     groups = {
-        "stem": PermutationGroup(id="stem", size=stem_channels),
-        "branch_a": PermutationGroup(id="branch_a", size=branch_a_channels),
-        "branch_b": PermutationGroup(id="branch_b", size=branch_b_channels),
+        "stem": SymmetryGroup(id="stem", size=stem_channels),
+        "branch_a": SymmetryGroup(id="branch_a", size=branch_a_channels),
+        "branch_b": SymmetryGroup(id="branch_b", size=branch_b_channels),
     }
 
     def _tensor(path: tuple[str, ...]) -> TensorSpec:
@@ -1229,7 +1251,7 @@ def make_split_concat_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
         ("core", "Dense_0", "bias"),
     )
     tensors = {"/".join(path): _tensor(path) for path in tensor_paths}
-    problem = AlignmentProblem(
+    graph = SymmetryGraph(
         groups=groups,
         tensors=tensors,
         axis_bindings=(
@@ -1263,32 +1285,32 @@ def make_split_concat_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
             "group_order": tuple(groups),
         },
     )
-    problem.validate(reference)
+    graph.validate(reference)
     forward_perms = {
         "stem": permutation_matrix([2, 0, 1]),
         "branch_a": permutation_matrix([1, 0]),
         "branch_b": permutation_matrix([2, 0, 3, 1]),
     }
-    target = problem.apply(
+    target = graph.apply_transforms(
         reference,
-        PermutationState(group_order=problem.group_order, hard=forward_perms),
+        TransformState(group_order=graph.group_order, matrices=forward_perms),
     )
     inputs = jax.random.normal(input_key, (9, 3, 3, input_channels), dtype=jnp.float32)
 
     return SyntheticOrbitCase(
         name=f"split_concat_conv_exact_orbit_seed_{seed}",
-        adapter=None,
-        problem=problem,
+        recipe=None,
+        graph=graph,
         reference=reference,
         target=target,
         inputs=inputs,
         apply_fn=_split_concat_conv_apply,
-        expected_permutations=_inverse_permutations(forward_perms),
+        expected_transforms=_inverse_permutations(forward_perms),
     )
 
 
-def permutation_validity_error(
-    perms: Mapping[str, Any], problem: AlignmentProblem | None = None
+def transform_validity_error(
+    transforms: Mapping[str, Any], graph: SymmetryGraph | None = None
 ) -> float:
     """Measure hard group-transform validity per declared class.
 
@@ -1299,18 +1321,18 @@ def permutation_validity_error(
     """
 
     worst = 0.0
-    for group_id, perm in perms.items():
-        matrix = np.asarray(perm, dtype=np.float64)
+    for group_id, transform in transforms.items():
+        matrix = np.asarray(transform, dtype=np.float64)
         if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
             return float("inf")
-        transforms = (
-            problem.groups[group_id].transforms if problem is not None else None
+        transform_family = (
+            graph.groups[group_id].transform_family if graph is not None else None
         )
-        if transforms in ("rotation_pairs", "orthogonal"):
+        if transform_family in ("rotation_pairs", "orthogonal"):
             residual = np.max(np.abs(matrix @ matrix.T - np.eye(matrix.shape[0])))
             worst = max(worst, float(residual))
             continue
-        if transforms == "signed_permutation":
+        if transform_family == "signed_permutation":
             matrix = np.abs(matrix)
         row_error = np.max(np.abs(np.sum(matrix, axis=1) - 1.0))
         col_error = np.max(np.abs(np.sum(matrix, axis=0) - 1.0))
@@ -1319,34 +1341,34 @@ def permutation_validity_error(
     return worst
 
 
-def recovered_permutation_error(
+def recovered_transform_error(
     actual: Mapping[str, Any], expected: Mapping[str, np.ndarray]
 ) -> float:
-    """Return the worst entrywise error against known exact permutations."""
+    """Return the worst entrywise error against known exact transforms."""
 
     worst = 0.0
-    for group_id, expected_perm in expected.items():
+    for group_id, expected_transform in expected.items():
         if group_id not in actual:
             return float("inf")
-        actual_perm = np.asarray(actual[group_id], dtype=np.float64)
-        expected_arr = np.asarray(expected_perm, dtype=np.float64)
-        if actual_perm.shape != expected_arr.shape:
+        actual_transform = np.asarray(actual[group_id], dtype=np.float64)
+        expected_arr = np.asarray(expected_transform, dtype=np.float64)
+        if actual_transform.shape != expected_arr.shape:
             return float("inf")
-        worst = max(worst, float(np.max(np.abs(actual_perm - expected_arr))))
+        worst = max(worst, float(np.max(np.abs(actual_transform - expected_arr))))
     return worst
 
 
 def residual_constraint_violations(
-    problem: AlignmentProblem, expected_ties: Sequence[Sequence[str]]
+    graph: SymmetryGraph, expected_ties: Sequence[Sequence[str]]
 ) -> int:
     """Count expected residual channel ties that are not represented by one group."""
 
     conv_to_group: dict[str, str] = {}
-    for binding in problem.axis_bindings:
+    for binding in graph.axis_bindings:
         if (
             binding.role == "out"
             and binding.tensor_id.endswith("/kernel")
-            and len(problem.tensors[binding.tensor_id].shape) >= 2
+            and len(graph.tensors[binding.tensor_id].shape) >= 2
         ):
             conv_to_group[binding.tensor_id[: -len("/kernel")]] = binding.group
 
@@ -1361,42 +1383,41 @@ def residual_constraint_violations(
     return violations
 
 
-def _normalize_if_requested(
-    case: SyntheticOrbitCase, params: ParamTree, normalize: bool
+def _canonicalize_if_requested(
+    case: SyntheticOrbitCase, params: ParamTree, enabled: bool
 ) -> ParamTree:
-    if not normalize:
+    if not enabled:
         return params
-    normalized, _, _ = ScaleNormalizer().normalize(
-        case.problem,
+    canonical, _, _ = ScaleCanonicalizer().canonicalize(
+        case.graph,
         params,
-        task_type="regression",
-        normalize_biases=True,
+        include_bias_in_norm=True,
     )
-    return normalized
+    return canonical
 
 
 def run_alignment_benchmark(
     case: SyntheticOrbitCase,
     *,
-    objective: str = "l2_weight",
+    objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[Mapping[str, Any]] | None = None,
-    normalize: bool = False,
+    canonicalize: bool = False,
     rng_seed: int = 0,
 ) -> AlignmentBenchmarkResult:
     """Run one synthetic alignment case and compute correctness metrics."""
 
-    reference = _normalize_if_requested(case, case.reference, normalize)
-    target = _normalize_if_requested(case, case.target, normalize)
+    reference = _canonicalize_if_requested(case, case.reference, canonicalize)
+    target = _canonicalize_if_requested(case, case.target, canonicalize)
     resolved_kwargs = resolve_calibration_kwargs(
         objective_kwargs,
-        problem=case.problem,
+        graph=case.graph,
         params=reference,
         apply_fn=case.apply_fn,
         inputs=case.inputs,
     )
-    aligned, perms, aux = rebasin_single_sample(
-        case.problem,
+    aligned, transforms, diagnostics = match_sample(
+        case.graph,
         reference,
         target,
         objective=objective,
@@ -1419,18 +1440,18 @@ def run_alignment_benchmark(
         distance_after=after,
         distance_reduction=before - after,
         optimality_gap=optimality_gap,
-        permutation_validity_error=permutation_validity_error(perms, case.problem),
-        recovered_permutation_error=recovered_permutation_error(
-            perms, case.expected_permutations
+        transform_validity_error=transform_validity_error(transforms, case.graph),
+        recovered_transform_error=recovered_transform_error(
+            transforms, case.expected_transforms
         ),
         residual_constraint_violations=residual_constraint_violations(
-            case.problem, case.expected_residual_ties
+            case.graph, case.expected_residual_channel_ties
         ),
     )
     return AlignmentBenchmarkResult(
         aligned_params=aligned,
-        permutations=perms,
-        aux=aux,
+        transforms=transforms,
+        diagnostics=diagnostics,
         metrics=metrics,
     )
 
@@ -1454,15 +1475,15 @@ def default_schedule_grid(
 ) -> dict[str, list[dict[str, Any]]]:
     """Return the named solver schedules exercised by robustness sweeps."""
 
-    lap_step = {"solver": "lap", "max_sweeps": lap_max_sweeps, "tol": 0.0}
+    lap_step = {"solver": "lap", "max_sweeps": lap_max_sweeps, "tolerance": 0.0}
     sinkhorn_step = {
         "solver": "sinkhorn",
         "max_steps": sinkhorn_max_steps,
-        "lr": sinkhorn_lr,
+        "learning_rate": sinkhorn_lr,
         "tau": sinkhorn_tau,
-        "n_sinkhorn_iters": 20,
+        "sinkhorn_iterations": 20,
         "init_scale": 0.01,
-        "tol": 0.0,
+        "tolerance": 0.0,
     }
     return {
         "lap": [dict(lap_step)],
@@ -1470,7 +1491,7 @@ def default_schedule_grid(
         "lap_sinkhorn_lap": [
             dict(lap_step),
             dict(sinkhorn_step),
-            {"solver": "lap", "max_sweeps": 5, "tol": 0.0},
+            {"solver": "lap", "max_sweeps": 5, "tolerance": 0.0},
         ],
     }
 
@@ -1479,10 +1500,10 @@ def run_robustness_sweep(
     *,
     seeds: Sequence[int],
     schedules: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
-    case_factory: Callable[..., SyntheticOrbitCase] = make_dense_mlp_orbit_case,
-    objective: str = "l2_weight",
+    case_factory: Callable[..., SyntheticOrbitCase] = make_mlp_orbit_case,
+    objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
-    normalize: bool = True,
+    canonicalize: bool = True,
 ) -> list[RobustnessRecord]:
     """Sweep exact-orbit seeds against named solver schedules.
 
@@ -1500,7 +1521,7 @@ def run_robustness_sweep(
                 objective=objective,
                 objective_kwargs=objective_kwargs,
                 schedule=schedule,
-                normalize=normalize,
+                canonicalize=canonicalize,
                 rng_seed=seed,
             )
             records.append(
@@ -1514,13 +1535,13 @@ def run_robustness_sweep(
     return records
 
 
-def measure_rebasin_performance(
+def measure_matching_performance(
     case: SyntheticOrbitCase,
     *,
-    objective: str = "l2_weight",
+    objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[Mapping[str, Any]] | None = None,
-    normalize: bool = False,
+    canonicalize: bool = False,
     warm_repetitions: int = 3,
     rng_seed: int = 0,
 ) -> PerformanceMeasurement:
@@ -1537,7 +1558,7 @@ def measure_rebasin_performance(
             objective=objective,
             objective_kwargs=objective_kwargs,
             schedule=schedule,
-            normalize=normalize,
+            canonicalize=canonicalize,
             rng_seed=rng_seed,
         )
         cold_time = time.perf_counter() - cold_start
@@ -1549,7 +1570,7 @@ def measure_rebasin_performance(
                 objective=objective,
                 objective_kwargs=objective_kwargs,
                 schedule=schedule,
-                normalize=normalize,
+                canonicalize=canonicalize,
                 rng_seed=rng_seed + idx + 1,
             )
         warm_time = time.perf_counter() - warm_start

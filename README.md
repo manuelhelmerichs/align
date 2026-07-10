@@ -1,6 +1,6 @@
 # align
 
-`align` is a standalone CLI for post-processing posterior neural-network weight samples. It removes known scale symmetries and permutation symmetries so sampled parameter trees lie in a common basin.
+`align` is a standalone CLI for post-processing posterior neural-network weight samples. It canonicalizes exact scale symmetries and matches matrix-valued symmetry transforms so sampled parameter trees lie in a common basin.
 
 ## Install
 
@@ -38,10 +38,10 @@ An experiment directory should contain:
       sample_0.npz
   tree_sampling  # preferred when present
   tree           # fallback
-  module_graph.json  # optional, used by the resnet adapter
+  module_graph.json  # optional, used by the residual_convnet recipe
 ```
 
-The default sample format is `pytree_npz`: each `.npz` stores leaves in the same order as `jax.tree.flatten(position)`, and the tree file is the matching pickled `PyTreeDef`. `align` decodes this into a canonical in-memory `WeightSample` before adapters or solvers run.
+The default sample format is `pytree_npz`: each `.npz` stores leaves in the same order as `jax.tree.flatten(position)`, and the tree file is the matching pickled `PyTreeDef`. `align` decodes this into a canonical in-memory `WeightSample` before recipes or solvers run.
 
 ## MILE and SMILE
 
@@ -50,12 +50,13 @@ The public `EmanuelSommer/MILE` and `EmanuelSommer/SMILE` repositories use the s
 ```yaml
 paths:
   sample_format: pytree_npz
-architecture: dense_mlp
-adapter:
-  layer_root: params.fcn
+architecture:
+  family: mlp
+  parameter_root: params.fcn
+pipeline: [canonicalize, match]
 ```
 
-SMILE ResNet-style runs use a `core` module with `Conv_*`, `FRN_*`, and `Dense_*` names that match the built-in `resnet` adapter. Residual networks also need residual topology metadata, either as `<experiment_root>/module_graph.json` or via explicit `adapter.residual_joins`.
+SMILE ResNet-style runs use a `core` module with `Conv_*`, `FRN_*`, and `Dense_*` names that match the built-in `residual_convnet` recipe. Residual networks also need residual topology metadata, either as `<experiment_root>/module_graph.json` or via explicit `architecture.residual_connections`.
 
 See [docs/producer_artifact_contract.md](docs/producer_artifact_contract.md) for details.
 
@@ -84,7 +85,7 @@ uv run align configs/examples/align.yaml --output-dir results/example/align/lap
 
 ## Documentation
 
-- [docs/theory.md](docs/theory.md): the symmetry model (scale + permutation) and objective/schedule background
+- [docs/theory.md](docs/theory.md): scale canonicalization, transform matching, and objective/solver background
 - [docs/developer_reference.md](docs/developer_reference.md): CLI, config schema, runtime, and artifact layout
 - [docs/producer_artifact_contract.md](docs/producer_artifact_contract.md): expected sampler output layout
 

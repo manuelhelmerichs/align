@@ -7,16 +7,14 @@ import queue
 import shutil
 import threading
 import traceback
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..artifacts import (
-    write_aux_artifact,
-    write_permutations_artifact,
-    write_scale_factors_artifact,
-)
-from ..state import SampleManifest, SampleRecord, _file_checksum
-from .pipeline import PipelineOutput, StagePipeline
+from ..run_state import file_checksum
+from ..sample_manifest import SampleManifest, SampleRecord
+from .artifacts import write_scales_artifact, write_transforms_artifact
+from .pipeline import SampleAlignmentResult, StagePipeline
 
 if TYPE_CHECKING:
     from ..samples import WeightSample, WeightSampleCodec
@@ -30,11 +28,11 @@ class _ArtifactWriter:
         scratch_root: Path,
         *,
         sample_codec: WeightSampleCodec,
-        save_intermediate: bool,
+        stage_output_stages: tuple[str, ...],
     ) -> None:
         self.root = Path(scratch_root)
         self.sample_codec = sample_codec
-        self.save_intermediate = bool(save_intermediate)
+        self.stage_output_stages = stage_output_stages
         self.root.mkdir(parents=True, exist_ok=True)
 
     def write(
@@ -42,10 +40,10 @@ class _ArtifactWriter:
         record: SampleRecord,
         *,
         final_sample: WeightSample,
-        permutations,
-        scale_factors,
-        intermediate_sample: WeightSample | None = None,
-        aux: dict[str, Any] | None = None,
+        transforms,
+        scales,
+        transform_families: Mapping[str, str] | None = None,
+        stage_outputs: Mapping[str, WeightSample] | None = None,
     ) -> tuple[dict[str, str | None], dict[str, int]]:
         sample_dir = self.root / f"sample_{record.index}"
         if sample_dir.exists():
@@ -55,42 +53,36 @@ class _ArtifactWriter:
         artifacts: dict[str, str | None] = {"scratch_dir": str(sample_dir)}
         checksums: dict[str, int] = {}
 
-        final_path = sample_dir / "final.npz"
-        self.sample_codec.save(final_path, final_sample)
-        artifacts["final_path"] = str(final_path)
-        checksums["final"] = _file_checksum(final_path)
+        aligned_path = sample_dir / "aligned_sample.npz"
+        self.sample_codec.save(aligned_path, final_sample)
+        artifacts["aligned_sample_path"] = str(aligned_path)
+        checksums["aligned_sample"] = file_checksum(aligned_path)
 
-        perm_path = None
-        if permutations is not None:
-            perm_path = write_permutations_artifact(
-                sample_dir / "permutations.npz",
-                permutations,
+        transform_path = None
+        if transforms is not None:
+            transform_path = write_transforms_artifact(
+                sample_dir / "transforms.npz",
+                transforms,
+                transform_families=transform_families,
             )
-        artifacts["permutations_path"] = str(perm_path) if perm_path else None
-        checksums["permutations"] = _file_checksum(perm_path) if perm_path else 0
+        artifacts["transforms_path"] = str(transform_path) if transform_path else None
+        checksums["transforms"] = file_checksum(transform_path) if transform_path else 0
 
         scale_path = None
-        if scale_factors is not None:
-            scale_path = write_scale_factors_artifact(
-                sample_dir / "scale_factors.npz", scale_factors
-            )
-        artifacts["scale_factors_path"] = str(scale_path) if scale_path else None
-        checksums["scale_factors"] = _file_checksum(scale_path) if scale_path else 0
+        if scales is not None:
+            scale_path = write_scales_artifact(sample_dir / "scales.npz", scales)
+        artifacts["scales_path"] = str(scale_path) if scale_path else None
+        checksums["scales"] = file_checksum(scale_path) if scale_path else 0
 
-        if self.save_intermediate:
-            intermediate_path = None
-            if intermediate_sample is not None:
-                intermediate_path = sample_dir / "intermediate.npz"
-                self.sample_codec.save(intermediate_path, intermediate_sample)
-            artifacts["intermediate_path"] = (
-                str(intermediate_path) if intermediate_path else None
-            )
-            checksums["intermediate"] = (
-                _file_checksum(intermediate_path) if intermediate_path else 0
-            )
-
-        aux_path = write_aux_artifact(sample_dir / "aux.json", aux)
-        artifacts["aux_path"] = str(aux_path) if aux_path else None
+        outputs = dict(stage_outputs or {})
+        for stage in self.stage_output_stages:
+            kind = f"stage_output_{stage}"
+            stage_path = None
+            if stage in outputs:
+                stage_path = sample_dir / f"{kind}.npz"
+                self.sample_codec.save(stage_path, outputs[stage])
+            artifacts[f"{kind}_path"] = str(stage_path) if stage_path else None
+            checksums[kind] = file_checksum(stage_path) if stage_path else 0
 
         return artifacts, checksums
 
@@ -101,14 +93,15 @@ class _WorkerPipelineSink:
     def __init__(self, worker: _WorkerLoop) -> None:
         self.worker = worker
 
-    def write(self, output: PipelineOutput) -> None:
+    def write(self, output: SampleAlignmentResult) -> None:
         self.worker._emit_commit(
             output.record,
             output.sample,
-            permutations=output.permutations,
-            scale_factors=output.scale_factors,
-            aux=output.aux,
-            intermediate_sample=output.intermediate_sample,
+            transforms=output.transforms,
+            scales=output.scales,
+            transform_families=output.transform_families,
+            diagnostics=output.diagnostics,
+            stage_outputs=output.stage_outputs,
         )
 
 
@@ -147,7 +140,11 @@ class _WorkerLoop:
                 manifest.sample_format,
                 tree_path=manifest.tree_path,
             ),
-            save_intermediate=self.save_intermediate,
+            stage_output_stages=(
+                tuple(name for name, _ in self.stages[:-1])
+                if self.save_intermediate
+                else ()
+            ),
         )
 
         self._heartbeat_interval = float(job.get("heartbeat_interval") or 5.0)
@@ -201,7 +198,7 @@ class _WorkerLoop:
         try:
             batch_size = (
                 self.per_device_batch
-                if self._pipeline.can_batch_rebasin(self.per_device_batch)
+                if self._pipeline.can_batch_match(self.per_device_batch)
                 else 1
             )
             self._pipeline.run_records(
@@ -219,18 +216,19 @@ class _WorkerLoop:
         record: SampleRecord,
         sample: WeightSample,
         *,
-        permutations,
-        scale_factors,
-        aux: dict[str, Any] | None,
-        intermediate_sample: WeightSample | None,
+        transforms,
+        scales,
+        transform_families: Mapping[str, str] | None,
+        diagnostics: dict[str, Any] | None,
+        stage_outputs: Mapping[str, WeightSample],
     ) -> None:
         artifacts, checksums = self._artifact_writer.write(
             record,
             final_sample=sample,
-            permutations=permutations,
-            scale_factors=scale_factors,
-            intermediate_sample=intermediate_sample,
-            aux=aux,
+            transforms=transforms,
+            scales=scales,
+            transform_families=transform_families,
+            stage_outputs=stage_outputs,
         )
         payload = {
             "type": "commit",
@@ -238,7 +236,7 @@ class _WorkerLoop:
             "sample_label": record.label,
             "artifacts": artifacts,
             "checksums": checksums,
-            "aux": aux or {},
+            "diagnostics": diagnostics or {},
         }
         self._send_message(payload)
 
@@ -297,45 +295,45 @@ class _WorkerLoop:
 def _build_stage_executors(
     job: dict[str, Any],
     manifest: SampleManifest,
-    ref_sample: WeightSample,
-    rebasin_reference: WeightSample | None = None,
+    reference_sample: WeightSample,
+    match_reference: WeightSample | None = None,
 ):
-    from .stages import NormalizeExecutor, RebasinExecutor
+    from .stages import CanonicalizeExecutor, MatchExecutor, prepare_stage_executors
 
     stages: list[tuple[str, Any]] = []
-    normalize_cfg = job.get("normalize_config")
-    rebasin_cfg = job.get("rebasin_config")
+    canonicalize_cfg = job.get("canonicalize_config")
+    match_cfg = job.get("match_config")
     stage_order = job.get("stages") or []
-    architecture = job.get("architecture", "dense_mlp")
-    adapter_kwargs = job.get("adapter_kwargs") or {}
+    family = job.get("family", "mlp")
+    recipe_kwargs = job.get("recipe_kwargs") or {}
 
-    if normalize_cfg:
+    if canonicalize_cfg:
         stages.append(
             (
-                "normalize",
-                NormalizeExecutor(
-                    normalize_cfg,
-                    architecture=architecture,
-                    adapter_kwargs=adapter_kwargs,
+                "canonicalize",
+                CanonicalizeExecutor(
+                    canonicalize_cfg,
+                    family=family,
+                    recipe_kwargs=recipe_kwargs,
                 ),
             )
         )
-    if rebasin_cfg:
+    if match_cfg:
         stages.append(
             (
-                "rebasin",
-                RebasinExecutor(
-                    rebasin_cfg,
+                "match",
+                MatchExecutor(
+                    match_cfg,
                     reference_index=(
-                        job["rebasin_reference_index"]
-                        if "rebasin_reference_index" in job
+                        job["match_reference_index"]
+                        if "match_reference_index" in job
                         else manifest.reference_index
                     ),
                     seed=job.get("seed"),
                     rng_offset=int(job.get("rng_offset") or 0),
                     batch_size=int(job.get("per_device_batch") or 1),
-                    architecture=architecture,
-                    adapter_kwargs=adapter_kwargs,
+                    family=family,
+                    recipe_kwargs=recipe_kwargs,
                 ),
             )
         )
@@ -346,22 +344,12 @@ def _build_stage_executors(
             (name, name_to_exec[name]) for name in stage_order if name in name_to_exec
         ]
 
-    ref_current = ref_sample
-    for name, executor in stages:
-        stage_reference = (
-            rebasin_reference
-            if name == "rebasin" and rebasin_reference is not None
-            else ref_current
-        )
-        executor.prepare(manifest, stage_reference)
-        if name == "rebasin":
-            ref_current = stage_reference
-        else:
-            ref_current = executor.reference_output(
-                manifest.reference_record, ref_current
-            )
-
-    return stages
+    return prepare_stage_executors(
+        stages,
+        manifest,
+        reference_sample,
+        match_reference=match_reference,
+    )
 
 
 def run_worker(job: dict[str, Any], command_queue, progress_queue) -> None:
@@ -375,16 +363,16 @@ def run_worker(job: dict[str, Any], command_queue, progress_queue) -> None:
     from .loaders import SampleLoader  # Imported after device visibility is set
 
     loader = SampleLoader(manifest)
-    ref_sample = loader.load_reference()
-    rebasin_reference = None
-    reference_path = job.get("rebasin_reference_path")
+    reference_sample = loader.load_reference()
+    match_reference = None
+    reference_path = job.get("match_reference_path")
     if reference_path:
-        rebasin_reference = loader.codec.load(Path(reference_path))
+        match_reference = loader.codec.load(Path(reference_path))
     stages = _build_stage_executors(
         job,
         manifest,
-        ref_sample,
-        rebasin_reference=rebasin_reference,
+        reference_sample,
+        match_reference=match_reference,
     )
 
     loop = _WorkerLoop(

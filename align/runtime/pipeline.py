@@ -2,32 +2,33 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from ..sample_manifest import SampleRecord
 from ..samples import WeightSample
-from ..state import SampleRecord
 from .loaders import PrefetchingLoader, SampleLoader
 from .stages import StageExecutor
 
 
 @dataclass(frozen=True)
-class PipelineOutput:
+class SampleAlignmentResult:
     """Complete output for one sample after all configured stages."""
 
     record: SampleRecord
     sample: WeightSample
-    aux: dict[str, Any]
-    permutations: Any = None
-    scale_factors: Any = None
-    intermediate_sample: WeightSample | None = None
+    diagnostics: dict[str, Any]
+    transforms: Mapping[str, Any] | None = None
+    scales: Mapping[str, Any] | None = None
+    transform_families: Mapping[str, str] | None = None
+    stage_outputs: Mapping[str, WeightSample] = field(default_factory=dict)
 
 
 class PipelineSink(Protocol):
     """Destination for completed pipeline outputs."""
 
-    def write(self, output: PipelineOutput) -> None:
+    def write(self, output: SampleAlignmentResult) -> None:
         """Persist or emit one completed sample."""
 
 
@@ -43,13 +44,13 @@ class StagePipeline:
         self.stages = list(stages)
         self.save_intermediate = bool(save_intermediate)
 
-    def can_batch_rebasin(self, batch_size: int) -> bool:
-        """Return whether this pipeline can batch the final rebasin stage."""
+    def can_batch_match(self, batch_size: int) -> bool:
+        """Return whether this pipeline can batch the final match stage."""
 
-        if not self.stages or self.stages[-1][0] != "rebasin":
+        if not self.stages or self.stages[-1][0] != "match":
             return False
-        rebasin_executor = self.stages[-1][1]
-        return rebasin_executor.supports_batching and int(batch_size) > 1
+        match_executor = self.stages[-1][1]
+        return match_executor.supports_batching and int(batch_size) > 1
 
     def run(
         self,
@@ -65,7 +66,7 @@ class StagePipeline:
         self,
         record: SampleRecord,
         sample: WeightSample,
-    ) -> PipelineOutput:
+    ) -> SampleAlignmentResult:
         """Run all stages for one record and return the completed output."""
 
         indexed = [(idx, name, ex) for idx, (name, ex) in enumerate(self.stages)]
@@ -76,7 +77,7 @@ class StagePipeline:
         record: SampleRecord,
         sample: WeightSample,
         stages: Sequence[tuple[int, str, StageExecutor]],
-    ) -> PipelineOutput:
+    ) -> SampleAlignmentResult:
         """Thread ``sample`` through ``stages``, collecting artifacts and aux.
 
         ``stages`` carries each executor's index within the full pipeline so the
@@ -84,49 +85,53 @@ class StagePipeline:
         the single and batched paths.
         """
 
-        aux_payload: dict[str, Any] = {}
+        diagnostics_payload: dict[str, Any] = {}
         current = sample
-        permutations = None
-        scale_factors = None
-        intermediate_sample = None
+        transforms = None
+        scales = None
+        transform_families = None
+        stage_outputs: dict[str, WeightSample] = {}
 
         for idx, name, executor in stages:
             last_stage = idx == len(self.stages) - 1
             result = executor.process_single(record, current)
             current = result.sample
 
-            if result.aux:
-                aux_payload[name] = result.aux
-            if name == "normalize":
-                scale_factors = result.artifacts.get("scale_factors")
-            elif name == "rebasin":
-                permutations = result.artifacts.get("permutations")
+            if result.diagnostics:
+                diagnostics_payload[name] = result.diagnostics
+            if name == "canonicalize":
+                scales = result.scales
+            elif name == "match":
+                transforms = result.transforms
+                if result.diagnostics:
+                    transform_families = result.diagnostics.get("transform_families")
 
             if self.save_intermediate and not last_stage:
-                intermediate_sample = current
+                stage_outputs[name] = current
 
-        return PipelineOutput(
+        return SampleAlignmentResult(
             record=record,
             sample=current,
-            aux=aux_payload,
-            permutations=permutations,
-            scale_factors=scale_factors,
-            intermediate_sample=intermediate_sample,
+            diagnostics=diagnostics_payload,
+            transforms=transforms,
+            scales=scales,
+            transform_families=transform_families,
+            stage_outputs=stage_outputs,
         )
 
     def process_batch(
         self,
         records: Sequence[SampleRecord],
         samples: Sequence[WeightSample],
-    ) -> list[PipelineOutput]:
-        """Run a batch whose final stage is a batchable rebasin executor."""
+    ) -> list[SampleAlignmentResult]:
+        """Run a batch whose final stage is a batchable matching executor."""
 
-        if not self.stages or self.stages[-1][0] != "rebasin":
-            raise ValueError("Batched execution requires rebasin as the final stage.")
+        if not self.stages or self.stages[-1][0] != "match":
+            raise ValueError("Batched execution requires match as the final stage.")
 
-        rebasin_executor = self.stages[-1][1]
-        if not rebasin_executor.supports_batching:
-            raise ValueError("Final rebasin executor does not support batching.")
+        match_executor = self.stages[-1][1]
+        if not match_executor.supports_batching:
+            raise ValueError("Final match executor does not support batching.")
 
         pre_stages = [
             (idx, name, ex) for idx, (name, ex) in enumerate(self.stages[:-1])
@@ -136,22 +141,27 @@ class StagePipeline:
             for record, sample in zip(records, samples, strict=True)
         ]
 
-        rebasin_results = rebasin_executor.process_batch(
+        match_results = match_executor.process_batch(
             records, [partial.sample for partial in partials]
         )
-        outputs: list[PipelineOutput] = []
-        for partial, reb_result in zip(partials, rebasin_results, strict=True):
-            aux_payload = dict(partial.aux)
-            if reb_result.aux:
-                aux_payload["rebasin"] = reb_result.aux
+        outputs: list[SampleAlignmentResult] = []
+        for partial, match_result in zip(partials, match_results, strict=True):
+            diagnostics_payload = dict(partial.diagnostics)
+            if match_result.diagnostics:
+                diagnostics_payload["match"] = match_result.diagnostics
             outputs.append(
-                PipelineOutput(
+                SampleAlignmentResult(
                     record=partial.record,
-                    sample=reb_result.sample,
-                    aux=aux_payload,
-                    permutations=reb_result.artifacts.get("permutations"),
-                    scale_factors=partial.scale_factors,
-                    intermediate_sample=partial.intermediate_sample,
+                    sample=match_result.sample,
+                    diagnostics=diagnostics_payload,
+                    transforms=match_result.transforms,
+                    scales=partial.scales,
+                    transform_families=(
+                        match_result.diagnostics.get("transform_families")
+                        if match_result.diagnostics
+                        else None
+                    ),
+                    stage_outputs=partial.stage_outputs,
                 )
             )
         return outputs
@@ -165,9 +175,9 @@ class StagePipeline:
         batch_size: int,
         on_record_start: Callable[[SampleRecord], None] | None = None,
     ) -> None:
-        """Load and run records sequentially or with a batched final rebasin."""
+        """Load and run records sequentially or with a batched final matching."""
 
-        if self.can_batch_rebasin(batch_size):
+        if self.can_batch_match(batch_size):
             self._run_records_batched(
                 records,
                 loader,
@@ -213,4 +223,4 @@ class StagePipeline:
             prefetch_loader.clear()
 
 
-__all__ = ["PipelineOutput", "PipelineSink", "StagePipeline"]
+__all__ = ["SampleAlignmentResult", "PipelineSink", "StagePipeline"]

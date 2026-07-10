@@ -1,30 +1,44 @@
-"""Align API surface with lazy JAX import.
+"""Intentional public API for alignment, loaded without importing JAX eagerly.
 
-This defers importing JAX (and the heavy core implementation) until after
-platform preferences have been applied by the CLI or caller.
+The CLI configures platform preferences before touching runtime modules. Keeping
+these exports lazy preserves that ordering while making the package root represent
+the complete alignment operation rather than only its matching stage.
 """
 
 import importlib
-from types import ModuleType
 from typing import Any
 
-__all__: list[str] = []
-_CORE_MODULE: ModuleType | None = None
+_PUBLIC_API = {
+    "AlignmentRunner": "align.runtime",
+    "ArchitectureRecipe": "align.architectures",
+    "RunArtifactStore": "align.runtime",
+    "RunConfig": "align.config",
+    "SampleAlignmentResult": "align.runtime.pipeline",
+    "ScaleCanonicalizer": "align.canonicalization",
+    "ScaleState": "align.canonicalization",
+    "SolverSequence": "align.matching",
+    "SolverStep": "align.matching",
+    "SymmetryGraph": "align.symmetry",
+    "TransformState": "align.matching",
+    "available_recipes": "align.architectures",
+    "build_solver_sequence": "align.matching",
+    "get_recipe": "align.architectures",
+    "match_batch": "align.matching",
+    "match_component_across": "align.matching",
+    "match_sample": "align.matching",
+}
 
-
-def _load_core() -> ModuleType:
-    global _CORE_MODULE, __all__
-    if _CORE_MODULE is None:
-        _CORE_MODULE = importlib.import_module("align.rebasin")
-        __all__ = list(getattr(_CORE_MODULE, "__all__", []))
-    return _CORE_MODULE
+__all__ = sorted(_PUBLIC_API)
 
 
 def __getattr__(name: str) -> Any:
-    module = _load_core()
-    return getattr(module, name)
+    module_name = _PUBLIC_API.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(module_name), name)
+    globals()[name] = value
+    return value
 
 
 def __dir__() -> list[str]:
-    module = _load_core()
-    return sorted(set(globals().keys()) | set(dir(module)))
+    return sorted(set(globals()) | set(__all__))

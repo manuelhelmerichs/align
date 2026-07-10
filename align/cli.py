@@ -12,26 +12,27 @@ from typing import Any
 
 from ._jax_platforms import configure_jax_platforms, is_gpu_platform
 from .config import (
-    AlignConfig,
+    RunConfig,
     load_align_config,
-    resolve_adapter_defaults,
-    validate_method,
+    resolve_recipe_defaults,
+    validate_architecture,
     validate_paths,
-    validate_ref_sample,
+    validate_reference_sample,
 )
 from .config._utils import _parse_int_list
 from .logging_utils import configure_logging
-from .state import RunManifest, SampleManifest, compute_config_digest
+from .run_state import RunState, compute_config_digest
+from .sample_manifest import SampleManifest
 
 _STATE_MANIFEST = "sample_manifest.json"
-_STATE_RUN = "align_run_state.json"
+_STATE_RUN = "run_state.json"
 _LOG = logging.getLogger("align")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="align",
-        description="Align posterior samples via normalization and/or rebasin.",
+        description="Align posterior samples via canonicalization and/or matching.",
     )
     parser.add_argument("config", type=Path, help="Path to YAML configuration file.")
     parser.add_argument(
@@ -39,33 +40,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-dir", type=Path, help="Override output directory.")
     parser.add_argument(
-        "--order",
-        choices=["normalize_first", "rebasin_first"],
-        help="Override processing order.",
-    )
-    parser.add_argument(
         "--architecture",
-        help="Override architecture adapter (e.g., dense_mlp, resnet, transformer).",
+        help="Override the architecture recipe family "
+        "(e.g., mlp, convnet, residual_convnet).",
     )
 
     parser.add_argument(
-        "--normalize-only",
+        "--canonicalize-only",
         action="store_true",
-        help="Run only normalization, skip rebasin.",
+        help="Run only the canonicalize stage, skip matching.",
     )
     parser.add_argument(
-        "--rebasin-only",
+        "--match-only",
         action="store_true",
-        help="Run only rebasin, skip normalization.",
+        help="Run only the match stage, skip canonicalization.",
+    )
+    parser.add_argument(
+        "--pipeline",
+        help="Override the pipeline stages, e.g. 'canonicalize,match'.",
     )
 
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--list-samples", action="store_true")
     parser.add_argument(
-        "--list-problems",
+        "--describe-symmetry",
         action="store_true",
-        help="List the alignment problem blocks derived from the reference sample.",
+        help="Describe the weight-space symmetry derived from the reference sample.",
     )
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--print-config", action="store_true")
@@ -78,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-gpu", action="store_true")
     parser.add_argument("--parallelism", type=int)
     parser.add_argument(
-        "--device-ids", help="Comma-separated device IDs for rebasin batching."
+        "--device-ids", help="Comma-separated device IDs for matching batching."
     )
     parser.add_argument("--per-device-batch", type=int)
     parser.add_argument("--verbosity", choices=["quiet", "info", "debug"])
@@ -105,15 +106,17 @@ def _cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
         if args.output_dir:
             overrides["paths"]["output_dir"] = args.output_dir
 
-    if args.order:
-        overrides["order"] = args.order
     if args.architecture:
-        overrides["architecture"] = args.architecture
+        overrides["architecture"] = {"family": args.architecture}
 
-    if args.normalize_only:
-        overrides.setdefault("rebasin", {})["enabled"] = False
-    if args.rebasin_only:
-        overrides.setdefault("normalize", {})["enabled"] = False
+    if args.pipeline:
+        overrides["pipeline"] = [
+            stage.strip() for stage in args.pipeline.split(",") if stage.strip()
+        ]
+    if args.canonicalize_only:
+        overrides["pipeline"] = ["canonicalize"]
+    if args.match_only:
+        overrides["pipeline"] = ["match"]
 
     runtime = overrides.setdefault("runtime", {})
     if args.resume:
@@ -122,8 +125,8 @@ def _cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
         runtime["dry_run"] = True
     if args.list_samples:
         runtime["list_samples"] = True
-    if args.list_problems:
-        runtime["list_problems"] = True
+    if args.describe_symmetry:
+        runtime["describe_symmetry"] = True
     if args.validate_only:
         runtime["validate_only"] = True
     if args.save_intermediate:
@@ -160,18 +163,12 @@ def run(args: argparse.Namespace) -> None:
     config.paths.experiment_root = exp_root
     samples_dir = (config.paths.samples_dir or (exp_root / "samples")).resolve()
     sample_format = config.paths.sample_format
-    explicit_tree_path = config.paths.tree_path is not None
     tree_path = (config.paths.tree_path or _detect_tree_path(exp_root)).resolve()
-    if explicit_tree_path:
-        if not tree_path.exists():
-            raise FileNotFoundError(f"Tree path not found: {tree_path}")
-        if not tree_path.is_file():
-            raise FileNotFoundError(f"Tree path must be a file: {tree_path}")
     output_dir = (config.paths.output_dir or _default_output_dir(exp_root)).resolve()
     config.paths.output_dir = output_dir
     config.paths.samples_dir = samples_dir
     config.paths.tree_path = tree_path
-    resolve_adapter_defaults(config)
+    resolve_recipe_defaults(config)
 
     if output_dir.exists() and not config.runtime.resume:
         raise FileExistsError(
@@ -188,9 +185,9 @@ def run(args: argparse.Namespace) -> None:
         sample_format=sample_format,
         resume=config.runtime.resume,
     )
-    validate_ref_sample(manifest, config.selection)
+    validate_reference_sample(manifest, config.selection)
 
-    validate_method(config)
+    validate_architecture(config)
 
     config_payload = config.as_dict()
     config_payload["resolved_paths"] = {
@@ -206,7 +203,7 @@ def run(args: argparse.Namespace) -> None:
         if not (
             config.runtime.dry_run
             or config.runtime.list_samples
-            or config.runtime.list_problems
+            or config.runtime.describe_symmetry
             or config.runtime.validate_only
         ):
             return
@@ -216,7 +213,7 @@ def run(args: argparse.Namespace) -> None:
     runtime_settings = _runtime_settings_snapshot(config.runtime)
 
     run_state_path = state_dir / _STATE_RUN
-    run_manifest = _load_or_create_run_manifest(
+    run_state = _load_or_create_run_state(
         run_state_path,
         run_exists=config.runtime.resume,
         manifest=manifest,
@@ -237,27 +234,27 @@ def run(args: argparse.Namespace) -> None:
             print(f"{record.index:05d} | {record.label} | {record.relative_path}")
         return
 
-    if config.runtime.list_problems:
-        print(_problem_listing(config, manifest))
+    if config.runtime.describe_symmetry:
+        print(_describe_symmetry(config, manifest))
         return
 
     if config.runtime.validate_only:
         print("Validation successful. No alignment executed.")
         return
 
-    from .runtime import AlignLogger, AlignRunner
+    from .runtime import AlignmentRunner, RunArtifactStore
 
-    align_logger = AlignLogger(
+    artifact_store = RunArtifactStore(
         manifest=manifest,
         output_dir=output_dir,
         stages=stages,
         save_intermediate=config.runtime.save_intermediate,
     )
-    runner = AlignRunner(
+    runner = AlignmentRunner(
         config=config,
         manifest=manifest,
-        run_manifest=run_manifest,
-        logger=align_logger,
+        run_state=run_state,
+        artifact_store=artifact_store,
         progress_logger=logger,
     )
 
@@ -275,28 +272,20 @@ def main(argv: list[str] | None = None) -> None:
     run(args)
 
 
-def _problem_listing(config: AlignConfig, manifest: SampleManifest) -> str:
-    """Build the block listing for the reference sample's alignment problem."""
+def _describe_symmetry(config: RunConfig, manifest: SampleManifest) -> str:
+    """Describe the weight-space symmetry for the reference sample."""
 
-    from .alignment import format_problem_listing
-    from .architectures import get_adapter
+    from .architectures import get_recipe
     from .runtime.loaders import SampleLoader
+    from .symmetry import format_symmetry_description
 
-    adapter_kwargs = dict(config.adapter or {})
-    layer_root = None
-    if config.rebasin and config.rebasin.enabled and config.rebasin.layer_root:
-        layer_root = config.rebasin.layer_root
-    elif config.normalize and config.normalize.enabled and config.normalize.layer_root:
-        layer_root = config.normalize.layer_root
-    if layer_root:
-        adapter_kwargs.setdefault("layer_root", layer_root)
-    adapter = get_adapter(config.architecture, **adapter_kwargs)
-    ref_sample = SampleLoader(manifest).load_reference()
-    problem = adapter.build_problem(ref_sample.params)
-    return format_problem_listing(problem)
+    recipe = get_recipe(config.architecture.family, **config.architecture.recipe_kwargs)
+    reference_sample = SampleLoader(manifest).load_reference()
+    graph = recipe.build_graph(reference_sample.params)
+    return format_symmetry_description(graph)
 
 
-def _configure_platform_preferences(config: AlignConfig) -> None:
+def _configure_platform_preferences(config: RunConfig) -> None:
     runtime_cfg = config.runtime
     force_cpu = bool(runtime_cfg.force_cpu)
     force_gpu = bool(runtime_cfg.force_gpu)
@@ -306,8 +295,8 @@ def _configure_platform_preferences(config: AlignConfig) -> None:
     preference = "cpu"
     if force_gpu:
         preference = "gpu"
-    elif config.rebasin and config.rebasin.enabled:
-        if any(step.solver == "sinkhorn" for step in config.rebasin.schedule):
+    elif config.match is not None:
+        if any(step.solver == "sinkhorn" for step in config.match.solvers):
             preference = "gpu"
     applied_preference = configure_jax_platforms(
         preference=preference, allow_preallocation=False
@@ -336,8 +325,8 @@ def _format_manifest_summary(manifest) -> str:
     chains = summary.get("chains") or []
     chains_text = _format_chain_list(chains)
     reference = summary.get("reference", {})
-    ref_chain = reference.get("chain", "-")
-    ref_sample = reference.get("sample", "-")
+    reference_chain = reference.get("chain", "-")
+    reference_sample = reference.get("sample", "-")
     filters = summary.get("filters") or {}
     filter_text = _format_key_values(filters)
     total = summary.get("total_samples", "-")
@@ -347,7 +336,7 @@ def _format_manifest_summary(manifest) -> str:
         f"chains={chains_text} | "
         f"total_samples={total} | "
         f"sample_format={sample_format} | "
-        f"reference=chain{ref_chain}/sample{ref_sample} | "
+        f"reference=chain{reference_chain}/sample{reference_sample} | "
         f"filters[{filter_text}]"
     )
 
@@ -419,7 +408,6 @@ def _digest_payload(config_payload: Mapping[str, Any]) -> dict[str, Any]:
     selection = dict(config_payload.get("selection", {}))
     payload: dict[str, Any] = {
         "architecture": config_payload.get("architecture"),
-        "adapter": config_payload.get("adapter"),
         "paths": {
             "experiment_root": resolved.get("experiment_root"),
             "samples_dir": resolved.get("samples_dir"),
@@ -427,28 +415,14 @@ def _digest_payload(config_payload: Mapping[str, Any]) -> dict[str, Any]:
             "sample_format": resolved.get("sample_format"),
         },
         "selection": selection,
-        "order": config_payload.get("order"),
-        "stages": config_payload.get("stages"),
+        "pipeline": config_payload.get("pipeline"),
     }
-    normalize = config_payload.get("normalize")
-    if normalize and normalize.get("enabled", False):
-        payload["normalize"] = {
-            "method": normalize.get("method"),
-            "layer_root": normalize.get("layer_root"),
-            "task_type": normalize.get("task_type"),
-            "num_classes": normalize.get("num_classes"),
-            "scale_normalize": normalize.get("scale_normalize"),
-        }
-    rebasin = config_payload.get("rebasin")
-    if rebasin and rebasin.get("enabled", False):
-        payload["rebasin"] = {
-            "objective": rebasin.get("objective"),
-            "objective_kwargs": rebasin.get("objective_kwargs"),
-            "schedule": rebasin.get("schedule"),
-            "layer_root": rebasin.get("layer_root"),
-            "seed": rebasin.get("seed"),
-            "refine_passes": rebasin.get("refine_passes"),
-        }
+    canonicalize = config_payload.get("canonicalize")
+    if canonicalize is not None:
+        payload["canonicalize"] = canonicalize
+    match = config_payload.get("match")
+    if match is not None:
+        payload["match"] = match
     return payload
 
 
@@ -476,8 +450,8 @@ def _load_or_build_manifest(
             samples_per_chain=selection.samples_per_chain,
             sample_step=selection.sample_step,
             max_total=selection.max_total,
-            ref_chain=selection.ref_chain,
-            ref_sample=selection.ref_sample,
+            reference_chain=selection.reference_chain,
+            reference_sample=selection.reference_sample,
             sample_format=sample_format,
         )
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -487,7 +461,7 @@ def _load_or_build_manifest(
     return manifest
 
 
-def _load_or_create_run_manifest(
+def _load_or_create_run_state(
     path: Path,
     *,
     run_exists: bool,
@@ -495,29 +469,29 @@ def _load_or_create_run_manifest(
     output_dir: Path,
     exp_root: Path,
     digest: str,
-    config: AlignConfig,
+    config: RunConfig,
     manifest_path: Path,
     runtime_settings: Mapping[str, Any],
     ignore_digest: bool = False,
-) -> RunManifest:
+) -> RunState:
     if path.exists():
-        run_manifest = RunManifest.load(path)
-        if run_manifest.config_digest != digest:
+        run_state = RunState.load(path)
+        if run_state.config_digest != digest:
             if ignore_digest:
                 _LOG.warning(
                     "Config digest mismatch ignored. Resume run behaviour may be undefined."
                 )
             else:
                 raise ValueError("Configuration mismatch detected for resume run.")
-        manifest.validate_digest(run_manifest.manifest_digest)
-        return run_manifest
+        manifest.validate_digest(run_state.manifest_digest)
+        return run_state
 
     if run_exists:
         raise FileNotFoundError(
             "--resume specified but no run state found under the output directory."
         )
 
-    run_manifest = RunManifest(
+    run_state = RunState(
         path=path,
         experiment_root=exp_root,
         output_dir=output_dir,
@@ -525,29 +499,28 @@ def _load_or_create_run_manifest(
         config_digest=digest,
         manifest_digest=manifest.digest(),
         stages=config.active_stages(),
-        order=config.order,
         reference={
-            "chain": manifest.ref_chain,
-            "sample": manifest.ref_sample,
+            "chain": manifest.reference_chain,
+            "sample": manifest.reference_sample,
             "index": manifest.reference_index,
         },
         filters=manifest.filters,
         total_samples=manifest.total,
         runtime_settings=runtime_settings,
         metadata={
-            "architecture": config.architecture,
-            "normalize_method": config.normalize.method if config.normalize else None,
-            "rebasin_objective": config.rebasin.objective if config.rebasin else None,
-            "rebasin_schedule": config.rebasin.schedule_payload()
-            if config.rebasin
+            "architecture": config.architecture.family,
+            "canonicalize_strategy": config.canonicalize.strategy
+            if config.canonicalize
             else None,
-            "rebasin_refine_passes": config.rebasin.refine_passes
-            if config.rebasin
+            "match_objective": config.match.objective.type if config.match else None,
+            "match_solvers": config.match.solvers_payload() if config.match else None,
+            "match_barycenter_passes": config.match.barycenter_passes
+            if config.match
             else None,
         },
     )
-    run_manifest.save()
-    return run_manifest
+    run_state.save()
+    return run_state
 
 
 if __name__ == "__main__":  # pragma: no cover

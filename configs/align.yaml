@@ -5,69 +5,61 @@ paths:
   output_dir: null         # Defaults to <experiment_root>/align/<timestamp>; set to reuse an existing folder.
   sample_format: pytree_npz # SMILE/MILE-style leaf-order NPZ files plus a pickled PyTreeDef.
 
-architecture: dense_mlp
-adapter:
-  layer_root: params.fcn
+architecture:
+  family: mlp
+  parameter_root: params.fcn  # Dot path to the dense layer subtree in the PyTree.
+
+pipeline: [canonicalize, match]  # Stages to run, in order.
 
 selection:
   chain_indices: null      # Only align these chains; leave empty to include every chain in samples/.
   samples_per_chain: null  # Cap how many samples to take from each chain (after stride filtering).
   sample_step: 1           # Keep every N-th sample inside each chain (1 == use all samples).
   max_total: null          # Optional global cap on the number of samples processed overall.
-  ref_chain: 0             # Chain id that provides the reference sample before permutations.
-  ref_sample: 0            # Sample id (index within chain) used as the reference parameters.
+  reference_chain: 0       # Chain id that provides the reference sample before transforms.
+  reference_sample: 0      # Sample id (index within chain) used as the reference parameters.
 
-normalize:
-  enabled: true            # Enable parameter normalization before rebasining.
-  method: scale_normalize  # Currently supported normalization method.
-  layer_root: params.fcn   # Dot path to the dense layer subtree in the PyTree.
-  task_type: regression    # Set to classification when aligning classifiers.
-  num_classes: null        # Only required when task_type == classification and classification_head_rescale == true.
-  scale_normalize:
-    epsilon: 1e-8          # Numerical stabiliser for variance scaling.
-    mode: null             # Dense-chain canonical form: balanced (default; minimum-norm) or unit_norm (incoming norm 1).
-    degenerate_handling: preserve  # Alternatives: zero_outgoing, canonical_vector.
-    normalize_biases: true
-    activation: relu
-    activation_kwargs: {}
-    classification_head_rescale: false  # Optional non-symmetric classification heuristic; changes logits when enabled.
+canonicalize:
+  epsilon: 1e-8            # Numerical stabiliser for variance scaling.
+  strategy: null          # Dense-chain canonical form: balanced (default; minimum-norm) or unit_norm (incoming norm 1).
+  degenerate_channels: preserve  # Alternatives: zero_outgoing, canonical_vector.
+  include_bias_in_norm: true
+  activation: relu
 
-rebasin:
-  enabled: true
-  objective: l2_weight     # Complete graph objective over bound parameter tensors.
-  objective_kwargs: {}
+match:
+  objective:
+    type: euclidean       # Complete-graph objective over bound parameter tensors.
   # Geometry-aware alternative: diagonal Fisher-metric weight distance.
   # Weights are the diagonal Gauss-Newton Fisher at the reference sample,
-  # precomputed with align.rebasin.fisher and stored as an npz keyed by
+  # precomputed with align.matching.fisher and stored as an npz keyed by
   # tensor id (see docs/theory.md, "Fisher-metric objective"):
-  # objective: fisher_l2
-  # objective_kwargs:
+  # objective:
+  #   type: diagonal_fisher
   #   weights_path: results/example_experiment/fisher_weights.npz
-  layer_root: params.fcn   # Dot path to the dense layer subtree in the PyTree.
-  seed: 0                  # RNG seed ensures deterministic initialisation for stochastic methods.
-  refine_passes: 2         # Barycenter refinement passes; 2 makes the canonical frame reference-independent. Drop to 1 past matching breakdown.
-  schedule:
+  seed: 0                  # RNG seed ensures deterministic initialisation for stochastic solvers.
+  barycenter_passes: 2     # 2 makes the canonical frame reference-independent. Drop to 1 past matching breakdown.
+  solvers:
     - solver: lap          # Exact coordinate-descent LAP update when each group occurs at most once per tensor.
       max_sweeps: 25
-      tol: 0.0
+      tolerance: 0.0
     # Mixed schedules can add Sinkhorn refinement and a final LAP polish:
     # - solver: sinkhorn
     #   tau: 0.1
-    #   n_sinkhorn_iters: 50
-    #   lr: 0.01
+    #   sinkhorn_iterations: 50
+    #   learning_rate: 0.01
     #   max_steps: 200
-    #   tol: 1.0e-05
+    #   tolerance: 1.0e-05
     #   init_scale: 0.01
     #   record_loss_history: false
     # - solver: lap
     #   max_sweeps: 5
-    #   tol: 0.0
+    #   tolerance: 0.0
 
 runtime:
   resume: false            # Reuse manifests/outputs inside output_dir and continue unfinished runs.
   dry_run: false           # Build manifests, validate configuration, and exit without aligning samples.
   list_samples: false      # Emit the manifest ordering to stdout and exit (debugging aid).
-  list_problems: false     # Emit the alignment problem block decomposition and exit.
+  describe_symmetry: false # Describe the weight-space symmetry of the reference sample and exit.
   validate_only: false     # Validate configuration + filesystem, then exit before running.
   force_cpu: false         # Leave false so Sinkhorn auto-selects GPUs; set true when benchmarking CPU-only.
   force_gpu: false         # Optional override to insist on GPUs even if JAX can't auto-detect them.
@@ -75,5 +67,5 @@ runtime:
   device_ids: null         # Explicit CUDA device ids in multi-GPU boxes; omit to consume every visible GPU.
   per_device_batch: 1      # Use >1 for pure Sinkhorn schedules; LAP schedules process one sample at a time.
   verbosity: info          # Logging verbosity passed to the CLI (quiet/info/debug).
-  validate_artifacts_on_resume: true  # Re-hash final/permutation files before skipping them; set false to trust checksums.
-  save_intermediate: false # Persist intermediate outputs when chaining normalization and rebasin.
+  validate_artifacts_on_resume: true  # Re-hash aligned sample/transform files before skipping them; false trusts checksums.
+  save_intermediate: false # Persist intermediate outputs when chaining canonicalize and match.

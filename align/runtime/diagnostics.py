@@ -8,7 +8,7 @@ from typing import Any
 import jax
 import numpy as np
 
-from ..rebasin import PermutationState, rebasin_single_sample
+from ..matching import TransformState, match_sample
 from ..samples import ParamTree, WeightSample
 
 
@@ -60,8 +60,8 @@ def reference_stability_diagnostic(
     *,
     previous_samples: Callable[[], Iterable[WeightSample]],
     current_samples: Callable[[], Iterable[WeightSample]],
-    problem,
-    schedule: Sequence[Mapping[str, Any]] | Sequence[Any],
+    graph,
+    solvers: Sequence[Mapping[str, Any]] | Sequence[Any],
     previous_pass: int,
     current_pass: int,
 ) -> dict[str, Any]:
@@ -80,17 +80,17 @@ def reference_stability_diagnostic(
     previous_mean = tree_mean(previous_samples())
     current_mean = tree_mean(current_samples())
     # Match the two barycenters with a plain L2 frame even under a data-dependent
-    # objective (e.g. fisher_l2): here we want the geometric movement of canonical
+    # objective (e.g. diagonal_fisher): here we want the geometric movement of canonical
     # positions between passes, not an objective-weighted distance.
-    _, frame, _ = rebasin_single_sample(
-        problem,
+    _, frame, _ = match_sample(
+        graph,
         previous_mean.params,
         current_mean.params,
-        objective="l2_weight",
-        schedule=schedule,
+        objective="euclidean",
+        schedule=solvers,
         rng_key=jax.random.PRNGKey(0),
     )
-    frame_state = PermutationState.from_perms(problem, frame)
+    frame_state = TransformState.from_transforms(graph, frame)
 
     shift_total = 0.0
     spread_total = 0.0
@@ -115,7 +115,7 @@ def reference_stability_diagnostic(
                 "Canonicalized clouds have different sample counts."
             ) from exc
 
-        moved = problem.apply(current.params, frame_state)
+        moved = graph.apply_transforms(current.params, frame_state)
         shift_total += _tree_distance(previous.params, moved)
         spread_total += _tree_distance(previous.params, previous_mean.params)
         count += 1
