@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .._jax_platforms import is_gpu_platform
-from ..config import RunConfig, resolve_adapter_defaults
+from ..config import RunConfig, resolve_recipe_defaults
 from ..logging_utils import progress_bar
 from ..samples import WeightSample
 from ..state import RunState, SampleManifest, SampleRecord
@@ -55,7 +55,7 @@ class _RunnerPipelineSink:
         logger = self.output_logger
         if output.scale_factors is not None:
             logger.write_scale_factors(record, output.scale_factors)
-        if output.permutations is not None and self.runner.config.rebasin:
+        if output.permutations is not None and self.runner.config.match:
             logger.write_permutations(record, output.permutations)
         if (
             self.final_pass
@@ -91,7 +91,7 @@ class AlignmentRunner:
         self.logger = logger
         self.progress_logger = progress_logger or _LOG
         self.config = config
-        resolve_adapter_defaults(self.config)
+        resolve_recipe_defaults(self.config)
         self.save_intermediate = bool(config.runtime.save_intermediate)
         self.per_device_batch = max(1, int(config.runtime.per_device_batch or 1))
         self.stage_order = config.active_stages()
@@ -110,8 +110,8 @@ class AlignmentRunner:
             config.runtime.validate_artifacts_on_resume
         )
         self._refinement_pass_index = 0
-        self._rebasin_reference_path: Path | None = None
-        self._rebasin_reference_index: int | None = self.manifest.reference_index
+        self._match_reference_path: Path | None = None
+        self._match_reference_index: int | None = self.manifest.reference_index
 
     def _dry_run_summary_extra(self) -> dict[str, Any]:
         return {
@@ -120,8 +120,8 @@ class AlignmentRunner:
         }
 
     def _barycenter_passes(self) -> int:
-        config = self.config.rebasin
-        if config is None or not config.enabled:
+        config = self.config.match
+        if config is None:
             return 1
         return int(config.barycenter_passes)
 
@@ -130,12 +130,8 @@ class AlignmentRunner:
         if requested is not None:
             return max(1, int(requested))
 
-        rebasin_cfg = self.config.rebasin
-        if (
-            rebasin_cfg
-            and rebasin_cfg.enabled
-            and any(step.solver == "sinkhorn" for step in rebasin_cfg.schedule)
-        ):
+        match_cfg = self.config.match
+        if match_cfg and any(step.solver == "sinkhorn" for step in match_cfg.solvers):
             gpu_count = len(self._visible_gpu_ids(self.config.runtime.device_ids))
             if gpu_count > 0:
                 return gpu_count
@@ -163,7 +159,7 @@ class AlignmentRunner:
 
         loader = SampleLoader(self.manifest)
         configured_reference = loader.load_reference()
-        rebasin_reference: WeightSample | None = None
+        match_reference: WeightSample | None = None
         previous_logger: RunArtifactStore | None = None
         stability_history: list[dict[str, Any]] = []
         refinement_root = self.run_manifest.state_dir / "refinement"
@@ -188,18 +184,18 @@ class AlignmentRunner:
             )
 
             self._refinement_pass_index = pass_index
-            self._rebasin_reference_index = (
+            self._match_reference_index = (
                 self.manifest.reference_index if pass_index == 0 else None
             )
-            self._rebasin_reference_path = None
-            if rebasin_reference is not None:
+            self._match_reference_path = None
+            if match_reference is not None:
                 reference_path = refinement_root / f"reference_{pass_number}.npz"
-                self.logger.sample_codec.save(reference_path, rebasin_reference)
-                self._rebasin_reference_path = reference_path
+                self.logger.sample_codec.save(reference_path, match_reference)
+                self._match_reference_path = reference_path
 
             self._stage_executors = self._prepare_executors(
                 configured_reference,
-                rebasin_reference=rebasin_reference,
+                match_reference=match_reference,
                 pass_index=pass_index,
             )
             self.progress_logger.info(
@@ -244,7 +240,7 @@ class AlignmentRunner:
                 )
 
             if not final_pass:
-                rebasin_reference = self._mean_output_sample(output_logger)
+                match_reference = self._mean_output_sample(output_logger)
                 previous_logger = output_logger
 
         total_elapsed = self.run_manifest.add_elapsed(elapsed)
@@ -298,19 +294,19 @@ class AlignmentRunner:
         previous_pass: int,
         current_pass: int,
     ) -> dict[str, Any]:
-        rebasin_executor = self._get_stage_executor("rebasin")
-        if rebasin_executor is None or rebasin_executor.problem is None:
+        match_executor = self._get_stage_executor("match")
+        if match_executor is None or match_executor.problem is None:
             raise RuntimeError(
-                "Reference stability requires a prepared rebasin executor."
+                "Reference stability requires a prepared match executor."
             )
-        rebasin_config = self.config.rebasin
-        if rebasin_config is None:
-            raise RuntimeError("Reference stability requires rebasin configuration.")
+        match_config = self.config.match
+        if match_config is None:
+            raise RuntimeError("Reference stability requires match configuration.")
         return reference_stability_diagnostic(
             previous_samples=lambda: self._output_samples(previous_logger),
             current_samples=lambda: self._output_samples(current_logger),
-            problem=rebasin_executor.problem,
-            schedule=rebasin_config.schedule,
+            problem=match_executor.problem,
+            solvers=match_config.solvers,
             previous_pass=previous_pass,
             current_pass=current_pass,
         )
@@ -365,28 +361,29 @@ class AlignmentRunner:
         self,
         ref_sample: WeightSample,
         *,
-        rebasin_reference: WeightSample | None = None,
+        match_reference: WeightSample | None = None,
         pass_index: int = 0,
     ) -> list[tuple[str, StageExecutor]]:
         executors: dict[str, StageExecutor] = {}
-        adapter_kwargs = dict(self.config.adapter or {})
-        if self.config.normalize and self.config.normalize.enabled:
-            executors["normalize"] = CanonicalizeExecutor(
-                self.config.normalize,
-                architecture=self.config.architecture,
-                adapter_kwargs=adapter_kwargs,
+        family = self.config.architecture.family
+        recipe_kwargs = dict(self.config.architecture.recipe_kwargs)
+        if self.config.canonicalize is not None:
+            executors["canonicalize"] = CanonicalizeExecutor(
+                self.config.canonicalize,
+                family=family,
+                recipe_kwargs=recipe_kwargs,
             )
-        if self.config.rebasin and self.config.rebasin.enabled:
-            executors["rebasin"] = MatchExecutor(
-                self.config.rebasin,
+        if self.config.match is not None:
+            executors["match"] = MatchExecutor(
+                self.config.match,
                 reference_index=(
                     self.manifest.reference_index if pass_index == 0 else None
                 ),
-                seed=self.config.rebasin.seed,
+                seed=self.config.match.seed,
                 rng_offset=pass_index * self.manifest.total,
                 batch_size=self.per_device_batch,
-                architecture=self.config.architecture,
-                adapter_kwargs=adapter_kwargs,
+                family=family,
+                recipe_kwargs=recipe_kwargs,
             )
 
         stage_list: list[tuple[str, StageExecutor]] = []
@@ -396,12 +393,12 @@ class AlignmentRunner:
             if executor is None:
                 continue
             stage_reference = (
-                rebasin_reference
-                if name == "rebasin" and rebasin_reference is not None
+                match_reference
+                if name == "match" and match_reference is not None
                 else ref_current
             )
             executor.prepare(self.manifest, stage_reference)
-            if name == "rebasin":
+            if name == "match":
                 ref_current = stage_reference
             else:
                 ref_current = executor.reference_output(
@@ -449,7 +446,7 @@ class AlignmentRunner:
             self._stage_executors,
             save_intermediate=self.save_intermediate,
         )
-        use_batched = pipeline.can_batch_rebasin(self.per_device_batch)
+        use_batched = pipeline.can_batch_match(self.per_device_batch)
         batch_size = self.per_device_batch if use_batched else 1
 
         try:
@@ -491,8 +488,8 @@ class AlignmentRunner:
         scratch_root = self.run_manifest.state_dir / "scratch"
         scratch_root.mkdir(parents=True, exist_ok=True)
 
-        rebasin_executor = self._get_stage_executor("rebasin")
-        prefers_gpu = rebasin_executor.prefers_gpu if rebasin_executor else False
+        match_executor = self._get_stage_executor("match")
+        prefers_gpu = match_executor.prefers_gpu if match_executor else False
         pool = WorkerPool(
             parallelism=self.parallelism,
             device_ids=self.config.runtime.device_ids,
@@ -698,8 +695,8 @@ class AlignmentRunner:
                 )
 
     def _worker_chunk_size(self) -> int:
-        rebasin_executor = self._get_stage_executor("rebasin")
-        if rebasin_executor and rebasin_executor.supports_batching:
+        match_executor = self._get_stage_executor("match")
+        if match_executor and match_executor.supports_batching:
             return max(1, self.per_device_batch)
         return 1
 
@@ -707,22 +704,18 @@ class AlignmentRunner:
         return {
             "manifest_path": str(self.run_manifest.manifest_path),
             "stages": [name for name, _ in self._stage_executors],
-            "normalize_config": self.config.normalize
-            if self.config.normalize and self.config.normalize.enabled
-            else None,
-            "rebasin_config": self.config.rebasin
-            if self.config.rebasin and self.config.rebasin.enabled
-            else None,
-            "seed": self.config.rebasin.seed if self.config.rebasin else None,
+            "canonicalize_config": self.config.canonicalize,
+            "match_config": self.config.match,
+            "seed": self.config.match.seed if self.config.match else None,
             "rng_offset": self._refinement_pass_index * self.manifest.total,
-            "rebasin_reference_path": str(self._rebasin_reference_path)
-            if self._rebasin_reference_path is not None
+            "match_reference_path": str(self._match_reference_path)
+            if self._match_reference_path is not None
             else None,
-            "rebasin_reference_index": self._rebasin_reference_index,
+            "match_reference_index": self._match_reference_index,
             "per_device_batch": self.per_device_batch,
             "save_intermediate": self.save_intermediate,
-            "architecture": self.config.architecture,
-            "adapter_kwargs": dict(self.config.adapter or {}),
+            "family": self.config.architecture.family,
+            "recipe_kwargs": dict(self.config.architecture.recipe_kwargs),
             "heartbeat_interval": _WORKER_HEARTBEAT_INTERVAL,
         }
 

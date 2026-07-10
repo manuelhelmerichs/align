@@ -16,20 +16,18 @@ from ..samples import WeightSample, create_sample_codec
 from ..state import ArtifactChecksumStore, SampleManifest, SampleRecord, _file_checksum
 from .common import _STATE_SAVE_INTERVAL_SECONDS
 
-_NORMALIZE_STATIC_KEYS = frozenset(
+_CANONICALIZE_STATIC_KEYS = frozenset(
     {
-        "task_type",
+        "plan",
+        "strategy",
         "epsilon",
-        "degenerate_handling",
-        "normalize_biases",
+        "degenerate_channels",
+        "include_bias_in_norm",
         "activation",
-        "classification_head_rescale",
-        "num_classes",
     }
 )
-_NORMALIZE_PER_SAMPLE_KEYS = frozenset({"last_layer_gamma"})
-_REBASIN_STATIC_KEYS = frozenset({"objective", "schedule", "barycenter_passes"})
-_REBASIN_PER_SAMPLE_KEYS = frozenset({"reference"})
+_MATCH_STATIC_KEYS = frozenset({"objective", "solvers", "barycenter_passes"})
+_MATCH_PER_SAMPLE_KEYS = frozenset({"reference"})
 
 
 class RunArtifactStore:
@@ -64,9 +62,9 @@ class RunArtifactStore:
         self._static_config: dict[str, dict[str, Any]] = {}
 
         checksum_kinds = ["final"]
-        if "rebasin" in self.stages:
+        if "match" in self.stages:
             checksum_kinds.append("permutations")
-        if "normalize" in self.stages:
+        if "canonicalize" in self.stages:
             checksum_kinds.append("scale_factors")
         if self.save_intermediate:
             checksum_kinds.append("intermediate")
@@ -83,10 +81,10 @@ class RunArtifactStore:
 
         self.final_dir = self.output_dir / "final"
         self.permutations_dir = (
-            self.output_dir / "permutations" if "rebasin" in self.stages else None
+            self.output_dir / "permutations" if "match" in self.stages else None
         )
         self.scale_factors_dir = (
-            self.output_dir / "scale_factors" if "normalize" in self.stages else None
+            self.output_dir / "scale_factors" if "canonicalize" in self.stages else None
         )
         self.intermediate_dir = (
             self.output_dir / "intermediate" if self.save_intermediate else None
@@ -300,27 +298,21 @@ class RunArtifactStore:
 
         filtered_payload: dict[str, Any] = {}
         for stage, stage_data in payload.items():
-            if stage == "normalize" and isinstance(stage_data, dict):
-                if "normalize" not in self._static_config:
-                    self._static_config["normalize"] = {
+            if stage == "canonicalize" and isinstance(stage_data, dict):
+                if "canonicalize" not in self._static_config:
+                    self._static_config["canonicalize"] = {
                         k: v
                         for k, v in stage_data.items()
-                        if k in _NORMALIZE_STATIC_KEYS
+                        if k in _CANONICALIZE_STATIC_KEYS
+                    }
+                # The canonicalize stage carries no per-sample aux keys.
+            elif stage == "match" and isinstance(stage_data, dict):
+                if "match" not in self._static_config:
+                    self._static_config["match"] = {
+                        k: v for k, v in stage_data.items() if k in _MATCH_STATIC_KEYS
                     }
                 per_sample = {
-                    k: v
-                    for k, v in stage_data.items()
-                    if k in _NORMALIZE_PER_SAMPLE_KEYS
-                }
-                if per_sample:
-                    filtered_payload[stage] = per_sample
-            elif stage == "rebasin" and isinstance(stage_data, dict):
-                if "rebasin" not in self._static_config:
-                    self._static_config["rebasin"] = {
-                        k: v for k, v in stage_data.items() if k in _REBASIN_STATIC_KEYS
-                    }
-                per_sample = {
-                    k: v for k, v in stage_data.items() if k in _REBASIN_PER_SAMPLE_KEYS
+                    k: v for k, v in stage_data.items() if k in _MATCH_PER_SAMPLE_KEYS
                 }
                 if per_sample:
                     filtered_payload[stage] = per_sample

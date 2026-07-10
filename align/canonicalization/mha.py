@@ -61,13 +61,13 @@ def _projection_energy(
     params: Mapping[str, Any],
     tensor_id: str,
     *,
-    normalize_biases: bool,
+    include_bias_in_norm: bool,
 ) -> jnp.ndarray:
     """Squared per-``(head, dim)`` energy of one q/k/v kernel (+ bias)."""
 
     kernel = jnp.asarray(_descend(params, problem.tensors[tensor_id].path))
     energy = jnp.sum(jnp.square(kernel), axis=0)
-    if normalize_biases:
+    if include_bias_in_norm:
         bias_energy = _bias_energy(problem, params, tensor_id)
         if bias_energy is not None:
             energy = energy + bias_energy
@@ -79,7 +79,7 @@ def attention_balancing_scales(
     params: Mapping[str, Any],
     *,
     epsilon: float = 1e-8,
-    normalize_biases: bool = True,
+    include_bias_in_norm: bool = True,
 ) -> dict[str, jnp.ndarray]:
     """Compute per-group balancing scales for every attention component.
 
@@ -96,13 +96,22 @@ def attention_balancing_scales(
         metadata = constraint.metadata
         tensor_ids = dict(metadata["tensors"])
         query_energy = _projection_energy(
-            problem, params, tensor_ids["query"], normalize_biases=normalize_biases
+            problem,
+            params,
+            tensor_ids["query"],
+            include_bias_in_norm=include_bias_in_norm,
         )
         key_energy = _projection_energy(
-            problem, params, tensor_ids["key"], normalize_biases=normalize_biases
+            problem,
+            params,
+            tensor_ids["key"],
+            include_bias_in_norm=include_bias_in_norm,
         )
         value_energy = _projection_energy(
-            problem, params, tensor_ids["value"], normalize_biases=normalize_biases
+            problem,
+            params,
+            tensor_ids["value"],
+            include_bias_in_norm=include_bias_in_norm,
         )
         out_kernel = jnp.asarray(
             _descend(params, problem.tensors[tensor_ids["out"]].path)

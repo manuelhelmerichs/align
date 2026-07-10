@@ -61,7 +61,7 @@ def reference_stability_diagnostic(
     previous_samples: Callable[[], Iterable[WeightSample]],
     current_samples: Callable[[], Iterable[WeightSample]],
     problem,
-    schedule: Sequence[Mapping[str, Any]] | Sequence[Any],
+    solvers: Sequence[Mapping[str, Any]] | Sequence[Any],
     previous_pass: int,
     current_pass: int,
 ) -> dict[str, Any]:
@@ -80,14 +80,14 @@ def reference_stability_diagnostic(
     previous_mean = tree_mean(previous_samples())
     current_mean = tree_mean(current_samples())
     # Match the two barycenters with a plain L2 frame even under a data-dependent
-    # objective (e.g. fisher_l2): here we want the geometric movement of canonical
+    # objective (e.g. diagonal_fisher): here we want the geometric movement of canonical
     # positions between passes, not an objective-weighted distance.
     _, frame, _ = match_sample(
         problem,
         previous_mean.params,
         current_mean.params,
-        objective="l2_weight",
-        schedule=schedule,
+        objective="euclidean",
+        schedule=solvers,
         rng_key=jax.random.PRNGKey(0),
     )
     frame_state = TransformState.from_transforms(problem, frame)

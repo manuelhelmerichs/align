@@ -201,7 +201,7 @@ class _WorkerLoop:
         try:
             batch_size = (
                 self.per_device_batch
-                if self._pipeline.can_batch_rebasin(self.per_device_batch)
+                if self._pipeline.can_batch_match(self.per_device_batch)
                 else 1
             )
             self._pipeline.run_records(
@@ -298,44 +298,44 @@ def _build_stage_executors(
     job: dict[str, Any],
     manifest: SampleManifest,
     ref_sample: WeightSample,
-    rebasin_reference: WeightSample | None = None,
+    match_reference: WeightSample | None = None,
 ):
     from .stages import CanonicalizeExecutor, MatchExecutor
 
     stages: list[tuple[str, Any]] = []
-    normalize_cfg = job.get("normalize_config")
-    rebasin_cfg = job.get("rebasin_config")
+    canonicalize_cfg = job.get("canonicalize_config")
+    match_cfg = job.get("match_config")
     stage_order = job.get("stages") or []
-    architecture = job.get("architecture", "dense_mlp")
-    adapter_kwargs = job.get("adapter_kwargs") or {}
+    family = job.get("family", "mlp")
+    recipe_kwargs = job.get("recipe_kwargs") or {}
 
-    if normalize_cfg:
+    if canonicalize_cfg:
         stages.append(
             (
-                "normalize",
+                "canonicalize",
                 CanonicalizeExecutor(
-                    normalize_cfg,
-                    architecture=architecture,
-                    adapter_kwargs=adapter_kwargs,
+                    canonicalize_cfg,
+                    family=family,
+                    recipe_kwargs=recipe_kwargs,
                 ),
             )
         )
-    if rebasin_cfg:
+    if match_cfg:
         stages.append(
             (
-                "rebasin",
+                "match",
                 MatchExecutor(
-                    rebasin_cfg,
+                    match_cfg,
                     reference_index=(
-                        job["rebasin_reference_index"]
-                        if "rebasin_reference_index" in job
+                        job["match_reference_index"]
+                        if "match_reference_index" in job
                         else manifest.reference_index
                     ),
                     seed=job.get("seed"),
                     rng_offset=int(job.get("rng_offset") or 0),
                     batch_size=int(job.get("per_device_batch") or 1),
-                    architecture=architecture,
-                    adapter_kwargs=adapter_kwargs,
+                    family=family,
+                    recipe_kwargs=recipe_kwargs,
                 ),
             )
         )
@@ -349,12 +349,12 @@ def _build_stage_executors(
     ref_current = ref_sample
     for name, executor in stages:
         stage_reference = (
-            rebasin_reference
-            if name == "rebasin" and rebasin_reference is not None
+            match_reference
+            if name == "match" and match_reference is not None
             else ref_current
         )
         executor.prepare(manifest, stage_reference)
-        if name == "rebasin":
+        if name == "match":
             ref_current = stage_reference
         else:
             ref_current = executor.reference_output(
@@ -376,15 +376,15 @@ def run_worker(job: dict[str, Any], command_queue, progress_queue) -> None:
 
     loader = SampleLoader(manifest)
     ref_sample = loader.load_reference()
-    rebasin_reference = None
-    reference_path = job.get("rebasin_reference_path")
+    match_reference = None
+    reference_path = job.get("match_reference_path")
     if reference_path:
-        rebasin_reference = loader.codec.load(Path(reference_path))
+        match_reference = loader.codec.load(Path(reference_path))
     stages = _build_stage_executors(
         job,
         manifest,
         ref_sample,
-        rebasin_reference=rebasin_reference,
+        match_reference=match_reference,
     )
 
     loop = _WorkerLoop(

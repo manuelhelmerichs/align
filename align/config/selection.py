@@ -14,8 +14,8 @@ _SELECTION_FIELDS = frozenset(
         "samples_per_chain",
         "sample_step",
         "max_total",
-        "ref_chain",
-        "ref_sample",
+        "reference_chain",
+        "reference_sample",
     }
 )
 
@@ -28,8 +28,8 @@ class SelectionConfig:
     samples_per_chain: int | None = None
     sample_step: int = 1
     max_total: int | None = None
-    ref_chain: int = 0
-    ref_sample: int = 0
+    reference_chain: int = 0
+    reference_sample: int = 0
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> SelectionConfig:
@@ -42,8 +42,8 @@ class SelectionConfig:
             samples_per_chain=_maybe_int(payload.get("samples_per_chain")),
             sample_step=int(payload.get("sample_step", 1)),
             max_total=_maybe_int(payload.get("max_total")),
-            ref_chain=int(payload.get("ref_chain", 0)),
-            ref_sample=int(payload.get("ref_sample", 0)),
+            reference_chain=int(payload.get("reference_chain", 0)),
+            reference_sample=int(payload.get("reference_sample", 0)),
         )
 
 

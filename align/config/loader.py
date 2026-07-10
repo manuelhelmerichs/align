@@ -1,4 +1,4 @@
-"""Configuration loader, validation, and the main RunConfig class."""
+"""Configuration loader, validation, and the schema-v2 RunConfig class."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import yaml
 
 from ..sample_formats import normalize_sample_format
 from ._utils import _merge_dicts, _validate_fields
+from .architecture import ArchitectureConfig
 from .paths import PathConfig, path_to_dict
 from .runtime import RuntimeConfig
 from .selection import SelectionConfig
@@ -20,15 +21,17 @@ from .stages import CanonicalizeConfig, MatchConfig
 if TYPE_CHECKING:
     from ..state import SampleManifest
 
-_ALIGN_CONFIG_FIELDS = frozenset(
+SCHEMA_VERSION = 2
+_STAGES = ("canonicalize", "match")
+_TOP_LEVEL_FIELDS = frozenset(
     {
+        "schema_version",
         "paths",
         "architecture",
-        "adapter",
         "selection",
-        "order",
-        "normalize",
-        "rebasin",
+        "pipeline",
+        "canonicalize",
+        "match",
         "runtime",
     }
 )
@@ -36,95 +39,102 @@ _ALIGN_CONFIG_FIELDS = frozenset(
 
 @dataclass
 class RunConfig:
-    """Configuration for the align CLI."""
+    """Resolved configuration for one alignment run (schema version 2)."""
 
     paths: PathConfig = field(default_factory=PathConfig)
-    architecture: str = "dense_mlp"
-    adapter: dict[str, Any] = field(default_factory=dict)
+    architecture: ArchitectureConfig = field(default_factory=ArchitectureConfig)
     selection: SelectionConfig = field(default_factory=SelectionConfig)
-    order: str | None = None
-    normalize: CanonicalizeConfig | None = field(default_factory=CanonicalizeConfig)
-    rebasin: MatchConfig | None = field(default_factory=MatchConfig)
+    pipeline: tuple[str, ...] = ("canonicalize", "match")
+    canonicalize: CanonicalizeConfig | None = field(default_factory=CanonicalizeConfig)
+    match: MatchConfig | None = field(default_factory=MatchConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> RunConfig:
-        _validate_fields("top-level", payload, _ALIGN_CONFIG_FIELDS)
-        normalize_cfg = (
-            CanonicalizeConfig.from_mapping(payload.get("normalize"))
-            if "normalize" in payload
-            else None
-        )
-        rebasin_cfg = (
-            MatchConfig.from_mapping(payload.get("rebasin"))
-            if "rebasin" in payload
-            else None
-        )
+        _validate_fields("top-level", payload, _TOP_LEVEL_FIELDS)
+        version = payload.get("schema_version")
+        if version is None:
+            raise ValueError(
+                "Config must set 'schema_version: 2'. Version-1 configs are not "
+                "translated; migrate to the schema-v2 layout."
+            )
+        if int(version) != SCHEMA_VERSION:
+            raise ValueError(
+                f"Unsupported schema_version {version!r}; this build requires "
+                f"schema_version {SCHEMA_VERSION}."
+            )
+
+        pipeline_raw = payload.get("pipeline")
+        if not isinstance(pipeline_raw, list) or not pipeline_raw:
+            raise ValueError("Config must define a non-empty 'pipeline' list.")
+        pipeline = tuple(str(stage).lower() for stage in pipeline_raw)
+        unknown = [stage for stage in pipeline if stage not in _STAGES]
+        if unknown:
+            raise ValueError(
+                "Unknown pipeline stage(s): "
+                + ", ".join(unknown)
+                + f". Available: {', '.join(_STAGES)}."
+            )
+        if len(set(pipeline)) != len(pipeline):
+            raise ValueError("pipeline stages must be unique.")
+
+        canonicalize_cfg: CanonicalizeConfig | None = None
+        if "canonicalize" in pipeline:
+            canonicalize_cfg = CanonicalizeConfig.from_mapping(
+                payload.get("canonicalize", {})
+            )
+        elif "canonicalize" in payload:
+            raise ValueError(
+                "A 'canonicalize' section is present but 'canonicalize' is not in "
+                "the pipeline."
+            )
+
+        match_cfg: MatchConfig | None = None
+        if "match" in pipeline:
+            match_cfg = MatchConfig.from_mapping(payload.get("match", {}))
+        elif "match" in payload:
+            raise ValueError(
+                "A 'match' section is present but 'match' is not in the pipeline."
+            )
+
         return cls(
             paths=PathConfig.from_mapping(payload.get("paths", {})),
-            architecture=str(payload.get("architecture", "dense_mlp")),
-            adapter=dict(payload.get("adapter", {})),
+            architecture=ArchitectureConfig.from_mapping(
+                payload.get("architecture", {})
+            ),
             selection=SelectionConfig.from_mapping(payload.get("selection", {})),
-            order=payload.get("order"),
-            normalize=normalize_cfg,
-            rebasin=rebasin_cfg,
+            pipeline=pipeline,
+            canonicalize=canonicalize_cfg,
+            match=match_cfg,
             runtime=RuntimeConfig.from_mapping(payload.get("runtime", {})),
         )
 
     def active_stages(self) -> list[str]:
-        """Return ordered list of active stages."""
-        stages: list[str] = []
-        norm_enabled = self.normalize is not None and self.normalize.enabled
-        rebasin_enabled = self.rebasin is not None and self.rebasin.enabled
+        """Return the ordered pipeline stages."""
 
-        if not norm_enabled and not rebasin_enabled:
-            raise ValueError("At least one of normalize or rebasin must be enabled.")
-
-        order = (self.order or "").lower()
-        if order == "rebasin_first":
-            if rebasin_enabled:
-                stages.append("rebasin")
-            if norm_enabled:
-                stages.append("normalize")
-        else:
-            if norm_enabled:
-                stages.append("normalize")
-            if rebasin_enabled:
-                stages.append("rebasin")
-        return stages
+        return list(self.pipeline)
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
             "paths": path_to_dict(self.paths),
-            "architecture": self.architecture,
-            "adapter": self.adapter,
+            "architecture": self.architecture.as_dict(),
             "selection": asdict(self.selection),
-            "order": self.order,
+            "pipeline": list(self.pipeline),
             "runtime": asdict(self.runtime),
         }
-        if self.normalize is not None:
-            payload["normalize"] = {
-                "enabled": self.normalize.enabled,
-                "method": self.normalize.method,
-                "parameter_root": self.normalize.parameter_root,
-                "task_type": self.normalize.task_type,
-                "num_classes": self.normalize.num_classes,
-                "scale_normalize": asdict(self.normalize.scale_normalize),
+        payload["canonicalize"] = (
+            self.canonicalize.as_dict() if self.canonicalize is not None else None
+        )
+        if self.match is not None:
+            payload["match"] = {
+                "objective": self.match.objective.as_dict(),
+                "seed": self.match.seed,
+                "barycenter_passes": self.match.barycenter_passes,
+                "solvers": self.match.solvers_payload(),
             }
         else:
-            payload["normalize"] = None
-        if self.rebasin is not None:
-            payload["rebasin"] = {
-                "enabled": self.rebasin.enabled,
-                "objective": self.rebasin.objective,
-                "objective_kwargs": self.rebasin.objective_kwargs,
-                "schedule": self.rebasin.schedule_payload(),
-                "parameter_root": self.rebasin.parameter_root,
-                "seed": self.rebasin.seed,
-                "barycenter_passes": self.rebasin.barycenter_passes,
-            }
-        else:
-            payload["rebasin"] = None
+            payload["match"] = None
         return payload
 
 
@@ -166,55 +176,52 @@ def validate_paths(config: RunConfig) -> None:
             raise FileNotFoundError(f"Tree path must be a file: {resolved_tree}")
 
 
-def resolve_adapter_defaults(config: RunConfig) -> None:
-    """Fill adapter defaults derivable from resolved path configuration."""
+def resolve_recipe_defaults(config: RunConfig) -> None:
+    """Fill recipe discovery options derivable from resolved paths."""
 
-    if config.architecture != "resnet":
+    if config.architecture.family != "residual_convnet":
         return
     root = config.paths.experiment_root
     if root is None:
         return
-    adapter_kwargs = dict(config.adapter or {})
-    if adapter_kwargs.get("residual_topology") is not None:
+    options = config.architecture.options
+    if options.get("residual_topology") is not None:
         return
     # The producer emits a "module_graph.json" descriptor; align consumes it as
     # the recipe's residual_topology (an on-disk producer artifact name).
-    residual_topology_path = Path(root) / "module_graph.json"
-    if residual_topology_path.exists():
-        adapter_kwargs["residual_topology"] = str(residual_topology_path)
-        config.adapter = adapter_kwargs
+    topology_path = Path(root) / "module_graph.json"
+    if topology_path.exists():
+        options["residual_topology"] = str(topology_path)
 
 
 def validate_ref_sample(manifest: SampleManifest, selection: SelectionConfig) -> None:
     """Ensure the reference sample exists inside the manifest."""
 
-    ref_label = f"chain{selection.ref_chain}_sample{selection.ref_sample}"
+    ref_label = f"chain{selection.reference_chain}_sample{selection.reference_sample}"
     if not any(record.label == ref_label for record in manifest.records):
         raise ValueError(
-            f"Reference sample {ref_label} missing from manifest. Adjust selection filters."
+            f"Reference sample {ref_label} missing from manifest. "
+            "Adjust selection filters."
         )
 
 
 def validate_method(config: RunConfig) -> None:
-    """Validate configured stage methods and architecture compatibility."""
+    """Validate architecture-family availability (stage options self-validate)."""
 
-    if config.rebasin is not None:
-        config.rebasin.validate_method()
-    if config.normalize is not None:
-        config.normalize.validate_method()
     from ..architectures import available_recipes
 
-    if config.architecture not in available_recipes():
+    if config.architecture.family not in available_recipes():
         raise ValueError(
-            f"Unknown architecture '{config.architecture}'. "
+            f"Unknown architecture family '{config.architecture.family}'. "
             f"Available: {', '.join(available_recipes())}"
         )
 
 
 __all__ = [
+    "SCHEMA_VERSION",
     "RunConfig",
     "load_align_config",
-    "resolve_adapter_defaults",
+    "resolve_recipe_defaults",
     "validate_method",
     "validate_paths",
     "validate_ref_sample",

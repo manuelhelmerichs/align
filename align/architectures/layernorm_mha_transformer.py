@@ -75,7 +75,7 @@ class _DenseLayer:
 class LayerNormMHATransformerRecipe(ArchitectureRecipe):
     """Recipe for pre-LN transformer trees (bayesmates GPT/ViT layout)."""
 
-    name: str = "transformer"
+    name: str = "layernorm_mha_transformer"
     parameter_root: str = ""
 
     # -- discovery -------------------------------------------------------

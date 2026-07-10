@@ -14,7 +14,7 @@ from ._jax_platforms import configure_jax_platforms, is_gpu_platform
 from .config import (
     RunConfig,
     load_align_config,
-    resolve_adapter_defaults,
+    resolve_recipe_defaults,
     validate_method,
     validate_paths,
     validate_ref_sample,
@@ -31,7 +31,7 @@ _LOG = logging.getLogger("align")
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="align",
-        description="Align posterior samples via normalization and/or rebasin.",
+        description="Align posterior samples via canonicalization and/or matching.",
     )
     parser.add_argument("config", type=Path, help="Path to YAML configuration file.")
     parser.add_argument(
@@ -39,33 +39,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-dir", type=Path, help="Override output directory.")
     parser.add_argument(
-        "--order",
-        choices=["normalize_first", "rebasin_first"],
-        help="Override processing order.",
-    )
-    parser.add_argument(
         "--architecture",
-        help="Override architecture adapter (e.g., dense_mlp, resnet, transformer).",
+        help="Override the architecture recipe family "
+        "(e.g., mlp, convnet, residual_convnet).",
     )
 
     parser.add_argument(
-        "--normalize-only",
+        "--canonicalize-only",
         action="store_true",
-        help="Run only normalization, skip rebasin.",
+        help="Run only the canonicalize stage, skip matching.",
     )
     parser.add_argument(
-        "--rebasin-only",
+        "--match-only",
         action="store_true",
-        help="Run only rebasin, skip normalization.",
+        help="Run only the match stage, skip canonicalization.",
+    )
+    parser.add_argument(
+        "--pipeline",
+        help="Override the pipeline stages, e.g. 'canonicalize,match'.",
     )
 
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--list-samples", action="store_true")
     parser.add_argument(
-        "--list-problems",
+        "--describe-symmetry",
         action="store_true",
-        help="List the alignment problem components derived from the reference sample.",
+        help="Describe the weight-space symmetry derived from the reference sample.",
     )
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--print-config", action="store_true")
@@ -105,15 +105,17 @@ def _cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
         if args.output_dir:
             overrides["paths"]["output_dir"] = args.output_dir
 
-    if args.order:
-        overrides["order"] = args.order
     if args.architecture:
-        overrides["architecture"] = args.architecture
+        overrides["architecture"] = {"family": args.architecture}
 
-    if args.normalize_only:
-        overrides.setdefault("rebasin", {})["enabled"] = False
-    if args.rebasin_only:
-        overrides.setdefault("normalize", {})["enabled"] = False
+    if args.pipeline:
+        overrides["pipeline"] = [
+            stage.strip() for stage in args.pipeline.split(",") if stage.strip()
+        ]
+    if args.canonicalize_only:
+        overrides["pipeline"] = ["canonicalize"]
+    if args.match_only:
+        overrides["pipeline"] = ["match"]
 
     runtime = overrides.setdefault("runtime", {})
     if args.resume:
@@ -122,8 +124,8 @@ def _cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
         runtime["dry_run"] = True
     if args.list_samples:
         runtime["list_samples"] = True
-    if args.list_problems:
-        runtime["list_problems"] = True
+    if args.describe_symmetry:
+        runtime["describe_symmetry"] = True
     if args.validate_only:
         runtime["validate_only"] = True
     if args.save_intermediate:
@@ -171,7 +173,7 @@ def run(args: argparse.Namespace) -> None:
     config.paths.output_dir = output_dir
     config.paths.samples_dir = samples_dir
     config.paths.tree_path = tree_path
-    resolve_adapter_defaults(config)
+    resolve_recipe_defaults(config)
 
     if output_dir.exists() and not config.runtime.resume:
         raise FileExistsError(
@@ -206,7 +208,7 @@ def run(args: argparse.Namespace) -> None:
         if not (
             config.runtime.dry_run
             or config.runtime.list_samples
-            or config.runtime.list_problems
+            or config.runtime.describe_symmetry
             or config.runtime.validate_only
         ):
             return
@@ -237,8 +239,8 @@ def run(args: argparse.Namespace) -> None:
             print(f"{record.index:05d} | {record.label} | {record.relative_path}")
         return
 
-    if config.runtime.list_problems:
-        print(_problem_listing(config, manifest))
+    if config.runtime.describe_symmetry:
+        print(_describe_symmetry(config, manifest))
         return
 
     if config.runtime.validate_only:
@@ -275,28 +277,16 @@ def main(argv: list[str] | None = None) -> None:
     run(args)
 
 
-def _problem_listing(config: RunConfig, manifest: SampleManifest) -> str:
-    """Build the component listing for the reference sample's alignment problem."""
+def _describe_symmetry(config: RunConfig, manifest: SampleManifest) -> str:
+    """Describe the weight-space symmetry for the reference sample."""
 
     from .architectures import get_recipe
     from .runtime.loaders import SampleLoader
     from .symmetry import format_symmetry_description
 
-    adapter_kwargs = dict(config.adapter or {})
-    parameter_root = None
-    if config.rebasin and config.rebasin.enabled and config.rebasin.parameter_root:
-        parameter_root = config.rebasin.parameter_root
-    elif (
-        config.normalize
-        and config.normalize.enabled
-        and config.normalize.parameter_root
-    ):
-        parameter_root = config.normalize.parameter_root
-    if parameter_root:
-        adapter_kwargs.setdefault("parameter_root", parameter_root)
-    adapter = get_recipe(config.architecture, **adapter_kwargs)
+    recipe = get_recipe(config.architecture.family, **config.architecture.recipe_kwargs)
     ref_sample = SampleLoader(manifest).load_reference()
-    problem = adapter.build_problem(ref_sample.params)
+    problem = recipe.build_problem(ref_sample.params)
     return format_symmetry_description(problem)
 
 
@@ -310,8 +300,8 @@ def _configure_platform_preferences(config: RunConfig) -> None:
     preference = "cpu"
     if force_gpu:
         preference = "gpu"
-    elif config.rebasin and config.rebasin.enabled:
-        if any(step.solver == "sinkhorn" for step in config.rebasin.schedule):
+    elif config.match is not None:
+        if any(step.solver == "sinkhorn" for step in config.match.solvers):
             preference = "gpu"
     applied_preference = configure_jax_platforms(
         preference=preference, allow_preallocation=False
@@ -423,7 +413,6 @@ def _digest_payload(config_payload: Mapping[str, Any]) -> dict[str, Any]:
     selection = dict(config_payload.get("selection", {}))
     payload: dict[str, Any] = {
         "architecture": config_payload.get("architecture"),
-        "adapter": config_payload.get("adapter"),
         "paths": {
             "experiment_root": resolved.get("experiment_root"),
             "samples_dir": resolved.get("samples_dir"),
@@ -431,28 +420,14 @@ def _digest_payload(config_payload: Mapping[str, Any]) -> dict[str, Any]:
             "sample_format": resolved.get("sample_format"),
         },
         "selection": selection,
-        "order": config_payload.get("order"),
-        "stages": config_payload.get("stages"),
+        "pipeline": config_payload.get("pipeline"),
     }
-    normalize = config_payload.get("normalize")
-    if normalize and normalize.get("enabled", False):
-        payload["normalize"] = {
-            "method": normalize.get("method"),
-            "parameter_root": normalize.get("parameter_root"),
-            "task_type": normalize.get("task_type"),
-            "num_classes": normalize.get("num_classes"),
-            "scale_normalize": normalize.get("scale_normalize"),
-        }
-    rebasin = config_payload.get("rebasin")
-    if rebasin and rebasin.get("enabled", False):
-        payload["rebasin"] = {
-            "objective": rebasin.get("objective"),
-            "objective_kwargs": rebasin.get("objective_kwargs"),
-            "schedule": rebasin.get("schedule"),
-            "parameter_root": rebasin.get("parameter_root"),
-            "seed": rebasin.get("seed"),
-            "barycenter_passes": rebasin.get("barycenter_passes"),
-        }
+    canonicalize = config_payload.get("canonicalize")
+    if canonicalize is not None:
+        payload["canonicalize"] = canonicalize
+    match = config_payload.get("match")
+    if match is not None:
+        payload["match"] = match
     return payload
 
 
@@ -480,8 +455,8 @@ def _load_or_build_manifest(
             samples_per_chain=selection.samples_per_chain,
             sample_step=selection.sample_step,
             max_total=selection.max_total,
-            ref_chain=selection.ref_chain,
-            ref_sample=selection.ref_sample,
+            ref_chain=selection.reference_chain,
+            ref_sample=selection.reference_sample,
             sample_format=sample_format,
         )
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -529,7 +504,6 @@ def _load_or_create_run_manifest(
         config_digest=digest,
         manifest_digest=manifest.digest(),
         stages=config.active_stages(),
-        order=config.order,
         reference={
             "chain": manifest.ref_chain,
             "sample": manifest.ref_sample,
@@ -539,14 +513,14 @@ def _load_or_create_run_manifest(
         total_samples=manifest.total,
         runtime_settings=runtime_settings,
         metadata={
-            "architecture": config.architecture,
-            "normalize_method": config.normalize.method if config.normalize else None,
-            "rebasin_objective": config.rebasin.objective if config.rebasin else None,
-            "rebasin_schedule": config.rebasin.schedule_payload()
-            if config.rebasin
+            "architecture": config.architecture.family,
+            "canonicalize_strategy": config.canonicalize.strategy
+            if config.canonicalize
             else None,
-            "rebasin_barycenter_passes": config.rebasin.barycenter_passes
-            if config.rebasin
+            "match_objective": config.match.objective.type if config.match else None,
+            "match_solvers": config.match.solvers_payload() if config.match else None,
+            "match_barycenter_passes": config.match.barycenter_passes
+            if config.match
             else None,
         },
     )

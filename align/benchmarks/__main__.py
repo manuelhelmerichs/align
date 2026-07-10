@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_experiment_arguments(posterior, required=True)
     posterior.add_argument(
-        "--objective", default="l2_weight", help="Objective name (default l2_weight)."
+        "--objective", default="euclidean", help="Objective name (default euclidean)."
     )
     posterior.add_argument(
         "--objective-kwargs",

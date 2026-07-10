@@ -239,11 +239,11 @@ def _require_lap_linearizable(problem, group_id: str) -> None:
         )
 
 
-@register_objective("l2_weight")
+@register_objective("euclidean")
 class EuclideanObjective(Objective):
     """Sum of squared tensor differences after applying the alignment state."""
 
-    name = "l2_weight"
+    name = "euclidean"
 
     def __init__(self, repeated_group_policy: str = "reject") -> None:
         if repeated_group_policy != "reject":
@@ -311,7 +311,7 @@ class EuclideanObjective(Objective):
         return signed, invariant
 
 
-@register_objective("fisher_l2")
+@register_objective("diagonal_fisher")
 class DiagonalFisherObjective(Objective):
     """Diagonal Fisher-metric weight distance.
 
@@ -327,12 +327,12 @@ class DiagonalFisherObjective(Objective):
     permutation-invariant, so the exact LAP cost carries an extra self term.
     """
 
-    name = "fisher_l2"
+    name = "diagonal_fisher"
 
     def __init__(self, tensor_weights=None, weights_path=None) -> None:
         if (tensor_weights is None) == (weights_path is None):
             raise ValueError(
-                "fisher_l2 requires exactly one of 'tensor_weights' (mapping "
+                "diagonal_fisher requires exactly one of 'tensor_weights' (mapping "
                 "of tensor id to weight array) or 'weights_path' (npz file)."
             )
         if weights_path is not None:
@@ -346,20 +346,20 @@ class DiagonalFisherObjective(Objective):
         for tensor_id, weight in self.tensor_weights.items():
             if not np.all(weight >= 0.0):
                 raise ValueError(
-                    f"fisher_l2 weights for tensor {tensor_id!r} must be non-negative."
+                    f"diagonal_fisher weights for tensor {tensor_id!r} must be non-negative."
                 )
 
     def _weight(self, problem, tensor_id: str) -> np.ndarray:
         weight = self.tensor_weights.get(tensor_id)
         if weight is None:
             raise ValueError(
-                f"fisher_l2 has no weights for tensor {tensor_id!r}; weights "
+                f"diagonal_fisher has no weights for tensor {tensor_id!r}; weights "
                 "must cover every problem tensor."
             )
         expected = tuple(problem.tensors[tensor_id].shape)
         if tuple(weight.shape) != expected:
             raise ValueError(
-                f"fisher_l2 weights for tensor {tensor_id!r} have shape "
+                f"diagonal_fisher weights for tensor {tensor_id!r} have shape "
                 f"{weight.shape}, expected {expected}."
             )
         return weight

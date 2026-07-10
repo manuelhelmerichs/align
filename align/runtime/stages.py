@@ -37,7 +37,7 @@ class StageResult:
 
 
 class StageExecutor(ABC):
-    """Abstract interface for pipeline stages (normalize, rebasin)."""
+    """Abstract interface for pipeline stages (canonicalize, match)."""
 
     @abstractmethod
     def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
@@ -70,56 +70,49 @@ class StageExecutor(ABC):
     ) -> WeightSample:
         """Return the reference sample after applying this stage.
 
-        Each stage transform_family the reference so the next stage prepares against
+        Each stage transforms the reference so the next stage prepares against
         the already-aligned reference.
         """
         return self.process_single(record, sample).sample
 
 
 class CanonicalizeExecutor(StageExecutor):
-    """Executes the normalization stage."""
+    """Executes the canonicalize stage."""
 
     def __init__(
         self,
         config: CanonicalizeConfig,
         *,
-        architecture: str,
-        adapter_kwargs: Mapping[str, Any],
+        family: str,
+        recipe_kwargs: Mapping[str, Any],
     ) -> None:
         self.config = config
-        self.architecture = architecture
-        self.adapter_kwargs = dict(adapter_kwargs)
-        self.adapter = None
+        self.family = family
+        self.recipe_kwargs = dict(recipe_kwargs)
+        self.recipe = None
         self.problem = None
         self.canonicalizer = None
 
     def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
         from ..canonicalization import ScaleCanonicalizer
 
-        adapter_kwargs = dict(self.adapter_kwargs)
-        if self.config.parameter_root:
-            adapter_kwargs.setdefault("parameter_root", self.config.parameter_root)
-        self.adapter = get_recipe(self.architecture, **adapter_kwargs)
-        self.problem = self.adapter.build_problem(ref_sample.params)
+        self.recipe = get_recipe(self.family, **self.recipe_kwargs)
+        self.problem = self.recipe.build_problem(ref_sample.params)
         self.canonicalizer = ScaleCanonicalizer()
 
     def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
-        if self.adapter is None or self.problem is None or self.canonicalizer is None:
+        if self.recipe is None or self.problem is None or self.canonicalizer is None:
             raise RuntimeError("CanonicalizeExecutor not prepared.")
 
-        normalized_params, scale_factors, aux = self.canonicalizer.canonicalize(
+        canonical_params, scale_factors, aux = self.canonicalizer.canonicalize(
             self.problem,
             sample.params,
-            task_type=self.config.task_type,
-            num_classes=self.config.num_classes,
             **self.config.method_kwargs,
         )
-        aux_payload = dict(aux or {})
-        aux_payload["method"] = self.config.method
         return StageResult(
-            sample=sample.with_params(normalized_params),
+            sample=sample.with_params(canonical_params),
             artifacts={"scale_factors": scale_factors},
-            aux=aux_payload,
+            aux=dict(aux or {}),
         )
 
     def process_batch(
@@ -142,7 +135,7 @@ class CanonicalizeExecutor(StageExecutor):
 
 
 class MatchExecutor(StageExecutor):
-    """Executes the rebasin stage."""
+    """Executes the match stage."""
 
     def __init__(
         self,
@@ -152,8 +145,8 @@ class MatchExecutor(StageExecutor):
         seed: int | None = None,
         rng_offset: int = 0,
         batch_size: int = 1,
-        architecture: str,
-        adapter_kwargs: Mapping[str, Any],
+        family: str,
+        recipe_kwargs: Mapping[str, Any],
     ) -> None:
         self.config = config
         self.reference_index = (
@@ -163,26 +156,23 @@ class MatchExecutor(StageExecutor):
         self.rng_offset = int(rng_offset)
         self.batch_size = max(1, int(batch_size))
 
-        self.adapter = None
+        self.recipe = None
         self.problem = None
         self.ref_sample: WeightSample | None = None
         self.ref_data = None
         self.ref_backend = None
         self.scheduler = None
-        self.architecture = architecture
-        self.adapter_kwargs = dict(adapter_kwargs)
+        self.family = family
+        self.recipe_kwargs = dict(recipe_kwargs)
 
     def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
-        adapter_kwargs = dict(self.adapter_kwargs)
-        if self.config.parameter_root:
-            adapter_kwargs.setdefault("parameter_root", self.config.parameter_root)
-        self.adapter = get_recipe(self.architecture, **adapter_kwargs)
-        self.problem = self.adapter.build_problem(ref_sample.params)
+        self.recipe = get_recipe(self.family, **self.recipe_kwargs)
+        self.problem = self.recipe.build_problem(ref_sample.params)
         self.ref_sample = ref_sample
         self.scheduler = build_solver_sequence(
-            objective=self.config.objective,
-            objective_kwargs=self.config.objective_kwargs,
-            schedule=self.config.schedule,
+            objective=self.config.objective.type,
+            objective_kwargs=self.config.objective.kwargs,
+            schedule=self.config.solvers,
         )
         backend = self.scheduler.backend
         self.ref_backend = backend
@@ -203,8 +193,8 @@ class MatchExecutor(StageExecutor):
         aux: dict[str, Any] | None,
     ) -> StageResult:
         aux_payload = dict(aux or {})
-        aux_payload["objective"] = self.config.objective
-        aux_payload["schedule"] = self.config.schedule_payload()
+        aux_payload["objective"] = self.config.objective.type
+        aux_payload["solvers"] = self.config.solvers_payload()
         aux_payload["barycenter_passes"] = self.config.barycenter_passes
         return StageResult(
             sample=sample.with_params(params),
@@ -214,7 +204,7 @@ class MatchExecutor(StageExecutor):
 
     def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
         if (
-            self.adapter is None
+            self.recipe is None
             or self.problem is None
             or self.ref_sample is None
             or self.scheduler is None
@@ -243,7 +233,7 @@ class MatchExecutor(StageExecutor):
         samples: Sequence[WeightSample],
     ) -> list[StageResult]:
         if (
-            self.adapter is None
+            self.recipe is None
             or self.problem is None
             or self.ref_sample is None
             or self.scheduler is None
@@ -308,7 +298,7 @@ class MatchExecutor(StageExecutor):
     @property
     def prefers_gpu(self) -> bool:
         if self.scheduler is None:
-            return any(step.solver == "sinkhorn" for step in self.config.schedule)
+            return any(step.solver == "sinkhorn" for step in self.config.solvers)
         return bool(self.scheduler.prefers_gpu)
 
 

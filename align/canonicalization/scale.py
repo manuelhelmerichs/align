@@ -53,10 +53,9 @@ from .kernel import (
     _canonicalize_degenerate,
     _outgoing_scale_factors,
     _require_bool,
-    _validate_degenerate_handling,
+    _validate_degenerate_channels,
     compute_degenerate_mask,
     compute_incoming_norms,
-    normalize_last_layer_classification,
 )
 from .mha import attention_balancing_scales, attention_constraints
 from .rmsnorm_gqa_rope import (
@@ -83,7 +82,6 @@ class _DenseScaleSite:
 class _DenseScalePlan:
     sites: tuple[_DenseScaleSite, ...]
     head_kernel_path: tuple[str, ...]
-    head_bias_path: tuple[str, ...]
 
 
 def _dense_scale_plan(problem: SymmetryGraph) -> _DenseScalePlan:
@@ -225,7 +223,6 @@ def _dense_scale_plan(problem: SymmetryGraph) -> _DenseScalePlan:
     return _DenseScalePlan(
         sites=tuple(sites),
         head_kernel_path=head_path,
-        head_bias_path=(*head_path[:-1], "bias"),
     )
 
 
@@ -246,8 +243,8 @@ def _group_scales(
     plan: _DenseScalePlan,
     *,
     epsilon: float,
-    degenerate_handling: str,
-    normalize_biases: bool,
+    degenerate_channels: str,
+    include_bias_in_norm: bool,
 ) -> tuple[dict[str, Any], list[Any], dict[str, Any]]:
     """Derive per-group scales by folding each group's scale into the next kernel.
 
@@ -277,17 +274,17 @@ def _group_scales(
 
         layer = DenseLayer(kernel=kernel, bias=bias)
         norms = compute_incoming_norms(
-            layer, epsilon=epsilon, normalize_biases=normalize_biases
+            layer, epsilon=epsilon, include_bias_in_norm=include_bias_in_norm
         )
         mask = compute_degenerate_mask(
-            layer, epsilon=epsilon, normalize_biases=normalize_biases
+            layer, epsilon=epsilon, include_bias_in_norm=include_bias_in_norm
         )
 
         action_scales[site.group_id] = _outgoing_scale_factors(
-            norms, mask, degenerate_handling="preserve"
+            norms, mask, degenerate_channels="preserve"
         )
         outgoing_scales[site.group_id] = _outgoing_scale_factors(
-            norms, mask, degenerate_handling=degenerate_handling
+            norms, mask, degenerate_channels=degenerate_channels
         )
         reported_scales.append(norms)
         degenerate_masks[site.group_id] = mask
@@ -300,7 +297,7 @@ def _balanced_group_scales(
     plan: _DenseScalePlan,
     *,
     epsilon: float,
-    normalize_biases: bool,
+    include_bias_in_norm: bool,
     max_iter: int = 500,
     tol: float = 1e-9,
 ) -> tuple[dict[str, Any], list[Any], dict[str, Any]]:
@@ -331,7 +328,7 @@ def _balanced_group_scales(
     for site, kernel, bias in zip(plan.sites, mats[:-1], biases, strict=True):
         layer = DenseLayer(kernel=jnp.asarray(kernel), bias=jnp.asarray(bias))
         degenerate_masks[site.group_id] = compute_degenerate_mask(
-            layer, epsilon=epsilon, normalize_biases=normalize_biases
+            layer, epsilon=epsilon, include_bias_in_norm=include_bias_in_norm
         )
 
     totals = [np.ones(kernel.shape[1], dtype=np.float64) for kernel in mats[:-1]]
@@ -340,7 +337,7 @@ def _balanced_group_scales(
         delta = 0.0
         for index in range(len(plan.sites)):
             energy_out = np.sum(mats[index] ** 2, axis=0)
-            if normalize_biases:
+            if include_bias_in_norm:
                 energy_out = energy_out + biases[index] ** 2
             energy_in = np.sum(mats[index + 1] ** 2, axis=1)
             factors = ((energy_out + epsilon) / (energy_in + epsilon)) ** 0.25
@@ -402,34 +399,6 @@ def _canonicalize_degenerate_producers(
     return replace_paths(params, replacements) if replacements else params
 
 
-def _rescale_classification_head(
-    params: ParamTree,
-    plan: _DenseScalePlan,
-    *,
-    num_classes: int,
-    epsilon: float,
-) -> tuple[ParamTree, Any]:
-    head = DenseLayer(
-        kernel=jnp.asarray(_descend(params, plan.head_kernel_path)),
-        bias=jnp.asarray(_descend(params, plan.head_bias_path)),
-    )
-    normalized_head, gamma = normalize_last_layer_classification(
-        head,
-        int(num_classes),
-        epsilon=epsilon,
-    )
-    return (
-        replace_paths(
-            params,
-            (
-                (plan.head_kernel_path, normalized_head.kernel),
-                (plan.head_bias_path, normalized_head.bias),
-            ),
-        ),
-        gamma,
-    )
-
-
 class ScaleCanonicalizer:
     """Deterministic graph-native scale canonicalization."""
 
@@ -437,33 +406,23 @@ class ScaleCanonicalizer:
         self,
         problem: SymmetryGraph,
         params: ParamTree,
-        *,
-        task_type: str = "regression",
-        num_classes: int | None = None,
         **method_kwargs: Any,
     ) -> tuple[ParamTree, list[Any], dict[str, Any]]:
-        """Return ``(normalized_params, scale_factors, aux)`` for ``params``."""
+        """Return ``(canonical_params, scale_factors, aux)`` for ``params``."""
 
         method_kwargs = dict(method_kwargs)
         epsilon = float(method_kwargs.pop("epsilon", 1e-8))
-        degenerate_handling = _validate_degenerate_handling(
-            method_kwargs.pop("degenerate_handling", "preserve")
+        degenerate_channels = _validate_degenerate_channels(
+            method_kwargs.pop("degenerate_channels", "preserve")
         )
-        normalize_biases = _require_bool(
-            "normalize_biases", method_kwargs.pop("normalize_biases", True)
+        include_bias_in_norm = _require_bool(
+            "include_bias_in_norm", method_kwargs.pop("include_bias_in_norm", True)
         )
-        activation = validate_activation(
-            method_kwargs.pop("activation", "relu"),
-            method_kwargs.pop("activation_kwargs", None),
-        )
-        classification_head_rescale = _require_bool(
-            "classification_head_rescale",
-            method_kwargs.pop("classification_head_rescale", False),
-        )
-        mode = method_kwargs.pop("mode", None)
-        if mode is not None and mode not in ("balanced", "unit_norm"):
+        activation = validate_activation(method_kwargs.pop("activation", "relu"), None)
+        strategy = method_kwargs.pop("strategy", None)
+        if strategy is not None and strategy not in ("balanced", "unit_norm"):
             raise ValueError(
-                f"Unknown scale normalization mode {mode!r}. Available: "
+                f"Unknown canonicalize strategy {strategy!r}. Available: "
                 "balanced, unit_norm."
             )
         if method_kwargs:
@@ -473,198 +432,159 @@ class ScaleCanonicalizer:
                 f"{unexpected!r}"
             )
 
-        task = (task_type or "regression").lower()
-        if task not in ("regression", "classification"):
-            raise ValueError("task_type must be 'regression' or 'classification'")
-        if task == "classification" and classification_head_rescale:
-            if num_classes is None:
-                raise ValueError(
-                    "num_classes required when classification_head_rescale is enabled"
-                )
-
         if has_modern_transformer_plan(problem):
-            if mode is not None:
+            if strategy is not None:
                 raise ValueError(
-                    "The modern-transformer plan has one canonical form "
-                    "(gamma producer energy plus qk-pair/vo balancing); the "
-                    "'mode' option is undefined for it. Omit the option."
+                    "The RMSNorm/RoPE/GQA plan has one canonical form (gamma "
+                    "producer energy plus qk-pair/vo balancing); the 'strategy' "
+                    "option is undefined for it. Omit the option."
                 )
-            return self._normalize_modern_transformer(
+            return self._canonicalize_modern_transformer(
                 problem,
                 params,
                 epsilon=epsilon,
-                degenerate_handling=degenerate_handling,
-                classification_head_rescale=classification_head_rescale,
-                task=task,
+                degenerate_channels=degenerate_channels,
                 activation=activation,
-                normalize_biases=normalize_biases,
+                include_bias_in_norm=include_bias_in_norm,
             )
 
         if attention_constraints(problem):
-            if mode == "unit_norm":
+            if strategy == "unit_norm":
                 raise ValueError(
-                    "mode='unit_norm' is undefined for attention circuit "
-                    "normalization: circuits are canonicalized by balancing "
-                    "(the minimum-norm representative). Use mode='balanced' or "
-                    "omit the option."
+                    "strategy='unit_norm' is undefined for attention circuit "
+                    "canonicalization: circuits are canonicalized by balancing "
+                    "(the minimum-norm representative). Use strategy='balanced' "
+                    "or omit the option."
                 )
-            return self._normalize_attention_circuits(
+            return self._canonicalize_attention_circuits(
                 problem,
                 params,
                 epsilon=epsilon,
-                normalize_biases=normalize_biases,
-                degenerate_handling=degenerate_handling,
-                classification_head_rescale=classification_head_rescale,
-                task=task,
+                include_bias_in_norm=include_bias_in_norm,
+                degenerate_channels=degenerate_channels,
                 activation=activation,
             )
 
         if has_conv_stack_block(problem):
-            if mode == "balanced":
+            if strategy == "balanced":
                 raise ValueError(
-                    "mode='balanced' is not implemented for conv-stack "
-                    "normalization; the conv plan canonicalizes by unit joint "
-                    "producer energy. Use mode='unit_norm' or omit the option."
+                    "strategy='balanced' is not implemented for conv-stack "
+                    "canonicalization; the conv plan canonicalizes by unit joint "
+                    "producer energy. Use strategy='unit_norm' or omit the option."
                 )
-            return self._normalize_conv_stack(
+            return self._canonicalize_conv_stack(
                 problem,
                 params,
                 epsilon=epsilon,
-                normalize_biases=normalize_biases,
-                degenerate_handling=degenerate_handling,
-                classification_head_rescale=classification_head_rescale,
-                task=task,
+                include_bias_in_norm=include_bias_in_norm,
+                degenerate_channels=degenerate_channels,
                 activation=activation,
             )
 
         if not is_positive_homogeneous(activation):
             raise ValueError(
-                f"Dense-chain scale normalization requires a positively "
-                f"homogeneous activation, got {activation!r}. Non-homogeneous "
-                "hidden units carry no scale symmetry; disable the normalize "
-                "stage for this architecture."
+                f"Dense-chain canonicalization requires a positively homogeneous "
+                f"activation, got {activation!r}. Non-homogeneous hidden units "
+                "carry no scale symmetry; drop the canonicalize stage for this "
+                "architecture."
             )
-        dense_mode = mode or "balanced"
+        dense_strategy = strategy or "balanced"
         plan = _dense_scale_plan(problem)
-        if dense_mode == "balanced":
+        if dense_strategy == "balanced":
             action_scales, scale_factors, degenerate_masks = _balanced_group_scales(
                 params,
                 plan,
                 epsilon=epsilon,
-                normalize_biases=normalize_biases,
+                include_bias_in_norm=include_bias_in_norm,
             )
         else:
             action_scales, scale_factors, degenerate_masks = _group_scales(
                 params,
                 plan,
                 epsilon=epsilon,
-                degenerate_handling=degenerate_handling,
-                normalize_biases=normalize_biases,
+                degenerate_channels=degenerate_channels,
+                include_bias_in_norm=include_bias_in_norm,
             )
-        normalized_params = problem.apply_scales(
+        canonical_params = problem.apply_scales(
             params,
             ScaleState.from_scales(problem, action_scales, backend="jax"),
         )
 
-        if degenerate_handling in ("zero_outgoing", "canonical_vector"):
-            normalized_params = _zero_degenerate_consumers(
-                problem, normalized_params, degenerate_masks
+        if degenerate_channels in ("zero_outgoing", "canonical_vector"):
+            canonical_params = _zero_degenerate_consumers(
+                problem, canonical_params, degenerate_masks
             )
-        if degenerate_handling == "canonical_vector":
-            normalized_params = _canonicalize_degenerate_producers(
-                normalized_params, plan, degenerate_masks
+        if degenerate_channels == "canonical_vector":
+            canonical_params = _canonicalize_degenerate_producers(
+                canonical_params, plan, degenerate_masks
             )
 
         aux: dict[str, Any] = {
             "plan": "dense_chain",
-            "mode": dense_mode,
-            "task_type": task,
+            "strategy": dense_strategy,
             "epsilon": epsilon,
-            "degenerate_handling": degenerate_handling,
-            "normalize_biases": normalize_biases,
+            "degenerate_channels": degenerate_channels,
+            "include_bias_in_norm": include_bias_in_norm,
             "activation": activation,
-            "classification_head_rescale": classification_head_rescale,
         }
-        if task == "classification" and classification_head_rescale:
-            normalized_params, gamma = _rescale_classification_head(
-                normalized_params,
-                plan,
-                num_classes=int(num_classes),
-                epsilon=epsilon,
-            )
-            aux["last_layer_gamma"] = gamma
-            aux["num_classes"] = int(num_classes)
+        return canonical_params, scale_factors, aux
 
-        return normalized_params, scale_factors, aux
-
-    def _normalize_conv_stack(
+    def _canonicalize_conv_stack(
         self,
         problem: SymmetryGraph,
         params: ParamTree,
         *,
         epsilon: float,
-        normalize_biases: bool,
-        degenerate_handling: str,
-        classification_head_rescale: bool,
-        task: str,
+        include_bias_in_norm: bool,
+        degenerate_channels: str,
         activation: str,
     ) -> tuple[ParamTree, list[Any], dict[str, Any]]:
-        """Normalize joint producer energies (norm-affine or bare-conv)."""
+        """Canonicalize joint producer energies (norm-affine or bare-conv)."""
 
         if not is_positive_homogeneous(activation):
             raise ValueError(
-                f"Conv-stack scale normalization requires a positively "
-                f"homogeneous activation (relu, leaky_relu, tlu), got "
-                f"{activation!r}."
+                f"Conv-stack canonicalization requires a positively homogeneous "
+                f"activation (relu, leaky_relu, tlu), got {activation!r}."
             )
-        if classification_head_rescale:
+        if degenerate_channels != "preserve":
             raise ValueError(
-                "classification_head_rescale is not supported for conv-stack "
-                "normalization; it is a dense-chain post-pass."
-            )
-        if degenerate_handling != "preserve":
-            raise ValueError(
-                f"degenerate_handling={degenerate_handling!r} is not defined for "
-                "conv-stack normalization; degenerate channels keep scale 1 "
+                f"degenerate_channels={degenerate_channels!r} is not defined for "
+                "conv-stack canonicalization; degenerate channels keep scale 1 "
                 "('preserve')."
             )
-        if not normalize_biases:
+        if not include_bias_in_norm:
             raise ValueError(
-                "normalize_biases=false is not defined for conv-stack "
-                "normalization; the canonical scale is the joint energy of all "
+                "include_bias_in_norm=false is not defined for conv-stack "
+                "canonicalization; the canonical scale is the joint energy of all "
                 "scale-carrying producers (norm affine parameters or conv "
                 "kernel plus bias)."
             )
 
         scales = conv_stack_producer_scales(problem, params, epsilon=epsilon)
-        normalized_params = problem.apply_scales(
+        canonical_params = problem.apply_scales(
             params,
             ScaleState.from_scales(problem, scales, backend="jax"),
         )
         scale_factors = [scales[group_id] for group_id in problem.group_order]
         aux: dict[str, Any] = {
             "plan": "conv_producer_energy",
-            "mode": "unit_norm",
-            "task_type": task,
+            "strategy": "unit_norm",
             "epsilon": epsilon,
-            "degenerate_handling": degenerate_handling,
-            "normalize_biases": normalize_biases,
+            "degenerate_channels": degenerate_channels,
+            "include_bias_in_norm": include_bias_in_norm,
             "activation": activation,
-            "classification_head_rescale": classification_head_rescale,
         }
-        return normalized_params, scale_factors, aux
+        return canonical_params, scale_factors, aux
 
-    def _normalize_modern_transformer(
+    def _canonicalize_modern_transformer(
         self,
         problem: SymmetryGraph,
         params: ParamTree,
         *,
         epsilon: float,
-        degenerate_handling: str,
-        classification_head_rescale: bool,
-        task: str,
+        degenerate_channels: str,
         activation: str,
-        normalize_biases: bool,
+        include_bias_in_norm: bool,
     ) -> tuple[ParamTree, list[Any], dict[str, Any]]:
         """RMSNorm gamma folding, qk pair balancing, and vo circuit balancing.
 
@@ -675,27 +595,21 @@ class ScaleCanonicalizer:
         identity.
         """
 
-        if classification_head_rescale:
+        if degenerate_channels != "preserve":
             raise ValueError(
-                "classification_head_rescale is not supported for "
-                "modern-transformer normalization; it is a dense-chain "
-                "post-pass."
-            )
-        if degenerate_handling != "preserve":
-            raise ValueError(
-                f"degenerate_handling={degenerate_handling!r} has no meaning "
-                "for modern-transformer normalization (degenerate gamma "
+                f"degenerate_channels={degenerate_channels!r} has no meaning "
+                "for RMSNorm/RoPE/GQA canonicalization (degenerate gamma "
                 "channels keep scale 1); use 'preserve'."
             )
 
         gamma_scales = rms_gamma_scales(problem, params, epsilon=epsilon)
-        normalized = apply_rms_gamma_scales(problem, params, gamma_scales)
-        pair_scales = qk_pair_scales(problem, normalized, epsilon=epsilon)
-        vo_scales = gqa_vo_balancing_scales(problem, normalized, epsilon=epsilon)
+        canonical = apply_rms_gamma_scales(problem, params, gamma_scales)
+        pair_scales = qk_pair_scales(problem, canonical, epsilon=epsilon)
+        vo_scales = gqa_vo_balancing_scales(problem, canonical, epsilon=epsilon)
         circuit_scales = {**pair_scales, **vo_scales}
         if circuit_scales:
-            normalized = problem.apply_scales(
-                normalized,
+            canonical = problem.apply_scales(
+                canonical,
                 ScaleState.from_scales(problem, circuit_scales, backend="jax"),
             )
 
@@ -708,14 +622,12 @@ class ScaleCanonicalizer:
             ),
         ]
         aux: dict[str, Any] = {
-            "plan": "modern_transformer",
-            "mode": "balanced",
-            "task_type": task,
+            "plan": "rmsnorm_gqa_rope",
+            "strategy": "balanced",
             "epsilon": epsilon,
-            "degenerate_handling": degenerate_handling,
-            "normalize_biases": normalize_biases,
+            "degenerate_channels": degenerate_channels,
+            "include_bias_in_norm": include_bias_in_norm,
             "activation": activation,
-            "classification_head_rescale": classification_head_rescale,
             "rms_norms": sorted(gamma_scales),
             "balanced_qk_groups": [
                 gid for gid in problem.group_order if gid in pair_scales
@@ -724,30 +636,23 @@ class ScaleCanonicalizer:
                 gid for gid in problem.group_order if gid in vo_scales
             ],
         }
-        return normalized, scale_factors, aux
+        return canonical, scale_factors, aux
 
-    def _normalize_attention_circuits(
+    def _canonicalize_attention_circuits(
         self,
         problem: SymmetryGraph,
         params: ParamTree,
         *,
         epsilon: float,
-        normalize_biases: bool,
-        degenerate_handling: str,
-        classification_head_rescale: bool,
-        task: str,
+        include_bias_in_norm: bool,
+        degenerate_channels: str,
         activation: str,
     ) -> tuple[ParamTree, list[Any], dict[str, Any]]:
         """Balance qk/vo circuit scales; all other groups stay at identity."""
 
-        if classification_head_rescale:
+        if degenerate_channels != "preserve":
             raise ValueError(
-                "classification_head_rescale is not supported for attention "
-                "circuit normalization; it is a dense-chain post-pass."
-            )
-        if degenerate_handling != "preserve":
-            raise ValueError(
-                f"degenerate_handling={degenerate_handling!r} has no meaning for "
+                f"degenerate_channels={degenerate_channels!r} has no meaning for "
                 "attention circuit balancing (the epsilon-stabilized balance is "
                 "already defined for zero circuits); use 'preserve'."
             )
@@ -756,9 +661,9 @@ class ScaleCanonicalizer:
             problem,
             params,
             epsilon=epsilon,
-            normalize_biases=normalize_biases,
+            include_bias_in_norm=include_bias_in_norm,
         )
-        normalized_params = problem.apply_scales(
+        canonical_params = problem.apply_scales(
             params,
             ScaleState.from_scales(problem, scales, backend="jax"),
         )
@@ -767,18 +672,16 @@ class ScaleCanonicalizer:
         ]
         aux: dict[str, Any] = {
             "plan": "attention_balance",
-            "mode": "balanced",
-            "task_type": task,
+            "strategy": "balanced",
             "epsilon": epsilon,
-            "degenerate_handling": degenerate_handling,
-            "normalize_biases": normalize_biases,
+            "degenerate_channels": degenerate_channels,
+            "include_bias_in_norm": include_bias_in_norm,
             "activation": activation,
-            "classification_head_rescale": classification_head_rescale,
             "balanced_groups": [
                 group_id for group_id in problem.group_order if group_id in scales
             ],
         }
-        return normalized_params, scale_factors, aux
+        return canonical_params, scale_factors, aux
 
 
 __all__ = ["ScaleCanonicalizer"]

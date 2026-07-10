@@ -33,14 +33,17 @@ class ArchitectureRecipe(ABC):
 
 _RECIPES: dict[str, type[ArchitectureRecipe]] = {}
 _BUILTIN_RECIPES: dict[str, tuple[str, str]] = {
-    "cnn": ("align.architectures.convnet", "ConvNetRecipe"),
-    "dense_mlp": ("align.architectures.mlp", "MLPRecipe"),
-    "modern_transformer": (
+    "convnet": ("align.architectures.convnet", "ConvNetRecipe"),
+    "mlp": ("align.architectures.mlp", "MLPRecipe"),
+    "rmsnorm_gqa_rope_transformer": (
         "align.architectures.rmsnorm_gqa_rope_transformer",
         "RMSNormGQARoPETransformerRecipe",
     ),
-    "resnet": ("align.architectures.residual_convnet", "ResidualConvNetRecipe"),
-    "transformer": (
+    "residual_convnet": (
+        "align.architectures.residual_convnet",
+        "ResidualConvNetRecipe",
+    ),
+    "layernorm_mha_transformer": (
         "align.architectures.layernorm_mha_transformer",
         "LayerNormMHATransformerRecipe",
     ),

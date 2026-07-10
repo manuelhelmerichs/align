@@ -990,9 +990,7 @@ def make_modern_transformer_orthogonal_orbit_case(seed: int = 0) -> SyntheticOrb
     base = make_modern_transformer_params(key=param_key)
     adapter = RMSNormGQARoPETransformerRecipe(stream_transform_family="orthogonal")
     problem = adapter.build_problem(base)
-    reference, _, _ = ScaleCanonicalizer().canonicalize(
-        problem, base, task_type="regression"
-    )
+    reference, _, _ = ScaleCanonicalizer().canonicalize(problem, base)
 
     rng = np.random.default_rng(int(jax.random.randint(perm_key, (), 0, 2**31 - 1)))
     d_model = problem.groups["stream"].size
@@ -1376,19 +1374,18 @@ def _normalize_if_requested(
 ) -> ParamTree:
     if not normalize:
         return params
-    normalized, _, _ = ScaleCanonicalizer().canonicalize(
+    canonical, _, _ = ScaleCanonicalizer().canonicalize(
         case.problem,
         params,
-        task_type="regression",
-        normalize_biases=True,
+        include_bias_in_norm=True,
     )
-    return normalized
+    return canonical
 
 
 def run_alignment_benchmark(
     case: SyntheticOrbitCase,
     *,
-    objective: str = "l2_weight",
+    objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[Mapping[str, Any]] | None = None,
     normalize: bool = False,
@@ -1464,15 +1461,15 @@ def default_schedule_grid(
 ) -> dict[str, list[dict[str, Any]]]:
     """Return the named solver schedules exercised by robustness sweeps."""
 
-    lap_step = {"solver": "lap", "max_sweeps": lap_max_sweeps, "tol": 0.0}
+    lap_step = {"solver": "lap", "max_sweeps": lap_max_sweeps, "tolerance": 0.0}
     sinkhorn_step = {
         "solver": "sinkhorn",
         "max_steps": sinkhorn_max_steps,
-        "lr": sinkhorn_lr,
+        "learning_rate": sinkhorn_lr,
         "tau": sinkhorn_tau,
-        "n_sinkhorn_iters": 20,
+        "sinkhorn_iterations": 20,
         "init_scale": 0.01,
-        "tol": 0.0,
+        "tolerance": 0.0,
     }
     return {
         "lap": [dict(lap_step)],
@@ -1480,7 +1477,7 @@ def default_schedule_grid(
         "lap_sinkhorn_lap": [
             dict(lap_step),
             dict(sinkhorn_step),
-            {"solver": "lap", "max_sweeps": 5, "tol": 0.0},
+            {"solver": "lap", "max_sweeps": 5, "tolerance": 0.0},
         ],
     }
 
@@ -1490,7 +1487,7 @@ def run_robustness_sweep(
     seeds: Sequence[int],
     schedules: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     case_factory: Callable[..., SyntheticOrbitCase] = make_dense_mlp_orbit_case,
-    objective: str = "l2_weight",
+    objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     normalize: bool = True,
 ) -> list[RobustnessRecord]:
@@ -1527,7 +1524,7 @@ def run_robustness_sweep(
 def measure_rebasin_performance(
     case: SyntheticOrbitCase,
     *,
-    objective: str = "l2_weight",
+    objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[Mapping[str, Any]] | None = None,
     normalize: bool = False,

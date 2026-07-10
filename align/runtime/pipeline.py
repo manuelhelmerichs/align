@@ -43,13 +43,13 @@ class StagePipeline:
         self.stages = list(stages)
         self.save_intermediate = bool(save_intermediate)
 
-    def can_batch_rebasin(self, batch_size: int) -> bool:
-        """Return whether this pipeline can batch the final rebasin stage."""
+    def can_batch_match(self, batch_size: int) -> bool:
+        """Return whether this pipeline can batch the final match stage."""
 
-        if not self.stages or self.stages[-1][0] != "rebasin":
+        if not self.stages or self.stages[-1][0] != "match":
             return False
-        rebasin_executor = self.stages[-1][1]
-        return rebasin_executor.supports_batching and int(batch_size) > 1
+        match_executor = self.stages[-1][1]
+        return match_executor.supports_batching and int(batch_size) > 1
 
     def run(
         self,
@@ -97,9 +97,9 @@ class StagePipeline:
 
             if result.aux:
                 aux_payload[name] = result.aux
-            if name == "normalize":
+            if name == "canonicalize":
                 scale_factors = result.artifacts.get("scale_factors")
-            elif name == "rebasin":
+            elif name == "match":
                 permutations = result.artifacts.get("permutations")
 
             if self.save_intermediate and not last_stage:
@@ -121,12 +121,12 @@ class StagePipeline:
     ) -> list[SampleAlignmentResult]:
         """Run a batch whose final stage is a batchable rebasin executor."""
 
-        if not self.stages or self.stages[-1][0] != "rebasin":
-            raise ValueError("Batched execution requires rebasin as the final stage.")
+        if not self.stages or self.stages[-1][0] != "match":
+            raise ValueError("Batched execution requires match as the final stage.")
 
-        rebasin_executor = self.stages[-1][1]
-        if not rebasin_executor.supports_batching:
-            raise ValueError("Final rebasin executor does not support batching.")
+        match_executor = self.stages[-1][1]
+        if not match_executor.supports_batching:
+            raise ValueError("Final match executor does not support batching.")
 
         pre_stages = [
             (idx, name, ex) for idx, (name, ex) in enumerate(self.stages[:-1])
@@ -136,20 +136,20 @@ class StagePipeline:
             for record, sample in zip(records, samples, strict=True)
         ]
 
-        rebasin_results = rebasin_executor.process_batch(
+        match_results = match_executor.process_batch(
             records, [partial.sample for partial in partials]
         )
         outputs: list[SampleAlignmentResult] = []
-        for partial, reb_result in zip(partials, rebasin_results, strict=True):
+        for partial, match_result in zip(partials, match_results, strict=True):
             aux_payload = dict(partial.aux)
-            if reb_result.aux:
-                aux_payload["rebasin"] = reb_result.aux
+            if match_result.aux:
+                aux_payload["match"] = match_result.aux
             outputs.append(
                 SampleAlignmentResult(
                     record=partial.record,
-                    sample=reb_result.sample,
+                    sample=match_result.sample,
                     aux=aux_payload,
-                    permutations=reb_result.artifacts.get("permutations"),
+                    permutations=match_result.artifacts.get("permutations"),
                     scale_factors=partial.scale_factors,
                     intermediate_sample=partial.intermediate_sample,
                 )
@@ -167,7 +167,7 @@ class StagePipeline:
     ) -> None:
         """Load and run records sequentially or with a batched final rebasin."""
 
-        if self.can_batch_rebasin(batch_size):
+        if self.can_batch_match(batch_size):
             self._run_records_batched(
                 records,
                 loader,

@@ -87,7 +87,7 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
     schedule steps, and requires gamma-folded parameters at rebasin time).
     """
 
-    name: str = "modern_transformer"
+    name: str = "rmsnorm_gqa_rope_transformer"
     parameter_root: str = ""
     stream_transform_family: str = "signed_permutation"
 

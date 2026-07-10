@@ -20,12 +20,12 @@ def default_lap_schedule(
 ) -> tuple[SolverStep, ...]:
     """Return the default weight-matching-equivalent LAP schedule."""
 
-    return (SolverStep(solver="lap", max_sweeps=max_sweeps, tol=tol),)
+    return (SolverStep(solver="lap", max_sweeps=max_sweeps, tolerance=tol),)
 
 
 def build_solver_sequence(
     *,
-    objective: str = "l2_weight",
+    objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[SolverStep | Mapping[str, Any]] | None = None,
 ) -> SolverSequence:
@@ -42,7 +42,7 @@ def match_sample(
     params: ParamTree,
     *,
     scheduler: SolverSequence | None = None,
-    objective: str = "l2_weight",
+    objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[SolverStep | Mapping[str, Any]] | None = None,
     rng_key: jax.Array | None = None,
@@ -82,7 +82,7 @@ def match_batch(
     params_batch: Sequence[ParamTree],
     *,
     scheduler: SolverSequence | None = None,
-    objective: str = "l2_weight",
+    objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[SolverStep | Mapping[str, Any]] | None = None,
     rng_key: jax.Array | None = None,
@@ -125,7 +125,7 @@ def match_component_across(
     target_block: str,
     *,
     scheduler: SolverSequence | None = None,
-    objective: str = "l2_weight",
+    objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[SolverStep | Mapping[str, Any]] | None = None,
     rng_key: jax.Array | None = None,

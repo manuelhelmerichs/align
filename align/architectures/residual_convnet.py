@@ -602,7 +602,7 @@ class ResidualConvNetRule(SymmetryRule):
 class ResidualConvNetRecipe(ArchitectureRecipe):
     """Recipe for ResNet-style conv nets: one conv-stack component."""
 
-    name: str = "resnet"
+    name: str = "residual_convnet"
     parameter_root: str = "core"
     batch_stats_root: str | None = "batch_stats"
     residual_topology: Mapping[str, Any] | Sequence[Any] | str | None = None

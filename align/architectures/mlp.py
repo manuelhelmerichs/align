@@ -21,7 +21,7 @@ class MLPRecipe(ArchitectureRecipe):
     ``fcn``, hidden groups ``fcn/h{j}``).
     """
 
-    name: str = "dense_mlp"
+    name: str = "mlp"
     parameter_root: str = "params.fcn"
 
     def _tokens_from_path(self, path: str) -> tuple[str, ...]:

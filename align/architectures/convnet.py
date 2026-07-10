@@ -55,7 +55,7 @@ class ConvNetRecipe(ArchitectureRecipe):
     flatten-boundary interval bindings described in the module docstring.
     """
 
-    name: str = "cnn"
+    name: str = "convnet"
     parameter_root: str = "core"
 
     def _tokens_from_path(self, path: str) -> tuple[str, ...]:

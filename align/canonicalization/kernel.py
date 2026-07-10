@@ -10,10 +10,10 @@ _VALID_DEGENERATE_HANDLING = frozenset(
 )
 
 
-def _validate_degenerate_handling(value: str) -> str:
+def _validate_degenerate_channels(value: str) -> str:
     if value not in _VALID_DEGENERATE_HANDLING:
         valid = ", ".join(sorted(_VALID_DEGENERATE_HANDLING))
-        raise ValueError(f"Unknown degenerate_handling '{value}'. Available: {valid}")
+        raise ValueError(f"Unknown degenerate_channels '{value}'. Available: {valid}")
     return value
 
 
@@ -24,11 +24,11 @@ def _require_bool(name: str, value: bool) -> bool:
 
 
 def compute_degenerate_mask(
-    layer: DenseLayer, *, epsilon: float = 1e-8, normalize_biases: bool = True
+    layer: DenseLayer, *, epsilon: float = 1e-8, include_bias_in_norm: bool = True
 ) -> jnp.ndarray:
     """Boolean mask of neurons whose incoming ``(w, b)`` energy is ``<= epsilon``."""
     kernel_sq = jnp.sum(layer.kernel**2, axis=0)
-    bias_sq = layer.bias**2 if normalize_biases else 0.0
+    bias_sq = layer.bias**2 if include_bias_in_norm else 0.0
     return (kernel_sq + bias_sq) <= epsilon
 
 
@@ -46,35 +46,25 @@ def _canonicalize_degenerate(
 
 
 def compute_incoming_norms(
-    layer: DenseLayer, epsilon: float = 1e-8, normalize_biases: bool = True
+    layer: DenseLayer, epsilon: float = 1e-8, include_bias_in_norm: bool = True
 ) -> jnp.ndarray:
     """Compute per-neuron ||(w, b)||_2 for a dense layer."""
-    normalize_biases = _require_bool("normalize_biases", normalize_biases)
+    include_bias_in_norm = _require_bool("include_bias_in_norm", include_bias_in_norm)
     kernel_sq = jnp.sum(layer.kernel**2, axis=0)
-    bias_sq = layer.bias**2 if normalize_biases else 0.0
+    bias_sq = layer.bias**2 if include_bias_in_norm else 0.0
     return jnp.sqrt(kernel_sq + bias_sq + epsilon)
 
 
 def _outgoing_scale_factors(
-    norms: jnp.ndarray, degenerate_mask: jnp.ndarray, *, degenerate_handling: str
+    norms: jnp.ndarray, degenerate_mask: jnp.ndarray, *, degenerate_channels: str
 ) -> jnp.ndarray:
-    degenerate_handling = _validate_degenerate_handling(degenerate_handling)
-    if degenerate_handling in ("zero_outgoing", "canonical_vector"):
+    degenerate_channels = _validate_degenerate_channels(degenerate_channels)
+    if degenerate_channels in ("zero_outgoing", "canonical_vector"):
         return jnp.where(degenerate_mask, 0.0, norms)
     return jnp.where(degenerate_mask, 1.0, norms)
-
-
-def normalize_last_layer_classification(
-    layer: DenseLayer, num_classes: int, epsilon: float = 1e-8
-) -> tuple[DenseLayer, float]:
-    """Rescale the final layer to lie on a sphere of radius sqrt(C)."""
-    gamma = jnp.sqrt(jnp.sum(layer.kernel**2) + jnp.sum(layer.bias**2) + epsilon)
-    scale = jnp.sqrt(num_classes) / gamma
-    return DenseLayer(kernel=layer.kernel * scale, bias=layer.bias * scale), gamma
 
 
 __all__ = [
     "compute_degenerate_mask",
     "compute_incoming_norms",
-    "normalize_last_layer_classification",
 ]

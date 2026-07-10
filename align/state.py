@@ -602,7 +602,6 @@ class RunState:
     total_samples: int
     reference: Mapping[str, Any] = field(default_factory=dict)
     filters: Mapping[str, Any] = field(default_factory=dict)
-    order: str | None = None
     tracker_path: Path | None = None
     runtime_settings: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -635,7 +634,6 @@ class RunState:
             "config_digest": self.config_digest,
             "manifest_digest": self.manifest_digest,
             "stages": list(self.stages),
-            "order": self.order,
             "reference": dict(self.reference),
             "filters": dict(self.filters),
             "total_samples": self.total_samples,
@@ -714,7 +712,6 @@ class RunState:
             config_digest=payload["config_digest"],
             manifest_digest=payload["manifest_digest"],
             stages=list(payload.get("stages") or []),
-            order=payload.get("order"),
             reference=payload.get("reference", {}),
             filters=payload.get("filters", {}),
             total_samples=int(payload["total_samples"]),

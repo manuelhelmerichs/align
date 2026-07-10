@@ -266,7 +266,7 @@ class SolverSequence:
                     )
                 sweep_delta = max(sweep_delta, float(update_aux["delta"]))
             max_delta = sweep_delta
-            if sweep_delta <= step.tol:
+            if sweep_delta <= step.tolerance:
                 break
         return state, {"solver": "lap", "sweeps": sweeps, "max_delta": max_delta}
 
@@ -301,7 +301,7 @@ class SolverSequence:
                 )
                 sweep_delta = max(sweep_delta, float(update_aux["delta"]))
             max_delta = sweep_delta
-            if sweep_delta <= step.tol:
+            if sweep_delta <= step.tolerance:
                 break
         return state, {
             "solver": "procrustes",

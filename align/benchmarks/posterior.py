@@ -287,7 +287,7 @@ def make_synthetic_mlp_posterior_case(
     key = jax.random.PRNGKey(seed)
     param_key, input_key = jax.random.split(key)
     base = _make_dense_params(key=param_key, sizes=tuple(sizes))
-    adapter = get_recipe("dense_mlp")
+    adapter = get_recipe("mlp")
     problem = adapter.build_problem(base)
     inputs = jax.random.normal(input_key, (n_inputs, int(sizes[0])))
 
@@ -386,7 +386,7 @@ def make_synthetic_transformer_posterior_case(
     key = jax.random.PRNGKey(seed)
     param_key, input_key = jax.random.split(key)
     base = make_gpt_style_params(key=param_key)
-    adapter = get_recipe("transformer")
+    adapter = get_recipe("layernorm_mha_transformer")
     problem = adapter.build_problem(base)
     tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
     intra_groups = [
@@ -504,7 +504,7 @@ def make_synthetic_modern_transformer_posterior_case(
     key = jax.random.PRNGKey(seed)
     param_key, input_key = jax.random.split(key)
     base = make_modern_transformer_params(key=param_key)
-    adapter = get_recipe("modern_transformer")
+    adapter = get_recipe("rmsnorm_gqa_rope_transformer")
     problem = adapter.build_problem(base)
     tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
 
@@ -686,14 +686,13 @@ def load_experiment_posterior_case(
     )
 
 
-def _normalize_tree(problem: SymmetryGraph, params: ParamTree) -> ParamTree:
-    normalized, _, _ = ScaleCanonicalizer().canonicalize(
+def _canonicalize_tree(problem: SymmetryGraph, params: ParamTree) -> ParamTree:
+    canonical, _, _ = ScaleCanonicalizer().canonicalize(
         problem,
         params,
-        task_type="regression",
-        normalize_biases=True,
+        include_bias_in_norm=True,
     )
-    return normalized
+    return canonical
 
 
 def _tree_mean(trees: Sequence[ParamTree]) -> ParamTree:
@@ -708,7 +707,7 @@ def _tree_mean(trees: Sequence[ParamTree]) -> ParamTree:
 def run_posterior_benchmark(
     case: PosteriorBenchmarkCase,
     *,
-    objective: str = "l2_weight",
+    objective: str = "euclidean",
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[Mapping[str, Any]] | None = None,
     normalize: bool = False,
@@ -741,11 +740,11 @@ def run_posterior_benchmark(
 
     reference = case.reference
     if normalize:
-        reference = _normalize_tree(case.problem, reference)
+        reference = _canonicalize_tree(case.problem, reference)
 
     flat_samples = case.iter_samples()
     targets = [
-        _normalize_tree(case.problem, params) if normalize else params
+        _canonicalize_tree(case.problem, params) if normalize else params
         for _, _, params in flat_samples
     ]
 

@@ -68,7 +68,7 @@ def estimate_diag_fisher_weights(
     canonicalization). The default of 1.0 keeps the L2 tie-breaking signal at
     the same scale as the Fisher signal and was uniformly at least as good in
     benchmarks. With ``normalize`` the weights are rescaled to mean 1, which
-    keeps ``fisher_l2`` objective values on the same scale as ``l2_weight``.
+    keeps ``diagonal_fisher`` objective values on the same scale as ``euclidean``.
     """
 
     if damping < 0.0:

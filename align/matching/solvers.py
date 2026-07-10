@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from ..options import SolverStep as SolverStep
+from ..config.stages import SolverStep
 from ..symmetry import groups_for_components
 from .objectives import UnsupportedGroupLinearization
 from .state import (
@@ -199,13 +199,13 @@ class SinkhornSolver:
             problem, state, batch_size=batch_size, rng_key=rng_key
         )
         groups = self._groups(problem)
-        optimizer = optax.adam(self.step.lr)
+        optimizer = optax.adam(self.step.learning_rate)
         opt_state = optimizer.init(tuple(logits[gid] for gid in groups))
 
         def pack(logit_tuple):
             soft = {
                 gid: sinkhorn_operator(
-                    logit, tau=self.step.tau, n_iters=self.step.n_sinkhorn_iters
+                    logit, tau=self.step.tau, n_iters=self.step.sinkhorn_iterations
                 )
                 for gid, logit in zip(groups, logit_tuple, strict=True)
             }
@@ -244,7 +244,7 @@ class SinkhornSolver:
             steps_taken += 1
             if prev_losses is not None:
                 delta = float(jnp.max(jnp.abs(loss_values - prev_losses)))
-                if delta <= self.step.tol:
+                if delta <= self.step.tolerance:
                     break
             prev_losses = loss_values
 
