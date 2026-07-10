@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from .._jax_platforms import is_gpu_platform
 from ..config import AlignConfig, resolve_adapter_defaults
 from ..logging_utils import progress_bar
 from ..samples import WeightSample
@@ -421,11 +422,15 @@ class AlignRunner:
 
             if device_ids:
                 available = [
-                    int(dev.id) for dev in jax.devices() if dev.platform == "gpu"
+                    int(dev.id)
+                    for dev in jax.devices()
+                    if is_gpu_platform(dev.platform)
                 ]
                 return [dev_id for dev_id in device_ids if dev_id in available]
             return [
-                int(device.id) for device in jax.devices() if device.platform == "gpu"
+                int(device.id)
+                for device in jax.devices()
+                if is_gpu_platform(device.platform)
             ]
         except Exception:  # pragma: no cover - backend specific
             return []

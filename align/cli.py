@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ._jax_platforms import configure_jax_platforms
+from ._jax_platforms import configure_jax_platforms, is_gpu_platform
 from .config import (
     AlignConfig,
     load_align_config,
@@ -309,17 +309,18 @@ def _configure_platform_preferences(config: AlignConfig) -> None:
     elif config.rebasin and config.rebasin.enabled:
         if any(step.solver == "sinkhorn" for step in config.rebasin.schedule):
             preference = "gpu"
-    configure_jax_platforms(preference=preference, allow_preallocation=False)
+    applied_preference = configure_jax_platforms(
+        preference=preference, allow_preallocation=False
+    )
     import jax
 
     log = logging.getLogger("align")
-    if preference == "cpu":
+    if applied_preference == "cpu":
         jax.config.update("jax_platform_name", "cpu")
         return
 
-    jax.config.update("jax_platform_name", "gpu")
     try:
-        gpus = [dev for dev in jax.devices() if dev.platform == "gpu"]
+        gpus = [dev for dev in jax.devices() if is_gpu_platform(dev.platform)]
         if not gpus:
             raise RuntimeError("No GPU devices visible")
     except Exception as exc:

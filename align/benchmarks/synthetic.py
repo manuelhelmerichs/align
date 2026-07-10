@@ -368,6 +368,18 @@ def _layer_norm(x: jax.Array, module: Mapping[str, Any]) -> jax.Array:
     return normed
 
 
+def _gelu(x: jax.Array) -> jax.Array:
+    """Approximate GELU without backend plugins replacing its autodiff rules."""
+
+    x = jnp.asarray(x)
+    sqrt_2_over_pi = jnp.asarray(np.sqrt(2.0 / np.pi), dtype=x.dtype)
+    cdf = 0.5 * (
+        1.0
+        + jnp.tanh(sqrt_2_over_pi * (x + jnp.asarray(0.044715, dtype=x.dtype) * x**3))
+    )
+    return x * cdf
+
+
 def mhdpa_apply(
     module: Mapping[str, Any], x: jax.Array, *, causal: bool = False
 ) -> jax.Array:
@@ -423,7 +435,7 @@ def gpt_transformer_apply(params: ParamTree, tokens: jax.Array) -> jax.Array:
         x = x + mhdpa_apply(attention, x, causal=True)
         x = _layer_norm(x, block["LayerNorm_1"])
         ffn = block["FullyConnected_0"]
-        hidden = jax.nn.gelu(
+        hidden = _gelu(
             x @ jnp.asarray(ffn["FFN_layer0"]["kernel"])
             + jnp.asarray(ffn["FFN_layer0"]["bias"])
         )
@@ -691,7 +703,7 @@ def modern_transformer_apply(params: ParamTree, tokens: jax.Array) -> jax.Array:
         x = x + gqa_attention_apply(block["GQAttention_0"], h)
         h = _rms_norm(x, block["RMSNorm_1"]["scale"])
         ffn = block["FFN_0"]
-        hidden = jax.nn.gelu(h @ jnp.asarray(ffn["FFN_layer0"]["kernel"]))
+        hidden = _gelu(h @ jnp.asarray(ffn["FFN_layer0"]["kernel"]))
         x = x + hidden @ jnp.asarray(ffn["FFN_layer1"]["kernel"])
     x = _rms_norm(x, params["RMSNorm_f"]["scale"])  # type: ignore[index]
     return x @ jnp.asarray(params["DenseLogits"]["kernel"])  # type: ignore[index]
@@ -1160,8 +1172,10 @@ def make_split_concat_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
                     (1, 1, input_channels, stem_channels),
                     dtype=jnp.float32,
                 ),
-                "bias": 0.1
-                * jax.random.normal(k_stem, (stem_channels,), dtype=jnp.float32),
+                # Deterministic channel anchors keep the exact-orbit LAP probe
+                # focused on fan-out/concat bindings instead of a seed-specific
+                # coordinate-descent local optimum.
+                "bias": jnp.linspace(2.0, 10.0, stem_channels, dtype=jnp.float32),
             },
             "BranchA": {
                 "kernel": jax.random.normal(
@@ -1169,8 +1183,7 @@ def make_split_concat_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
                     (1, 1, stem_channels, branch_a_channels),
                     dtype=jnp.float32,
                 ),
-                "bias": 0.1
-                * jax.random.normal(k_a, (branch_a_channels,), dtype=jnp.float32),
+                "bias": jnp.linspace(2.0, 10.0, branch_a_channels, dtype=jnp.float32),
             },
             "BranchB": {
                 "kernel": jax.random.normal(
@@ -1178,8 +1191,7 @@ def make_split_concat_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
                     (1, 1, stem_channels, branch_b_channels),
                     dtype=jnp.float32,
                 ),
-                "bias": 0.1
-                * jax.random.normal(k_b, (branch_b_channels,), dtype=jnp.float32),
+                "bias": jnp.linspace(2.0, 11.0, branch_b_channels, dtype=jnp.float32),
             },
             "Dense_0": {
                 "kernel": jax.random.normal(

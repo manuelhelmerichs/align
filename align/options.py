@@ -1,5 +1,7 @@
 """Lightweight dataclasses shared between config and runtime."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,7 +59,7 @@ class RebasinScheduleStep:
             )
 
     @classmethod
-    def from_mapping(cls, payload: dict[str, Any]) -> "RebasinScheduleStep":
+    def from_mapping(cls, payload: dict[str, Any]) -> RebasinScheduleStep:
         _validate_schedule_fields(payload)
         if "solver" not in payload:
             raise ValueError("Each rebasin schedule entry must define 'solver'.")

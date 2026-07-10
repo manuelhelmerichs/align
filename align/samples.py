@@ -7,7 +7,7 @@ import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, TypeAlias
+from typing import Any, Protocol
 
 import jax
 import jax.numpy as jnp
@@ -16,7 +16,28 @@ from jax.tree_util import DictKey, GetAttrKey, SequenceKey
 
 from .sample_formats import DEFAULT_SAMPLE_FORMAT, normalize_sample_format
 
-ParamTree: TypeAlias = Any
+type ParamTree = Any
+
+
+class _PyTreeDefinitionUnpickler(pickle.Unpickler):
+    """Load PyTree definitions across JAXlib's internal module relocation."""
+
+    def find_class(self, module: str, name: str) -> Any:
+        if module == "jaxlib.xla_extension.pytree" and name == "PyTreeDef":
+            return jax.tree_util.PyTreeDef
+        return super().find_class(module, name)
+
+
+def load_pytree_definition(path: str | Path) -> jax.tree_util.PyTreeDef:
+    """Load a pickled JAX PyTree definition from a producer artifact."""
+
+    with Path(path).open("rb") as handle:
+        treedef = _PyTreeDefinitionUnpickler(handle).load()
+    if not isinstance(treedef, jax.tree_util.PyTreeDef):
+        raise TypeError(
+            f"Expected a JAX PyTreeDef in {path}, got {type(treedef).__name__}."
+        )
+    return treedef
 
 
 @dataclass(frozen=True)
@@ -83,8 +104,7 @@ class PyTreeNpzCodec:
     @property
     def treedef(self) -> jax.tree_util.PyTreeDef:
         if self._treedef is None:
-            with self.tree_path.open("rb") as handle:
-                self._treedef = pickle.load(handle)
+            self._treedef = load_pytree_definition(self.tree_path)
         return self._treedef
 
     def load(self, path: str | Path) -> WeightSample:
@@ -152,5 +172,6 @@ __all__ = [
     "WeightSample",
     "WeightSampleCodec",
     "create_sample_codec",
+    "load_pytree_definition",
     "tree_leaves_with_names",
 ]

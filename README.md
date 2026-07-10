@@ -4,17 +4,24 @@
 
 ## Install
 
-The pinned JAX stack currently supports Python 3.11 or 3.12. The repo includes
-`.python-version` so `uv` uses Python 3.12 automatically.
+The project uses Python 3.13 and pins its dependency stack for reproducibility.
+The repo includes `.python-version` so `uv` uses Python 3.13.14 automatically.
 
 ```bash
 uv sync --extra dev
 ```
 
-For CUDA 12 JAX wheels:
+For CUDA 13 JAX wheels:
 
 ```bash
-uv sync --extra cuda --extra dev  # CUDA 12 JAX wheels
+uv sync --extra cuda --extra dev  # CUDA 13 JAX wheels
+```
+
+For the experimental Apple Silicon MPS backend:
+
+```bash
+uv sync --extra mps --extra dev
+uv run align configs/examples/align.yaml --validate-only --force-gpu
 ```
 
 ## Input contract

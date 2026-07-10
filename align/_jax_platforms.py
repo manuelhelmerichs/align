@@ -1,8 +1,13 @@
 """Utility functions to configure the JAX backend before importing JAX."""
 
 import os
+import platform
 import shutil
 import subprocess
+import sys
+from importlib import metadata
+
+_GPU_PLATFORM_NAMES = frozenset({"cuda", "gpu", "mps", "rocm"})
 
 
 def configure_jax_platforms(
@@ -30,8 +35,9 @@ def configure_jax_platforms(
         env_updates["CUDA_VISIBLE_DEVICES"] = ""
         env_updates["JAX_VISIBLE_DEVICES"] = ""
     else:
-        if _looks_like_cuda_system():
-            env_updates["JAX_PLATFORMS"] = "gpu,cpu"
+        gpu_platform = _preferred_gpu_platform()
+        if gpu_platform is not None:
+            env_updates["JAX_PLATFORMS"] = f"{gpu_platform},cpu"
             if not allow_preallocation:
                 env_updates.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
         else:
@@ -53,14 +59,15 @@ def _normalize_jax_platform_env() -> None:
     if not platforms:
         return
 
-    if not _looks_like_cuda_system():
+    gpu_platform = _preferred_gpu_platform()
+    if gpu_platform is None:
         return
 
     updated = False
     normalized: list[str] = []
     for entry in platforms:
         if entry.lower() == "gpu":
-            normalized.append("cuda")
+            normalized.append(gpu_platform)
             updated = True
         else:
             normalized.append(entry)
@@ -85,3 +92,30 @@ def _looks_like_cuda_system() -> bool:
         return "GPU" in (proc.stdout or "")
     except Exception:
         return False
+
+
+def _looks_like_mps_system() -> bool:
+    if sys.platform != "darwin" or platform.machine().lower() not in {
+        "aarch64",
+        "arm64",
+    }:
+        return False
+    try:
+        metadata.version("jax-mps")
+    except metadata.PackageNotFoundError:
+        return False
+    return True
+
+
+def _preferred_gpu_platform() -> str | None:
+    if _looks_like_cuda_system():
+        return "cuda"
+    if _looks_like_mps_system():
+        return "mps"
+    return None
+
+
+def is_gpu_platform(name: str) -> bool:
+    """Return whether a JAX device platform is GPU-backed."""
+
+    return str(name).lower() in _GPU_PLATFORM_NAMES

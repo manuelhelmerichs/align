@@ -9,6 +9,7 @@ from pathlib import Path
 from queue import Empty
 from typing import Any
 
+from .._jax_platforms import is_gpu_platform
 from .common import _WORKER_HEARTBEAT_INTERVAL
 
 
@@ -207,7 +208,9 @@ class WorkerPool:
             import jax
 
             return [
-                int(device.id) for device in jax.devices() if device.platform == "gpu"
+                int(device.id)
+                for device in jax.devices()
+                if is_gpu_platform(device.platform)
             ]
         except Exception:  # pragma: no cover - backend specific
             return []
