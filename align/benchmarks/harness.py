@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from align.rebasin.objectives import UnsupportedGroupLinearization
+from align.matching.objectives import UnsupportedGroupLinearization
 
 from .posterior import (
     PosteriorBenchmarkCase,
@@ -151,7 +151,7 @@ def _posterior_record(
     objective_kwargs: Mapping[str, Any] | None,
     normalize: bool,
     rng_seed: int = 0,
-    refine_passes: int = 2,
+    barycenter_passes: int = 2,
 ) -> BenchmarkRecord:
     record = BenchmarkRecord(
         name=f"posterior/{case_label}/{schedule_name}/{objective}",
@@ -164,7 +164,7 @@ def _posterior_record(
             "objective_kwargs": dict(objective_kwargs or {}),
             "normalize": normalize,
             "seed": rng_seed,
-            "refine_passes": refine_passes,
+            "barycenter_passes": barycenter_passes,
         },
     )
     try:
@@ -175,7 +175,7 @@ def _posterior_record(
             schedule=schedule,
             normalize=normalize,
             rng_seed=rng_seed,
-            refine_passes=refine_passes,
+            barycenter_passes=barycenter_passes,
         )
     except (UnsupportedGroupLinearization, NotImplementedError) as exc:
         record.skipped = str(exc)
@@ -465,7 +465,7 @@ def run_regression_suite(*, fast: bool = False) -> list[BenchmarkRecord]:
 # metrics are reported but unbounded because they are machine-dependent.
 DEFAULT_THRESHOLDS: dict[str, dict[str, dict[str, float]]] = {
     # Validity allows float32 orthogonality residuals from continuous
-    # (rotation/orthogonal) group transforms; discrete groups sit at 0.
+    # (rotation/orthogonal) group transform_family; discrete groups sit at 0.
     "orbit/*": {
         "function_drift_max": {"max": 1e-4},
         "permutation_validity_error": {"max": 1e-5},

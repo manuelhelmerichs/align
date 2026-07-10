@@ -16,7 +16,7 @@ from ..artifacts import (
     write_scale_factors_artifact,
 )
 from ..state import SampleManifest, SampleRecord, _file_checksum
-from .pipeline import PipelineOutput, StagePipeline
+from .pipeline import SampleAlignmentResult, StagePipeline
 
 if TYPE_CHECKING:
     from ..samples import WeightSample, WeightSampleCodec
@@ -101,7 +101,7 @@ class _WorkerPipelineSink:
     def __init__(self, worker: _WorkerLoop) -> None:
         self.worker = worker
 
-    def write(self, output: PipelineOutput) -> None:
+    def write(self, output: SampleAlignmentResult) -> None:
         self.worker._emit_commit(
             output.record,
             output.sample,
@@ -300,7 +300,7 @@ def _build_stage_executors(
     ref_sample: WeightSample,
     rebasin_reference: WeightSample | None = None,
 ):
-    from .stages import NormalizeExecutor, RebasinExecutor
+    from .stages import CanonicalizeExecutor, MatchExecutor
 
     stages: list[tuple[str, Any]] = []
     normalize_cfg = job.get("normalize_config")
@@ -313,7 +313,7 @@ def _build_stage_executors(
         stages.append(
             (
                 "normalize",
-                NormalizeExecutor(
+                CanonicalizeExecutor(
                     normalize_cfg,
                     architecture=architecture,
                     adapter_kwargs=adapter_kwargs,
@@ -324,7 +324,7 @@ def _build_stage_executors(
         stages.append(
             (
                 "rebasin",
-                RebasinExecutor(
+                MatchExecutor(
                     rebasin_cfg,
                     reference_index=(
                         job["rebasin_reference_index"]

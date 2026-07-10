@@ -589,7 +589,7 @@ class ArtifactChecksumStore:
 
 
 @dataclass
-class RunManifest:
+class RunState:
     """State persisted between runner invocations."""
 
     path: Path
@@ -704,7 +704,7 @@ class RunManifest:
         return self.elapsed_seconds
 
     @classmethod
-    def load(cls, path: Path) -> RunManifest:
+    def load(cls, path: Path) -> RunState:
         payload = json.loads(Path(path).read_text())
         return cls(
             path=Path(path),

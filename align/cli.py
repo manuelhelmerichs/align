@@ -12,7 +12,7 @@ from typing import Any
 
 from ._jax_platforms import configure_jax_platforms, is_gpu_platform
 from .config import (
-    AlignConfig,
+    RunConfig,
     load_align_config,
     resolve_adapter_defaults,
     validate_method,
@@ -21,7 +21,7 @@ from .config import (
 )
 from .config._utils import _parse_int_list
 from .logging_utils import configure_logging
-from .state import RunManifest, SampleManifest, compute_config_digest
+from .state import RunState, SampleManifest, compute_config_digest
 
 _STATE_MANIFEST = "sample_manifest.json"
 _STATE_RUN = "align_run_state.json"
@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--list-problems",
         action="store_true",
-        help="List the alignment problem blocks derived from the reference sample.",
+        help="List the alignment problem components derived from the reference sample.",
     )
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--print-config", action="store_true")
@@ -245,15 +245,15 @@ def run(args: argparse.Namespace) -> None:
         print("Validation successful. No alignment executed.")
         return
 
-    from .runtime import AlignLogger, AlignRunner
+    from .runtime import AlignmentRunner, RunArtifactStore
 
-    align_logger = AlignLogger(
+    align_logger = RunArtifactStore(
         manifest=manifest,
         output_dir=output_dir,
         stages=stages,
         save_intermediate=config.runtime.save_intermediate,
     )
-    runner = AlignRunner(
+    runner = AlignmentRunner(
         config=config,
         manifest=manifest,
         run_manifest=run_manifest,
@@ -275,28 +275,32 @@ def main(argv: list[str] | None = None) -> None:
     run(args)
 
 
-def _problem_listing(config: AlignConfig, manifest: SampleManifest) -> str:
-    """Build the block listing for the reference sample's alignment problem."""
+def _problem_listing(config: RunConfig, manifest: SampleManifest) -> str:
+    """Build the component listing for the reference sample's alignment problem."""
 
-    from .alignment import format_problem_listing
-    from .architectures import get_adapter
+    from .architectures import get_recipe
     from .runtime.loaders import SampleLoader
+    from .symmetry import format_symmetry_description
 
     adapter_kwargs = dict(config.adapter or {})
-    layer_root = None
-    if config.rebasin and config.rebasin.enabled and config.rebasin.layer_root:
-        layer_root = config.rebasin.layer_root
-    elif config.normalize and config.normalize.enabled and config.normalize.layer_root:
-        layer_root = config.normalize.layer_root
-    if layer_root:
-        adapter_kwargs.setdefault("layer_root", layer_root)
-    adapter = get_adapter(config.architecture, **adapter_kwargs)
+    parameter_root = None
+    if config.rebasin and config.rebasin.enabled and config.rebasin.parameter_root:
+        parameter_root = config.rebasin.parameter_root
+    elif (
+        config.normalize
+        and config.normalize.enabled
+        and config.normalize.parameter_root
+    ):
+        parameter_root = config.normalize.parameter_root
+    if parameter_root:
+        adapter_kwargs.setdefault("parameter_root", parameter_root)
+    adapter = get_recipe(config.architecture, **adapter_kwargs)
     ref_sample = SampleLoader(manifest).load_reference()
     problem = adapter.build_problem(ref_sample.params)
-    return format_problem_listing(problem)
+    return format_symmetry_description(problem)
 
 
-def _configure_platform_preferences(config: AlignConfig) -> None:
+def _configure_platform_preferences(config: RunConfig) -> None:
     runtime_cfg = config.runtime
     force_cpu = bool(runtime_cfg.force_cpu)
     force_gpu = bool(runtime_cfg.force_gpu)
@@ -434,7 +438,7 @@ def _digest_payload(config_payload: Mapping[str, Any]) -> dict[str, Any]:
     if normalize and normalize.get("enabled", False):
         payload["normalize"] = {
             "method": normalize.get("method"),
-            "layer_root": normalize.get("layer_root"),
+            "parameter_root": normalize.get("parameter_root"),
             "task_type": normalize.get("task_type"),
             "num_classes": normalize.get("num_classes"),
             "scale_normalize": normalize.get("scale_normalize"),
@@ -445,9 +449,9 @@ def _digest_payload(config_payload: Mapping[str, Any]) -> dict[str, Any]:
             "objective": rebasin.get("objective"),
             "objective_kwargs": rebasin.get("objective_kwargs"),
             "schedule": rebasin.get("schedule"),
-            "layer_root": rebasin.get("layer_root"),
+            "parameter_root": rebasin.get("parameter_root"),
             "seed": rebasin.get("seed"),
-            "refine_passes": rebasin.get("refine_passes"),
+            "barycenter_passes": rebasin.get("barycenter_passes"),
         }
     return payload
 
@@ -495,13 +499,13 @@ def _load_or_create_run_manifest(
     output_dir: Path,
     exp_root: Path,
     digest: str,
-    config: AlignConfig,
+    config: RunConfig,
     manifest_path: Path,
     runtime_settings: Mapping[str, Any],
     ignore_digest: bool = False,
-) -> RunManifest:
+) -> RunState:
     if path.exists():
-        run_manifest = RunManifest.load(path)
+        run_manifest = RunState.load(path)
         if run_manifest.config_digest != digest:
             if ignore_digest:
                 _LOG.warning(
@@ -517,7 +521,7 @@ def _load_or_create_run_manifest(
             "--resume specified but no run state found under the output directory."
         )
 
-    run_manifest = RunManifest(
+    run_manifest = RunState(
         path=path,
         experiment_root=exp_root,
         output_dir=output_dir,
@@ -541,7 +545,7 @@ def _load_or_create_run_manifest(
             "rebasin_schedule": config.rebasin.schedule_payload()
             if config.rebasin
             else None,
-            "rebasin_refine_passes": config.rebasin.refine_passes
+            "rebasin_barycenter_passes": config.rebasin.barycenter_passes
             if config.rebasin
             else None,
         },

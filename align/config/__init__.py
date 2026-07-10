@@ -5,14 +5,14 @@ Configuration is split across submodules for maintainability:
 
 - ``paths``: Filesystem path configuration (PathConfig)
 - ``selection``: Sample selection/filtering (SelectionConfig)
-- ``stages``: Stage-specific configs (NormalizeConfig, RebasinConfig, NormalizationOptions)
+- ``stages``: Stage-specific configs (CanonicalizeConfig, MatchConfig, ScaleCanonicalizationConfig)
 - ``runtime``: Runtime execution options (RuntimeConfig)
 - ``loader``: YAML loading, merging, and validation
 """
 
-from ..options import RebasinScheduleStep
+from ..options import SolverStep
 from .loader import (
-    AlignConfig,
+    RunConfig,
     load_align_config,
     resolve_adapter_defaults,
     validate_method,
@@ -22,17 +22,17 @@ from .loader import (
 from .paths import PathConfig
 from .runtime import RuntimeConfig
 from .selection import SelectionConfig
-from .stages import NormalizationOptions, NormalizeConfig, RebasinConfig
+from .stages import CanonicalizeConfig, MatchConfig, ScaleCanonicalizationConfig
 
 __all__ = [
-    "RebasinScheduleStep",
+    "SolverStep",
     "PathConfig",
     "SelectionConfig",
-    "NormalizationOptions",
-    "NormalizeConfig",
-    "RebasinConfig",
+    "ScaleCanonicalizationConfig",
+    "CanonicalizeConfig",
+    "MatchConfig",
     "RuntimeConfig",
-    "AlignConfig",
+    "RunConfig",
     "load_align_config",
     "resolve_adapter_defaults",
     "validate_method",

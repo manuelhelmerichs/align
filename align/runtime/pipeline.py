@@ -13,7 +13,7 @@ from .stages import StageExecutor
 
 
 @dataclass(frozen=True)
-class PipelineOutput:
+class SampleAlignmentResult:
     """Complete output for one sample after all configured stages."""
 
     record: SampleRecord
@@ -27,7 +27,7 @@ class PipelineOutput:
 class PipelineSink(Protocol):
     """Destination for completed pipeline outputs."""
 
-    def write(self, output: PipelineOutput) -> None:
+    def write(self, output: SampleAlignmentResult) -> None:
         """Persist or emit one completed sample."""
 
 
@@ -65,7 +65,7 @@ class StagePipeline:
         self,
         record: SampleRecord,
         sample: WeightSample,
-    ) -> PipelineOutput:
+    ) -> SampleAlignmentResult:
         """Run all stages for one record and return the completed output."""
 
         indexed = [(idx, name, ex) for idx, (name, ex) in enumerate(self.stages)]
@@ -76,7 +76,7 @@ class StagePipeline:
         record: SampleRecord,
         sample: WeightSample,
         stages: Sequence[tuple[int, str, StageExecutor]],
-    ) -> PipelineOutput:
+    ) -> SampleAlignmentResult:
         """Thread ``sample`` through ``stages``, collecting artifacts and aux.
 
         ``stages`` carries each executor's index within the full pipeline so the
@@ -105,7 +105,7 @@ class StagePipeline:
             if self.save_intermediate and not last_stage:
                 intermediate_sample = current
 
-        return PipelineOutput(
+        return SampleAlignmentResult(
             record=record,
             sample=current,
             aux=aux_payload,
@@ -118,7 +118,7 @@ class StagePipeline:
         self,
         records: Sequence[SampleRecord],
         samples: Sequence[WeightSample],
-    ) -> list[PipelineOutput]:
+    ) -> list[SampleAlignmentResult]:
         """Run a batch whose final stage is a batchable rebasin executor."""
 
         if not self.stages or self.stages[-1][0] != "rebasin":
@@ -139,13 +139,13 @@ class StagePipeline:
         rebasin_results = rebasin_executor.process_batch(
             records, [partial.sample for partial in partials]
         )
-        outputs: list[PipelineOutput] = []
+        outputs: list[SampleAlignmentResult] = []
         for partial, reb_result in zip(partials, rebasin_results, strict=True):
             aux_payload = dict(partial.aux)
             if reb_result.aux:
                 aux_payload["rebasin"] = reb_result.aux
             outputs.append(
-                PipelineOutput(
+                SampleAlignmentResult(
                     record=partial.record,
                     sample=reb_result.sample,
                     aux=aux_payload,
@@ -213,4 +213,4 @@ class StagePipeline:
             prefetch_loader.clear()
 
 
-__all__ = ["PipelineOutput", "PipelineSink", "StagePipeline"]
+__all__ = ["SampleAlignmentResult", "PipelineSink", "StagePipeline"]

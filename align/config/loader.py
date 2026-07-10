@@ -1,4 +1,4 @@
-"""Configuration loader, validation, and the main AlignConfig class."""
+"""Configuration loader, validation, and the main RunConfig class."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from ._utils import _merge_dicts, _validate_fields
 from .paths import PathConfig, path_to_dict
 from .runtime import RuntimeConfig
 from .selection import SelectionConfig
-from .stages import NormalizeConfig, RebasinConfig
+from .stages import CanonicalizeConfig, MatchConfig
 
 if TYPE_CHECKING:
     from ..state import SampleManifest
@@ -35,7 +35,7 @@ _ALIGN_CONFIG_FIELDS = frozenset(
 
 
 @dataclass
-class AlignConfig:
+class RunConfig:
     """Configuration for the align CLI."""
 
     paths: PathConfig = field(default_factory=PathConfig)
@@ -43,20 +43,20 @@ class AlignConfig:
     adapter: dict[str, Any] = field(default_factory=dict)
     selection: SelectionConfig = field(default_factory=SelectionConfig)
     order: str | None = None
-    normalize: NormalizeConfig | None = field(default_factory=NormalizeConfig)
-    rebasin: RebasinConfig | None = field(default_factory=RebasinConfig)
+    normalize: CanonicalizeConfig | None = field(default_factory=CanonicalizeConfig)
+    rebasin: MatchConfig | None = field(default_factory=MatchConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, Any]) -> AlignConfig:
+    def from_mapping(cls, payload: Mapping[str, Any]) -> RunConfig:
         _validate_fields("top-level", payload, _ALIGN_CONFIG_FIELDS)
         normalize_cfg = (
-            NormalizeConfig.from_mapping(payload.get("normalize"))
+            CanonicalizeConfig.from_mapping(payload.get("normalize"))
             if "normalize" in payload
             else None
         )
         rebasin_cfg = (
-            RebasinConfig.from_mapping(payload.get("rebasin"))
+            MatchConfig.from_mapping(payload.get("rebasin"))
             if "rebasin" in payload
             else None
         )
@@ -106,7 +106,7 @@ class AlignConfig:
             payload["normalize"] = {
                 "enabled": self.normalize.enabled,
                 "method": self.normalize.method,
-                "layer_root": self.normalize.layer_root,
+                "parameter_root": self.normalize.parameter_root,
                 "task_type": self.normalize.task_type,
                 "num_classes": self.normalize.num_classes,
                 "scale_normalize": asdict(self.normalize.scale_normalize),
@@ -119,9 +119,9 @@ class AlignConfig:
                 "objective": self.rebasin.objective,
                 "objective_kwargs": self.rebasin.objective_kwargs,
                 "schedule": self.rebasin.schedule_payload(),
-                "layer_root": self.rebasin.layer_root,
+                "parameter_root": self.rebasin.parameter_root,
                 "seed": self.rebasin.seed,
-                "refine_passes": self.rebasin.refine_passes,
+                "barycenter_passes": self.rebasin.barycenter_passes,
             }
         else:
             payload["rebasin"] = None
@@ -130,7 +130,7 @@ class AlignConfig:
 
 def load_align_config(
     config_path: Path | None, overrides: Mapping[str, Any] | None = None
-) -> AlignConfig:
+) -> RunConfig:
     """Load a config YAML and merge CLI overrides."""
 
     data: dict[str, Any] = {}
@@ -142,10 +142,10 @@ def load_align_config(
         data = dict(loaded)
     if overrides:
         data = _merge_dicts(data, overrides)
-    return AlignConfig.from_mapping(data)
+    return RunConfig.from_mapping(data)
 
 
-def validate_paths(config: AlignConfig) -> None:
+def validate_paths(config: RunConfig) -> None:
     """Validate that required filesystem paths exist."""
 
     root = config.paths.experiment_root
@@ -166,7 +166,7 @@ def validate_paths(config: AlignConfig) -> None:
             raise FileNotFoundError(f"Tree path must be a file: {resolved_tree}")
 
 
-def resolve_adapter_defaults(config: AlignConfig) -> None:
+def resolve_adapter_defaults(config: RunConfig) -> None:
     """Fill adapter defaults derivable from resolved path configuration."""
 
     if config.architecture != "resnet":
@@ -175,11 +175,13 @@ def resolve_adapter_defaults(config: AlignConfig) -> None:
     if root is None:
         return
     adapter_kwargs = dict(config.adapter or {})
-    if adapter_kwargs.get("module_graph") is not None:
+    if adapter_kwargs.get("residual_topology") is not None:
         return
-    module_graph_path = Path(root) / "module_graph.json"
-    if module_graph_path.exists():
-        adapter_kwargs["module_graph"] = str(module_graph_path)
+    # The producer emits a "module_graph.json" descriptor; align consumes it as
+    # the recipe's residual_topology (an on-disk producer artifact name).
+    residual_topology_path = Path(root) / "module_graph.json"
+    if residual_topology_path.exists():
+        adapter_kwargs["residual_topology"] = str(residual_topology_path)
         config.adapter = adapter_kwargs
 
 
@@ -193,24 +195,24 @@ def validate_ref_sample(manifest: SampleManifest, selection: SelectionConfig) ->
         )
 
 
-def validate_method(config: AlignConfig) -> None:
+def validate_method(config: RunConfig) -> None:
     """Validate configured stage methods and architecture compatibility."""
 
     if config.rebasin is not None:
         config.rebasin.validate_method()
     if config.normalize is not None:
         config.normalize.validate_method()
-    from ..architectures import available_adapters
+    from ..architectures import available_recipes
 
-    if config.architecture not in available_adapters():
+    if config.architecture not in available_recipes():
         raise ValueError(
             f"Unknown architecture '{config.architecture}'. "
-            f"Available: {', '.join(available_adapters())}"
+            f"Available: {', '.join(available_recipes())}"
         )
 
 
 __all__ = [
-    "AlignConfig",
+    "RunConfig",
     "load_align_config",
     "resolve_adapter_defaults",
     "validate_method",

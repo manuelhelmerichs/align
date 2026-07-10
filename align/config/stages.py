@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..options import RebasinScheduleStep
+from ..options import SolverStep
 from ._utils import _maybe_int, _require_bool, _validate_fields
 
 _REBASIN_FIELDS = frozenset(
@@ -15,16 +15,16 @@ _REBASIN_FIELDS = frozenset(
         "objective",
         "objective_kwargs",
         "schedule",
-        "layer_root",
+        "parameter_root",
         "seed",
-        "refine_passes",
+        "barycenter_passes",
     }
 )
 _NORMALIZE_FIELDS = frozenset(
     {
         "enabled",
         "method",
-        "layer_root",
+        "parameter_root",
         "task_type",
         "num_classes",
         "scale_normalize",
@@ -59,7 +59,7 @@ def _validate_choice(name: str, value: str, valid: frozenset[str]) -> str:
 
 
 @dataclass
-class NormalizationOptions:
+class ScaleCanonicalizationConfig:
     """Configuration options for scale normalization."""
 
     epsilon: float = 1e-8
@@ -103,15 +103,17 @@ class NormalizationOptions:
 
 
 @dataclass
-class NormalizeConfig:
+class CanonicalizeConfig:
     """Configuration for the normalization stage."""
 
     enabled: bool = True
     method: str = "scale_normalize"
-    layer_root: str | None = None
+    parameter_root: str | None = None
     task_type: str = "regression"
     num_classes: int | None = None
-    scale_normalize: NormalizationOptions = field(default_factory=NormalizationOptions)
+    scale_normalize: ScaleCanonicalizationConfig = field(
+        default_factory=ScaleCanonicalizationConfig
+    )
 
     def __post_init__(self):
         self.enabled = _require_bool("normalize.enabled", self.enabled)
@@ -125,10 +127,10 @@ class NormalizeConfig:
             str(self.task_type).lower(),
             _VALID_TASK_TYPES,
         )
-        if self.layer_root is not None:
-            self.layer_root = str(self.layer_root)
+        if self.parameter_root is not None:
+            self.parameter_root = str(self.parameter_root)
         self.num_classes = _maybe_int(self.num_classes)
-        if not isinstance(self.scale_normalize, NormalizationOptions):
+        if not isinstance(self.scale_normalize, ScaleCanonicalizationConfig):
             raise ValueError(
                 "normalize.scale_normalize must define normalization options."
             )
@@ -136,7 +138,7 @@ class NormalizeConfig:
     @classmethod
     def from_mapping(
         cls, payload: Mapping[str, Any] | bool | None
-    ) -> NormalizeConfig | None:
+    ) -> CanonicalizeConfig | None:
         if payload is None:
             return None
         if payload is False:
@@ -156,10 +158,10 @@ class NormalizeConfig:
         return cls(
             enabled=_require_bool("normalize.enabled", payload.get("enabled", True)),
             method=payload.get("method", "scale_normalize"),
-            layer_root=payload.get("layer_root"),
+            parameter_root=payload.get("parameter_root"),
             task_type=payload.get("task_type", "regression"),
             num_classes=_maybe_int(payload.get("num_classes")),
-            scale_normalize=NormalizationOptions(**scale_opts),
+            scale_normalize=ScaleCanonicalizationConfig(**scale_opts),
         )
 
     @property
@@ -191,36 +193,36 @@ class NormalizeConfig:
 
 
 @dataclass
-class RebasinConfig:
+class MatchConfig:
     """Configuration for the rebasin stage."""
 
     enabled: bool = True
     objective: str = "l2_weight"
     objective_kwargs: dict[str, Any] = field(default_factory=dict)
-    schedule: tuple[RebasinScheduleStep, ...] = field(
-        default_factory=lambda: (RebasinScheduleStep(solver="lap"),)
+    schedule: tuple[SolverStep, ...] = field(
+        default_factory=lambda: (SolverStep(solver="lap"),)
     )
-    layer_root: str | None = None
+    parameter_root: str | None = None
     seed: int | None = None
-    refine_passes: int = 2
+    barycenter_passes: int = 2
 
     def __post_init__(self) -> None:
-        if isinstance(self.refine_passes, bool):
-            raise ValueError("rebasin.refine_passes must be an integer at least 1.")
+        if isinstance(self.barycenter_passes, bool):
+            raise ValueError("rebasin.barycenter_passes must be an integer at least 1.")
         try:
-            refine_passes = int(self.refine_passes)
+            barycenter_passes = int(self.barycenter_passes)
         except (TypeError, ValueError) as exc:
             raise ValueError(
-                "rebasin.refine_passes must be an integer at least 1."
+                "rebasin.barycenter_passes must be an integer at least 1."
             ) from exc
-        if refine_passes != self.refine_passes or refine_passes < 1:
-            raise ValueError("rebasin.refine_passes must be an integer at least 1.")
-        self.refine_passes = refine_passes
+        if barycenter_passes != self.barycenter_passes or barycenter_passes < 1:
+            raise ValueError("rebasin.barycenter_passes must be an integer at least 1.")
+        self.barycenter_passes = barycenter_passes
 
     @classmethod
     def from_mapping(
         cls, payload: Mapping[str, Any] | bool | None
-    ) -> RebasinConfig | None:
+    ) -> MatchConfig | None:
         if payload is None:
             return None
         if payload is False:
@@ -233,21 +235,21 @@ class RebasinConfig:
         _validate_fields("rebasin", payload, _REBASIN_FIELDS)
         raw_schedule = payload.get("schedule")
         if raw_schedule is None:
-            schedule = (RebasinScheduleStep(solver="lap"),)
+            schedule = (SolverStep(solver="lap"),)
         else:
             if not isinstance(raw_schedule, list) or not raw_schedule:
                 raise ValueError("rebasin.schedule must be a non-empty list.")
             schedule = tuple(
-                RebasinScheduleStep.from_mapping(dict(item)) for item in raw_schedule
+                SolverStep.from_mapping(dict(item)) for item in raw_schedule
             )
         return cls(
             enabled=_require_bool("rebasin.enabled", payload.get("enabled", True)),
             objective=str(payload.get("objective", "l2_weight")),
             objective_kwargs=dict(payload.get("objective_kwargs", {})),
             schedule=schedule,
-            layer_root=payload.get("layer_root"),
+            parameter_root=payload.get("parameter_root"),
             seed=_maybe_int(payload.get("seed")),
-            refine_passes=payload.get("refine_passes", 2),
+            barycenter_passes=payload.get("barycenter_passes", 2),
         )
 
     def schedule_payload(self) -> list[dict[str, Any]]:
@@ -271,4 +273,4 @@ class RebasinConfig:
                 )
 
 
-__all__ = ["NormalizationOptions", "NormalizeConfig", "RebasinConfig"]
+__all__ = ["ScaleCanonicalizationConfig", "CanonicalizeConfig", "MatchConfig"]

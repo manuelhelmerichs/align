@@ -28,11 +28,11 @@ _NORMALIZE_STATIC_KEYS = frozenset(
     }
 )
 _NORMALIZE_PER_SAMPLE_KEYS = frozenset({"last_layer_gamma"})
-_REBASIN_STATIC_KEYS = frozenset({"objective", "schedule", "refine_passes"})
+_REBASIN_STATIC_KEYS = frozenset({"objective", "schedule", "barycenter_passes"})
 _REBASIN_PER_SAMPLE_KEYS = frozenset({"reference"})
 
 
-class AlignLogger:
+class RunArtifactStore:
     """Logger for the align pipeline.
 
     Owns the final/intermediate/permutation/scale-factor layout, checksum
@@ -377,4 +377,4 @@ class AlignLogger:
         )
 
 
-__all__ = ["AlignLogger"]
+__all__ = ["RunArtifactStore"]

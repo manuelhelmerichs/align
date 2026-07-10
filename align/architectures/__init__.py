@@ -1,39 +1,39 @@
-"""Architecture recipes and the block adapters they compose.
+"""Architecture recipes and the component adapters they compose.
 
-Block adapters (``align.architectures.blocks``) construct alignment problems
-through a shared ``ProblemBuilder``; architecture recipes discover block
+Component adapters (``align.architectures.rules``) construct alignment problems
+through a shared ``SymmetryGraphBuilder``; architecture recipes discover component
 locations in a parameter tree and compose them.
 """
 
 import importlib
 from typing import Any
 
-from .base import (
-    ArchitectureAdapter,
-    available_adapters,
-    get_adapter,
-    register_adapter,
+from .recipe import (
+    ArchitectureRecipe,
+    available_recipes,
+    get_recipe,
+    register_recipe,
 )
 
-_ADAPTER_EXPORTS = {
-    "CNNAdapter": "align.architectures.cnn",
-    "DenseMLPAdapter": "align.architectures.dense_mlp",
-    "ModernTransformerAdapter": "align.architectures.modern_transformer",
-    "ResNetAdapter": "align.architectures.resnet",
-    "ConvStackBlockAdapter": "align.architectures.resnet",
-    "TransformerAdapter": "align.architectures.transformer",
-    "ProblemBuilder": "align.architectures.builder",
-    "BlockAdapter": "align.architectures.blocks",
-    "DenseStackBlockAdapter": "align.architectures.blocks",
-    "AttentionBlockAdapter": "align.architectures.blocks",
-    "GQAAttentionBlockAdapter": "align.architectures.blocks",
-    "ResidualStreamBlockAdapter": "align.architectures.blocks",
+_RECIPE_EXPORTS = {
+    "ConvNetRecipe": "align.architectures.convnet",
+    "MLPRecipe": "align.architectures.mlp",
+    "RMSNormGQARoPETransformerRecipe": "align.architectures.rmsnorm_gqa_rope_transformer",
+    "ResidualConvNetRecipe": "align.architectures.residual_convnet",
+    "ResidualConvNetRule": "align.architectures.residual_convnet",
+    "LayerNormMHATransformerRecipe": "align.architectures.layernorm_mha_transformer",
+    "SymmetryGraphBuilder": "align.architectures.graph_builder",
+    "SymmetryRule": "align.architectures.rules",
+    "DenseChainRule": "align.architectures.rules",
+    "MHAAttentionRule": "align.architectures.rules",
+    "GQARoPEAttentionRule": "align.architectures.rules",
+    "ResidualStreamRule": "align.architectures.rules",
 }
 
 
 def __getattr__(name: str) -> Any:
     try:
-        module_name = _ADAPTER_EXPORTS[name]
+        module_name = _RECIPE_EXPORTS[name]
     except KeyError as exc:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
     module = importlib.import_module(module_name)
@@ -41,24 +41,24 @@ def __getattr__(name: str) -> Any:
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(_ADAPTER_EXPORTS))
+    return sorted(set(globals()) | set(_RECIPE_EXPORTS))
 
 
 __all__ = [
-    "ArchitectureAdapter",
-    "AttentionBlockAdapter",
-    "BlockAdapter",
-    "CNNAdapter",
-    "ConvStackBlockAdapter",
-    "DenseMLPAdapter",
-    "DenseStackBlockAdapter",
-    "GQAAttentionBlockAdapter",
-    "ModernTransformerAdapter",
-    "ProblemBuilder",
-    "ResNetAdapter",
-    "ResidualStreamBlockAdapter",
-    "TransformerAdapter",
-    "available_adapters",
-    "get_adapter",
-    "register_adapter",
+    "ArchitectureRecipe",
+    "MHAAttentionRule",
+    "SymmetryRule",
+    "ConvNetRecipe",
+    "ResidualConvNetRule",
+    "MLPRecipe",
+    "DenseChainRule",
+    "GQARoPEAttentionRule",
+    "RMSNormGQARoPETransformerRecipe",
+    "SymmetryGraphBuilder",
+    "ResidualConvNetRecipe",
+    "ResidualStreamRule",
+    "LayerNormMHATransformerRecipe",
+    "available_recipes",
+    "get_recipe",
+    "register_recipe",
 ]

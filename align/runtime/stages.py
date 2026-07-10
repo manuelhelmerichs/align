@@ -8,12 +8,12 @@ from typing import Any
 
 import jax
 
-from ..architectures import get_adapter
-from ..config.stages import NormalizeConfig, RebasinConfig
-from ..rebasin import (
-    build_scheduler,
-    rebasin_batch,
-    rebasin_single_sample,
+from ..architectures import get_recipe
+from ..config.stages import CanonicalizeConfig, MatchConfig
+from ..matching import (
+    build_solver_sequence,
+    match_batch,
+    match_sample,
 )
 from ..samples import ParamTree, WeightSample
 from ..state import SampleManifest, SampleRecord
@@ -70,18 +70,18 @@ class StageExecutor(ABC):
     ) -> WeightSample:
         """Return the reference sample after applying this stage.
 
-        Each stage transforms the reference so the next stage prepares against
+        Each stage transform_family the reference so the next stage prepares against
         the already-aligned reference.
         """
         return self.process_single(record, sample).sample
 
 
-class NormalizeExecutor(StageExecutor):
+class CanonicalizeExecutor(StageExecutor):
     """Executes the normalization stage."""
 
     def __init__(
         self,
-        config: NormalizeConfig,
+        config: CanonicalizeConfig,
         *,
         architecture: str,
         adapter_kwargs: Mapping[str, Any],
@@ -94,18 +94,18 @@ class NormalizeExecutor(StageExecutor):
         self.normalizer = None
 
     def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
-        from ..normalization import ScaleNormalizer
+        from ..canonicalization import ScaleCanonicalizer
 
         adapter_kwargs = dict(self.adapter_kwargs)
-        if self.config.layer_root:
-            adapter_kwargs.setdefault("layer_root", self.config.layer_root)
-        self.adapter = get_adapter(self.architecture, **adapter_kwargs)
+        if self.config.parameter_root:
+            adapter_kwargs.setdefault("parameter_root", self.config.parameter_root)
+        self.adapter = get_recipe(self.architecture, **adapter_kwargs)
         self.problem = self.adapter.build_problem(ref_sample.params)
-        self.normalizer = ScaleNormalizer()
+        self.normalizer = ScaleCanonicalizer()
 
     def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
         if self.adapter is None or self.problem is None or self.normalizer is None:
-            raise RuntimeError("NormalizeExecutor not prepared.")
+            raise RuntimeError("CanonicalizeExecutor not prepared.")
 
         normalized_params, scale_factors, aux = self.normalizer.normalize(
             self.problem,
@@ -141,12 +141,12 @@ class NormalizeExecutor(StageExecutor):
         return False
 
 
-class RebasinExecutor(StageExecutor):
+class MatchExecutor(StageExecutor):
     """Executes the rebasin stage."""
 
     def __init__(
         self,
-        config: RebasinConfig,
+        config: MatchConfig,
         *,
         reference_index: int | None,
         seed: int | None = None,
@@ -174,12 +174,12 @@ class RebasinExecutor(StageExecutor):
 
     def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
         adapter_kwargs = dict(self.adapter_kwargs)
-        if self.config.layer_root:
-            adapter_kwargs.setdefault("layer_root", self.config.layer_root)
-        self.adapter = get_adapter(self.architecture, **adapter_kwargs)
+        if self.config.parameter_root:
+            adapter_kwargs.setdefault("parameter_root", self.config.parameter_root)
+        self.adapter = get_recipe(self.architecture, **adapter_kwargs)
         self.problem = self.adapter.build_problem(ref_sample.params)
         self.ref_sample = ref_sample
-        self.scheduler = build_scheduler(
+        self.scheduler = build_solver_sequence(
             objective=self.config.objective,
             objective_kwargs=self.config.objective_kwargs,
             schedule=self.config.schedule,
@@ -205,7 +205,7 @@ class RebasinExecutor(StageExecutor):
         aux_payload = dict(aux or {})
         aux_payload["objective"] = self.config.objective
         aux_payload["schedule"] = self.config.schedule_payload()
-        aux_payload["refine_passes"] = self.config.refine_passes
+        aux_payload["barycenter_passes"] = self.config.barycenter_passes
         return StageResult(
             sample=sample.with_params(params),
             artifacts={"permutations": perms},
@@ -220,9 +220,9 @@ class RebasinExecutor(StageExecutor):
             or self.scheduler is None
             or self.ref_data is None
         ):
-            raise RuntimeError("RebasinExecutor not prepared.")
+            raise RuntimeError("MatchExecutor not prepared.")
 
-        folded_params, perms, aux_info = rebasin_single_sample(
+        folded_params, perms, aux_info = match_sample(
             self.problem,
             self.ref_sample.params,
             sample.params,
@@ -249,7 +249,7 @@ class RebasinExecutor(StageExecutor):
             or self.scheduler is None
             or self.ref_data is None
         ):
-            raise RuntimeError("RebasinExecutor not prepared.")
+            raise RuntimeError("MatchExecutor not prepared.")
 
         record_list = list(records)
         sample_batch = list(samples)
@@ -282,7 +282,7 @@ class RebasinExecutor(StageExecutor):
             target_params = [sample.params for sample in target_samples]
             rng_keys = [self._rng_for_record(rec) for rec in target_records]
             rng_key = rng_keys[0] if rng_keys else None
-            batch_results = rebasin_batch(
+            batch_results = match_batch(
                 self.problem,
                 self.ref_sample.params,
                 target_params,
@@ -315,6 +315,6 @@ class RebasinExecutor(StageExecutor):
 __all__ = [
     "StageResult",
     "StageExecutor",
-    "NormalizeExecutor",
-    "RebasinExecutor",
+    "CanonicalizeExecutor",
+    "MatchExecutor",
 ]

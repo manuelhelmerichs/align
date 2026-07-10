@@ -24,16 +24,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from align.alignment import AlignmentProblem
-from align.architectures import get_adapter
-from align.normalization import ScaleNormalizer, ScaleState
-from align.rebasin import (
-    PermutationState,
-    build_scheduler,
+from align.architectures import get_recipe
+from align.canonicalization import ScaleCanonicalizer, ScaleState
+from align.matching import (
+    TransformState,
+    build_solver_sequence,
     estimate_diag_fisher_tree,
-    rebasin_single_sample,
+    match_sample,
     resolve_calibration_kwargs,
 )
+from align.symmetry import SymmetryGraph
 
 from .synthetic import (
     ParamTree,
@@ -56,7 +56,7 @@ class PosteriorBenchmarkCase:
     """A multi-chain posterior of parameter trees sharing one alignment problem."""
 
     name: str
-    problem: AlignmentProblem
+    problem: SymmetryGraph
     chains: ChainList
     ref_chain: int = 0
     ref_sample: int = 0
@@ -287,7 +287,7 @@ def make_synthetic_mlp_posterior_case(
     key = jax.random.PRNGKey(seed)
     param_key, input_key = jax.random.split(key)
     base = _make_dense_params(key=param_key, sizes=tuple(sizes))
-    adapter = get_adapter("dense_mlp")
+    adapter = get_recipe("dense_mlp")
     problem = adapter.build_problem(base)
     inputs = jax.random.normal(input_key, (n_inputs, int(sizes[0])))
 
@@ -312,7 +312,7 @@ def make_synthetic_mlp_posterior_case(
             }
             scaled = problem.apply_scales(base, ScaleState.from_scales(problem, scales))
             transformed = problem.apply(
-                scaled, PermutationState.from_perms(problem, perms)
+                scaled, TransformState.from_transforms(problem, perms)
             )
         chain_transforms.append({"perms": perms, "scales": scales})
 
@@ -386,7 +386,7 @@ def make_synthetic_transformer_posterior_case(
     key = jax.random.PRNGKey(seed)
     param_key, input_key = jax.random.split(key)
     base = make_gpt_style_params(key=param_key)
-    adapter = get_adapter("transformer")
+    adapter = get_recipe("transformer")
     problem = adapter.build_problem(base)
     tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
     intra_groups = [
@@ -422,7 +422,7 @@ def make_synthetic_transformer_posterior_case(
             }
             scaled = problem.apply_scales(base, ScaleState.from_scales(problem, scales))
             transformed = problem.apply(
-                scaled, PermutationState.from_perms(problem, perms)
+                scaled, TransformState.from_transforms(problem, perms)
             )
         chain_transforms.append({"perms": perms, "scales": scales})
 
@@ -488,7 +488,7 @@ def make_synthetic_modern_transformer_posterior_case(
     modern-transformer normalization plan first.
     """
 
-    from align.normalization.modern_transformer import (
+    from align.canonicalization.rmsnorm_gqa_rope import (
         apply_rms_gamma_scales,
         gqa_attention_constraints,
         rms_norm_constraints,
@@ -504,7 +504,7 @@ def make_synthetic_modern_transformer_posterior_case(
     key = jax.random.PRNGKey(seed)
     param_key, input_key = jax.random.split(key)
     base = make_modern_transformer_params(key=param_key)
-    adapter = get_adapter("modern_transformer")
+    adapter = get_recipe("modern_transformer")
     problem = adapter.build_problem(base)
     tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
 
@@ -547,14 +547,14 @@ def make_synthetic_modern_transformer_posterior_case(
             )
             perms = {}
             for gid, group in problem.groups.items():
-                if group.transforms == "rotation_pairs":
+                if group.transform_family == "rotation_pairs":
                     perms[gid] = rotation_pairs_matrix(rng, group.size)
-                elif group.transforms in ("signed_permutation", "orthogonal"):
+                elif group.transform_family in ("signed_permutation", "orthogonal"):
                     perms[gid] = signed_permutation_matrix(rng, group.size)
                 else:
                     perms[gid] = permutation_matrix(rng.permutation(group.size))
             transformed = problem.apply(
-                transformed, PermutationState.from_perms(problem, perms)
+                transformed, TransformState.from_transforms(problem, perms)
             )
         chain_transforms.append({"perms": perms})
 
@@ -668,7 +668,7 @@ def load_experiment_posterior_case(
     ref_sample_index = ref_sample_ids.index(manifest.reference_record.sample_id)
 
     reference = chains[ref_chain_index][ref_sample_index]
-    adapter = get_adapter(architecture, **dict(adapter_kwargs or {}))
+    adapter = get_recipe(architecture, **dict(adapter_kwargs or {}))
     problem = adapter.build_problem(reference)
 
     return PosteriorBenchmarkCase(
@@ -686,8 +686,8 @@ def load_experiment_posterior_case(
     )
 
 
-def _normalize_tree(problem: AlignmentProblem, params: ParamTree) -> ParamTree:
-    normalized, _, _ = ScaleNormalizer().normalize(
+def _normalize_tree(problem: SymmetryGraph, params: ParamTree) -> ParamTree:
+    normalized, _, _ = ScaleCanonicalizer().normalize(
         problem,
         params,
         task_type="regression",
@@ -713,7 +713,7 @@ def run_posterior_benchmark(
     schedule: Sequence[Mapping[str, Any]] | None = None,
     normalize: bool = False,
     rng_seed: int = 0,
-    refine_passes: int = 2,
+    barycenter_passes: int = 2,
 ) -> PosteriorBenchmarkResult:
     """Align every sample of a posterior case to its reference and score it.
 
@@ -721,7 +721,7 @@ def run_posterior_benchmark(
     on the normalized (optional) and rebasined chains, so the comparison
     reflects the complete alignment treatment.
 
-    ``refine_passes > 1`` (the default is 2) enables iterative barycenter
+    ``barycenter_passes > 1`` (the default is 2) enables iterative barycenter
     refinement: after each pass, the reference is replaced by the mean of the
     aligned samples and every (normalized) sample is re-aligned from scratch
     against it. The single reference *sample* carries its own posterior
@@ -731,11 +731,11 @@ def run_posterior_benchmark(
     ``1/sqrt(n_samples)``. Objectives with ``calibration`` kwargs re-resolve
     at each pass's reference (the metric lives at the matching base point).
     Past the matching breakdown point refinement can hurt (see
-    ``docs/theory.md``); pass ``refine_passes=1`` there.
+    ``docs/theory.md``); pass ``barycenter_passes=1`` there.
     """
 
-    if refine_passes < 1:
-        raise ValueError("refine_passes must be at least 1.")
+    if barycenter_passes < 1:
+        raise ValueError("barycenter_passes must be at least 1.")
 
     metrics_before = evaluate_posterior_metrics(case, case.chains)
 
@@ -752,8 +752,8 @@ def run_posterior_benchmark(
     aligned_flat: list[ParamTree] = []
     objective_values: list[float] = []
     start = time.perf_counter()
-    for pass_idx in range(refine_passes):
-        scheduler = build_scheduler(
+    for pass_idx in range(barycenter_passes):
+        scheduler = build_solver_sequence(
             objective=objective,
             objective_kwargs=resolve_calibration_kwargs(
                 objective_kwargs,
@@ -770,7 +770,7 @@ def run_posterior_benchmark(
         aligned_flat = []
         objective_values = []
         for index, target in enumerate(targets):
-            aligned, _, aux = rebasin_single_sample(
+            aligned, _, aux = match_sample(
                 case.problem,
                 reference,
                 target,
@@ -783,7 +783,7 @@ def run_posterior_benchmark(
             aligned_flat.append(aligned)
             if aux is not None and "objective_final" in aux:
                 objective_values.append(float(aux["objective_final"]))
-        if pass_idx < refine_passes - 1:
+        if pass_idx < barycenter_passes - 1:
             reference = _tree_mean(aligned_flat)
     wall_time = time.perf_counter() - start
 

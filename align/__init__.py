@@ -15,7 +15,7 @@ _CORE_MODULE: ModuleType | None = None
 def _load_core() -> ModuleType:
     global _CORE_MODULE, __all__
     if _CORE_MODULE is None:
-        _CORE_MODULE = importlib.import_module("align.rebasin")
+        _CORE_MODULE = importlib.import_module("align.matching")
         __all__ = list(getattr(_CORE_MODULE, "__all__", []))
     return _CORE_MODULE
 

@@ -8,7 +8,7 @@ from typing import Any
 import jax
 import numpy as np
 
-from ..rebasin import PermutationState, rebasin_single_sample
+from ..matching import TransformState, match_sample
 from ..samples import ParamTree, WeightSample
 
 
@@ -82,7 +82,7 @@ def reference_stability_diagnostic(
     # Match the two barycenters with a plain L2 frame even under a data-dependent
     # objective (e.g. fisher_l2): here we want the geometric movement of canonical
     # positions between passes, not an objective-weighted distance.
-    _, frame, _ = rebasin_single_sample(
+    _, frame, _ = match_sample(
         problem,
         previous_mean.params,
         current_mean.params,
@@ -90,7 +90,7 @@ def reference_stability_diagnostic(
         schedule=schedule,
         rng_key=jax.random.PRNGKey(0),
     )
-    frame_state = PermutationState.from_perms(problem, frame)
+    frame_state = TransformState.from_transforms(problem, frame)
 
     shift_total = 0.0
     spread_total = 0.0

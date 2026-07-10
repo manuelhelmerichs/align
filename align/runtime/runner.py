@@ -1,4 +1,4 @@
-"""AlignRunner with modular stage executors and parallel support."""
+"""AlignmentRunner with modular stage executors and parallel support."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from .._jax_platforms import is_gpu_platform
-from ..config import AlignConfig, resolve_adapter_defaults
+from ..config import RunConfig, resolve_adapter_defaults
 from ..logging_utils import progress_bar
 from ..samples import WeightSample
-from ..state import RunManifest, SampleManifest, SampleRecord
+from ..state import RunState, SampleManifest, SampleRecord
 from .common import (
     _LOG_SAMPLE_INTERVAL,
     _LOG_TIME_INTERVAL_SECONDS,
@@ -26,23 +26,23 @@ from .common import (
 )
 from .diagnostics import reference_stability_diagnostic, tree_mean
 from .loaders import SampleLoader
-from .loggers import AlignLogger
+from .loggers import RunArtifactStore
 from .parallel import WorkerPool
-from .pipeline import PipelineOutput, StagePipeline
-from .stages import NormalizeExecutor, RebasinExecutor, StageExecutor
+from .pipeline import SampleAlignmentResult, StagePipeline
+from .stages import CanonicalizeExecutor, MatchExecutor, StageExecutor
 
 _LOG = logging.getLogger(__name__)
 
 
 class _RunnerPipelineSink:
-    """Write pipeline outputs through ``AlignLogger`` and update run progress."""
+    """Write pipeline outputs through ``RunArtifactStore`` and update run progress."""
 
     def __init__(
         self,
-        runner: AlignRunner,
+        runner: AlignmentRunner,
         bar,
         *,
-        output_logger: AlignLogger,
+        output_logger: RunArtifactStore,
         final_pass: bool,
     ) -> None:
         self.runner = runner
@@ -50,7 +50,7 @@ class _RunnerPipelineSink:
         self.output_logger = output_logger
         self.final_pass = bool(final_pass)
 
-    def write(self, output: PipelineOutput) -> None:
+    def write(self, output: SampleAlignmentResult) -> None:
         record = output.record
         logger = self.output_logger
         if output.scale_factors is not None:
@@ -74,15 +74,15 @@ class _RunnerPipelineSink:
             self.runner._maybe_log_progress(record.label)
 
 
-class AlignRunner:
+class AlignmentRunner:
     """Runner that composes stage executors and optional parallelism."""
 
     def __init__(
         self,
-        config: AlignConfig,
+        config: RunConfig,
         manifest: SampleManifest,
-        run_manifest: RunManifest,
-        logger: AlignLogger,
+        run_manifest: RunState,
+        logger: RunArtifactStore,
         *,
         progress_logger: logging.Logger | None = None,
     ) -> None:
@@ -116,14 +116,14 @@ class AlignRunner:
     def _dry_run_summary_extra(self) -> dict[str, Any]:
         return {
             "stages": self.stage_order,
-            "refine_passes": self._refine_passes(),
+            "barycenter_passes": self._barycenter_passes(),
         }
 
-    def _refine_passes(self) -> int:
+    def _barycenter_passes(self) -> int:
         config = self.config.rebasin
         if config is None or not config.enabled:
             return 1
-        return int(config.refine_passes)
+        return int(config.barycenter_passes)
 
     def _compute_parallelism(self) -> int:
         requested = self.config.runtime.parallelism
@@ -144,14 +144,14 @@ class AlignRunner:
     def execute(self, *, dry_run: bool = False) -> None:
         pending = self._pending_records()
         processed = self.run_manifest.processed_count()
-        refine_passes = self._refine_passes()
+        barycenter_passes = self._barycenter_passes()
         self.progress_logger.info(
             "Aligning %d/%d samples (resume=%d processed) | stages=%s | passes=%d",
             len(pending),
             self.manifest.total,
             self.manifest.total - len(pending),
             ",".join(self.stage_order),
-            refine_passes,
+            barycenter_passes,
         )
         if dry_run:
             self._write_dry_run_summary(pending)
@@ -164,22 +164,22 @@ class AlignRunner:
         loader = SampleLoader(self.manifest)
         configured_reference = loader.load_reference()
         rebasin_reference: WeightSample | None = None
-        previous_logger: AlignLogger | None = None
+        previous_logger: RunArtifactStore | None = None
         stability_history: list[dict[str, Any]] = []
         refinement_root = self.run_manifest.state_dir / "refinement"
-        if refine_passes > 1:
+        if barycenter_passes > 1:
             shutil.rmtree(refinement_root, ignore_errors=True)
             refinement_root.mkdir(parents=True, exist_ok=True)
 
         elapsed = 0.0
-        for pass_index in range(refine_passes):
-            final_pass = pass_index == refine_passes - 1
+        for pass_index in range(barycenter_passes):
+            final_pass = pass_index == barycenter_passes - 1
             pass_number = pass_index + 1
             pass_records = pending if final_pass else list(self.manifest.records)
             output_logger = (
                 self.logger
                 if final_pass
-                else AlignLogger(
+                else RunArtifactStore(
                     manifest=self.manifest,
                     output_dir=refinement_root / f"pass_{pass_number}",
                     stages=[],
@@ -205,7 +205,7 @@ class AlignRunner:
             self.progress_logger.info(
                 "Starting alignment pass %d/%d%s",
                 pass_number,
-                refine_passes,
+                barycenter_passes,
                 " (final artifacts)" if final_pass else "",
             )
             use_parallel = self.parallelism > 1 and len(pass_records) > 1
@@ -259,7 +259,7 @@ class AlignRunner:
         )
         self.run_manifest.mark_complete()
         self.run_manifest.save()
-        if refine_passes > 1:
+        if barycenter_passes > 1:
             shutil.rmtree(refinement_root, ignore_errors=True)
         self.progress_logger.info("Align complete in %.2fs", elapsed)
 
@@ -282,18 +282,18 @@ class AlignRunner:
         self.logger.maybe_flush(force=True)
         return pending
 
-    def _output_samples(self, logger: AlignLogger):
+    def _output_samples(self, logger: RunArtifactStore):
         for record in self.manifest.records:
             path = logger.artifact_paths(record)["final"]
             yield logger.sample_codec.load(path)
 
-    def _mean_output_sample(self, logger: AlignLogger) -> WeightSample:
+    def _mean_output_sample(self, logger: RunArtifactStore) -> WeightSample:
         return tree_mean(self._output_samples(logger))
 
     def _reference_stability(
         self,
-        previous_logger: AlignLogger,
-        current_logger: AlignLogger,
+        previous_logger: RunArtifactStore,
+        current_logger: RunArtifactStore,
         *,
         previous_pass: int,
         current_pass: int,
@@ -371,13 +371,13 @@ class AlignRunner:
         executors: dict[str, StageExecutor] = {}
         adapter_kwargs = dict(self.config.adapter or {})
         if self.config.normalize and self.config.normalize.enabled:
-            executors["normalize"] = NormalizeExecutor(
+            executors["normalize"] = CanonicalizeExecutor(
                 self.config.normalize,
                 architecture=self.config.architecture,
                 adapter_kwargs=adapter_kwargs,
             )
         if self.config.rebasin and self.config.rebasin.enabled:
-            executors["rebasin"] = RebasinExecutor(
+            executors["rebasin"] = MatchExecutor(
                 self.config.rebasin,
                 reference_index=(
                     self.manifest.reference_index if pass_index == 0 else None
@@ -441,7 +441,7 @@ class AlignRunner:
         loader: SampleLoader,
         processed_initial: int,
         *,
-        output_logger: AlignLogger,
+        output_logger: RunArtifactStore,
         final_pass: bool,
     ) -> float:
         start = time.time()
@@ -484,7 +484,7 @@ class AlignRunner:
         pending: list[SampleRecord],
         processed_initial: int,
         *,
-        output_logger: AlignLogger,
+        output_logger: RunArtifactStore,
         final_pass: bool,
     ) -> float:
         start = time.time()
@@ -733,7 +733,7 @@ class AlignRunner:
         artifacts: Mapping[str, Any],
         checksums: Mapping[str, int] | None,
         aux: Mapping[str, Any],
-        output_logger: AlignLogger | None = None,
+        output_logger: RunArtifactStore | None = None,
         final_pass: bool = True,
     ) -> None:
         logger = output_logger or self.logger
@@ -745,4 +745,4 @@ class AlignRunner:
             shutil.rmtree(Path(sample_scratch), ignore_errors=True)
 
 
-__all__ = ["AlignRunner"]
+__all__ = ["AlignmentRunner"]

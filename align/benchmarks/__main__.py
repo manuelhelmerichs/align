@@ -108,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scale-normalize samples before rebasin (dense MLPs only).",
     )
     posterior.add_argument(
-        "--refine-passes",
+        "--barycenter-passes",
         type=int,
         default=2,
         help="Barycenter refinement passes: re-align against the mean of the "
@@ -255,7 +255,7 @@ def _run_posterior(args: argparse.Namespace) -> int:
             args.objective_kwargs, flag="--objective-kwargs"
         ),
         normalize=args.normalize,
-        refine_passes=args.refine_passes,
+        barycenter_passes=args.barycenter_passes,
     )
     _emit([record], label="experiment-posterior", output=args.output)
     return 0 if record.skipped is None else 1
