@@ -1,4 +1,4 @@
-"""Reusable benchmark helpers for synthetic and posterior alignment problems."""
+"""Reusable benchmark helpers for synthetic and posterior alignment cases."""
 
 from .harness import (
     DEFAULT_THRESHOLDS,

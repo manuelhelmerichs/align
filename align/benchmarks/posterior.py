@@ -53,20 +53,20 @@ ChainList = tuple[tuple[ParamTree, ...], ...]
 
 @dataclass
 class PosteriorBenchmarkCase:
-    """A multi-chain posterior of parameter trees sharing one alignment problem."""
+    """A multi-chain posterior of parameter trees sharing one symmetry graph."""
 
     name: str
-    problem: SymmetryGraph
+    graph: SymmetryGraph
     chains: ChainList
-    ref_chain: int = 0
-    ref_sample: int = 0
+    reference_chain: int = 0
+    reference_sample: int = 0
     apply_fn: ApplyFn | None = None
     inputs: jax.Array | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def reference(self) -> ParamTree:
-        return self.chains[self.ref_chain][self.ref_sample]
+        return self.chains[self.reference_chain][self.reference_sample]
 
     def iter_samples(self) -> list[tuple[int, int, ParamTree]]:
         """Return ``(chain_index, sample_index, params)`` in stable order."""
@@ -288,7 +288,7 @@ def make_synthetic_mlp_posterior_case(
     param_key, input_key = jax.random.split(key)
     base = _make_dense_params(key=param_key, sizes=tuple(sizes))
     recipe = get_recipe("mlp")
-    problem = recipe.build_graph(base)
+    graph = recipe.build_graph(base)
     inputs = jax.random.normal(input_key, (n_inputs, int(sizes[0])))
 
     rng = np.random.default_rng(seed)
@@ -302,17 +302,17 @@ def make_synthetic_mlp_posterior_case(
         else:
             transforms = {
                 gid: permutation_matrix(rng.permutation(group.size))
-                for gid, group in problem.groups.items()
+                for gid, group in graph.groups.items()
             }
             scales = {
                 gid: np.exp(
                     rng.uniform(-scale_jitter, scale_jitter, size=group.size)
                 ).astype(np.float32)
-                for gid, group in problem.groups.items()
+                for gid, group in graph.groups.items()
             }
-            scaled = problem.apply_scales(base, ScaleState.from_scales(problem, scales))
-            transformed = problem.apply_transforms(
-                scaled, TransformState.from_transforms(problem, transforms)
+            scaled = graph.apply_scales(base, ScaleState.from_scales(graph, scales))
+            transformed = graph.apply_transforms(
+                scaled, TransformState.from_transforms(graph, transforms)
             )
         chain_transforms.append({"transforms": transforms, "scales": scales})
 
@@ -342,7 +342,7 @@ def make_synthetic_mlp_posterior_case(
         name=f"synthetic_mlp_posterior_{noise_mode}_seed_{seed}"
         if noise_mode != "isotropic"
         else f"synthetic_mlp_posterior_seed_{seed}",
-        problem=problem,
+        graph=graph,
         chains=tuple(chains),
         apply_fn=mlp_apply,
         inputs=inputs,
@@ -387,11 +387,11 @@ def make_synthetic_layernorm_mha_transformer_posterior_case(
     param_key, input_key = jax.random.split(key)
     base = make_layernorm_mha_transformer_params(key=param_key)
     recipe = get_recipe("layernorm_mha_transformer")
-    problem = recipe.build_graph(base)
+    graph = recipe.build_graph(base)
     tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
     intra_groups = [
         group_id
-        for constraint in problem.constraints
+        for constraint in graph.constraints
         if isinstance(constraint, MHACircuitConstraint)
         for group_id in (
             *constraint.qk_groups,
@@ -410,19 +410,19 @@ def make_synthetic_layernorm_mha_transformer_posterior_case(
         else:
             transforms = {
                 gid: permutation_matrix(rng.permutation(group.size))
-                for gid, group in problem.groups.items()
+                for gid, group in graph.groups.items()
             }
             scales = {
                 gid: np.exp(
                     rng.uniform(
-                        -scale_jitter, scale_jitter, size=problem.groups[gid].size
+                        -scale_jitter, scale_jitter, size=graph.groups[gid].size
                     )
                 ).astype(np.float32)
                 for gid in intra_groups
             }
-            scaled = problem.apply_scales(base, ScaleState.from_scales(problem, scales))
-            transformed = problem.apply_transforms(
-                scaled, TransformState.from_transforms(problem, transforms)
+            scaled = graph.apply_scales(base, ScaleState.from_scales(graph, scales))
+            transformed = graph.apply_transforms(
+                scaled, TransformState.from_transforms(graph, transforms)
             )
         chain_transforms.append({"transforms": transforms, "scales": scales})
 
@@ -452,7 +452,7 @@ def make_synthetic_layernorm_mha_transformer_posterior_case(
         name=f"synthetic_layernorm_mha_transformer_posterior_{noise_mode}_seed_{seed}"
         if noise_mode != "isotropic"
         else f"synthetic_layernorm_mha_transformer_posterior_seed_{seed}",
-        problem=problem,
+        graph=graph,
         chains=tuple(chains),
         apply_fn=layernorm_mha_transformer_apply,
         inputs=tokens,
@@ -505,7 +505,7 @@ def make_synthetic_rmsnorm_gqa_rope_transformer_posterior_case(
     param_key, input_key = jax.random.split(key)
     base = make_rmsnorm_gqa_rope_transformer_params(key=param_key)
     recipe = get_recipe("rmsnorm_gqa_rope_transformer")
-    problem = recipe.build_graph(base)
+    graph = recipe.build_graph(base)
     tokens = jax.random.randint(input_key, (4, 5), 0, 7, dtype=jnp.int32)
 
     rng = np.random.default_rng(seed)
@@ -521,14 +521,14 @@ def make_synthetic_rmsnorm_gqa_rope_transformer_posterior_case(
                     rng.uniform(
                         -scale_jitter,
                         scale_jitter,
-                        size=problem.tensors[constraint.scale].shape[0],
+                        size=graph.tensors[constraint.scale].shape[0],
                     )
                 ).astype(np.float32)
-                for constraint in rmsnorm_scale_constraints(problem)
+                for constraint in rmsnorm_scale_constraints(graph)
             }
-            transformed = apply_rms_gamma_scales(problem, base, gamma_scales)
+            transformed = apply_rms_gamma_scales(graph, base, gamma_scales)
             circuit_scales = {}
-            for constraint in gqa_rope_circuit_constraints(problem):
+            for constraint in gqa_rope_circuit_constraints(graph):
                 head_dim = constraint.head_dim
                 for group_id in constraint.qk_groups:
                     pair = np.exp(
@@ -541,19 +541,19 @@ def make_synthetic_rmsnorm_gqa_rope_transformer_posterior_case(
                     circuit_scales[group_id] = np.exp(
                         rng.uniform(-scale_jitter, scale_jitter, size=head_dim)
                     ).astype(np.float32)
-            transformed = problem.apply_scales(
-                transformed, ScaleState.from_scales(problem, circuit_scales)
+            transformed = graph.apply_scales(
+                transformed, ScaleState.from_scales(graph, circuit_scales)
             )
             transforms = {}
-            for gid, group in problem.groups.items():
+            for gid, group in graph.groups.items():
                 if group.transform_family == "rotation_pairs":
                     transforms[gid] = rotation_pairs_matrix(rng, group.size)
                 elif group.transform_family in ("signed_permutation", "orthogonal"):
                     transforms[gid] = signed_permutation_matrix(rng, group.size)
                 else:
                     transforms[gid] = permutation_matrix(rng.permutation(group.size))
-            transformed = problem.apply_transforms(
-                transformed, TransformState.from_transforms(problem, transforms)
+            transformed = graph.apply_transforms(
+                transformed, TransformState.from_transforms(graph, transforms)
             )
         chain_transforms.append({"transforms": transforms})
 
@@ -583,7 +583,7 @@ def make_synthetic_rmsnorm_gqa_rope_transformer_posterior_case(
         name=f"synthetic_rmsnorm_gqa_rope_transformer_posterior_{noise_mode}_seed_{seed}"
         if noise_mode != "isotropic"
         else f"synthetic_rmsnorm_gqa_rope_transformer_posterior_seed_{seed}",
-        problem=problem,
+        graph=graph,
         chains=tuple(chains),
         apply_fn=rmsnorm_gqa_rope_transformer_apply,
         inputs=tokens,
@@ -620,8 +620,8 @@ def load_experiment_posterior_case(
     samples_per_chain: int | None = None,
     sample_step: int = 1,
     max_total: int | None = None,
-    ref_chain: int = 0,
-    ref_sample: int = 0,
+    reference_chain: int = 0,
+    reference_sample: int = 0,
     sample_format: str = "pytree_npz",
     name: str | None = None,
 ) -> PosteriorBenchmarkCase:
@@ -646,8 +646,8 @@ def load_experiment_posterior_case(
         samples_per_chain=samples_per_chain,
         sample_step=sample_step,
         max_total=max_total,
-        ref_chain=ref_chain,
-        ref_sample=ref_sample,
+        reference_chain=reference_chain,
+        reference_sample=reference_sample,
         sample_format=sample_format,
     )
     loader = SampleLoader(manifest)
@@ -662,20 +662,24 @@ def load_experiment_posterior_case(
         tuple(params for _, params in sorted(by_chain[cid], key=lambda x: x[0]))
         for cid in chain_ids
     )
-    ref_chain_index = chain_ids.index(manifest.reference_record.chain_id)
-    ref_sample_ids = [sid for sid, _ in sorted(by_chain[chain_ids[ref_chain_index]])]
-    ref_sample_index = ref_sample_ids.index(manifest.reference_record.sample_id)
+    reference_chain_index = chain_ids.index(manifest.reference_record.chain_id)
+    reference_sample_ids = [
+        sid for sid, _ in sorted(by_chain[chain_ids[reference_chain_index]])
+    ]
+    reference_sample_index = reference_sample_ids.index(
+        manifest.reference_record.sample_id
+    )
 
-    reference = chains[ref_chain_index][ref_sample_index]
+    reference = chains[reference_chain_index][reference_sample_index]
     recipe = get_recipe(architecture, **dict(recipe_kwargs or {}))
-    problem = recipe.build_graph(reference)
+    graph = recipe.build_graph(reference)
 
     return PosteriorBenchmarkCase(
         name=name or f"experiment_{root.name}",
-        problem=problem,
+        graph=graph,
         chains=chains,
-        ref_chain=ref_chain_index,
-        ref_sample=ref_sample_index,
+        reference_chain=reference_chain_index,
+        reference_sample=reference_sample_index,
         metadata={
             "experiment_root": str(root),
             "architecture": architecture,
@@ -685,9 +689,9 @@ def load_experiment_posterior_case(
     )
 
 
-def _canonicalize_tree(problem: SymmetryGraph, params: ParamTree) -> ParamTree:
+def _canonicalize_tree(graph: SymmetryGraph, params: ParamTree) -> ParamTree:
     canonical, _, _ = ScaleCanonicalizer().canonicalize(
-        problem,
+        graph,
         params,
         include_bias_in_norm=True,
     )
@@ -739,11 +743,11 @@ def run_posterior_benchmark(
 
     reference = case.reference
     if canonicalize:
-        reference = _canonicalize_tree(case.problem, reference)
+        reference = _canonicalize_tree(case.graph, reference)
 
     flat_samples = case.iter_samples()
     targets = [
-        _canonicalize_tree(case.problem, params) if canonicalize else params
+        _canonicalize_tree(case.graph, params) if canonicalize else params
         for _, _, params in flat_samples
     ]
 
@@ -755,25 +759,25 @@ def run_posterior_benchmark(
             objective=objective,
             objective_kwargs=resolve_calibration_kwargs(
                 objective_kwargs,
-                problem=case.problem,
+                graph=case.graph,
                 params=reference,
                 apply_fn=case.apply_fn,
                 inputs=case.inputs,
             ),
             schedule=schedule,
         )
-        ref_data = case.problem.materialize(
+        reference_data = case.graph.materialize(
             reference, backend=solver_sequence.backend, cache=True
         )
         aligned_flat = []
         objective_values = []
         for index, target in enumerate(targets):
             aligned, _, aux = match_sample(
-                case.problem,
+                case.graph,
                 reference,
                 target,
                 solver_sequence=solver_sequence,
-                ref_data=ref_data,
+                reference_data=reference_data,
                 rng_key=jax.random.fold_in(
                     jax.random.PRNGKey(rng_seed), pass_idx * len(targets) + index
                 ),

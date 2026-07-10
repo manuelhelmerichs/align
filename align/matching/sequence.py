@@ -25,7 +25,7 @@ from .solvers import (
 from .state import TransformState
 
 
-def _check_permute_only_folded(problem, *data_mappings) -> None:
+def _check_permute_only_folded(graph, *data_mappings) -> None:
     """Preflight for orthogonal groups with ``permute_only`` bindings.
 
     General orthogonal maps skip permute-only bindings (RMSNorm scales), which
@@ -34,10 +34,10 @@ def _check_permute_only_folded(problem, *data_mappings) -> None:
     of silently corrupting the symmetry.
     """
 
-    for binding in problem.axis_bindings:
+    for binding in graph.axis_bindings:
         if binding.transform_scope != "permute_only":
             continue
-        if problem.groups[binding.group].transform_family != "orthogonal":
+        if graph.groups[binding.group].transform_family != "orthogonal":
             continue
         for data in data_mappings:
             tensor = np.asarray(data[binding.tensor_id])
@@ -86,34 +86,34 @@ class SolverSequence:
 
     def solve(
         self,
-        problem,
-        ref_data,
+        graph,
+        reference_data,
         target_data,
         *,
         rng_key=None,
         initial_state: TransformState | None = None,
     ) -> tuple[TransformState, dict[str, Any]]:
         state = initial_state or TransformState.identity(
-            problem, backend="jax" if self.prefers_gpu else "numpy"
+            graph, backend="jax" if self.prefers_gpu else "numpy"
         )
-        _check_permute_only_folded(problem, ref_data, target_data)
+        _check_permute_only_folded(graph, reference_data, target_data)
         aux_steps: list[dict[str, Any]] = []
         for index, step in enumerate(self.steps):
             if step.solver == "lap":
                 state, aux = self._run_lap_step(
-                    problem, ref_data, target_data, state, step
+                    graph, reference_data, target_data, state, step
                 )
             elif step.solver == "procrustes":
                 state, aux = self._run_procrustes_step(
-                    problem, ref_data, target_data, state, step
+                    graph, reference_data, target_data, state, step
                 )
             elif step.solver == "sinkhorn":
                 step_key = None
                 if rng_key is not None:
                     step_key = jax.random.fold_in(rng_key, index)
                 state, aux = SinkhornSolver(self.objective, step).solve(
-                    problem,
-                    ref_data,
+                    graph,
+                    reference_data,
                     target_data,
                     state,
                     rng_key=step_key,
@@ -123,7 +123,7 @@ class SolverSequence:
                 raise ValueError(step.solver)
             aux_steps.append({"index": index, **aux})
 
-        values = self.objective.value(problem, ref_data, target_data, state)
+        values = self.objective.value(graph, reference_data, target_data, state)
         aux_payload = {
             "objective": getattr(self.objective, "name", type(self.objective).__name__),
             "solvers": [step.to_dict() for step in self.steps],
@@ -134,8 +134,8 @@ class SolverSequence:
 
     def solve_batch(
         self,
-        problem,
-        ref_data,
+        graph,
+        reference_data,
         target_params_batch,
         *,
         rng_key=None,
@@ -147,15 +147,15 @@ class SolverSequence:
             results: list[TransformState] = []
             aux_payload: list[dict[str, Any]] = []
             for idx, params in enumerate(target_params_batch):
-                data = problem.materialize(
+                data = graph.materialize(
                     params, backend=backend or self.backend, cache=False
                 )
                 sample_key = (
                     jax.random.fold_in(rng_key, idx) if rng_key is not None else None
                 )
                 state, aux = self.solve(
-                    problem,
-                    ref_data,
+                    graph,
+                    reference_data,
                     data,
                     rng_key=sample_key,
                 )
@@ -164,24 +164,24 @@ class SolverSequence:
             return results, aux_payload
 
         target_data = materialize_many(
-            problem, target_params_batch, backend=backend or self.backend
+            graph, target_params_batch, backend=backend or self.backend
         )
-        _check_permute_only_folded(problem, ref_data, target_data)
-        state = TransformState.identity(problem, backend="jax")
+        _check_permute_only_folded(graph, reference_data, target_data)
+        state = TransformState.identity(graph, backend="jax")
         aux_steps: list[dict[str, Any]] = []
         for index, step in enumerate(self.steps):
             step_key = (
                 jax.random.fold_in(rng_key, index) if rng_key is not None else None
             )
             state, aux = SinkhornSolver(self.objective, step).solve(
-                problem, ref_data, target_data, state, rng_key=step_key
+                graph, reference_data, target_data, state, rng_key=step_key
             )
             aux_steps.append({"index": index, **aux})
 
         batch_size = len(target_params_batch)
         states = [_unbatch_state(state, sample_index=idx) for idx in range(batch_size)]
         losses = np.ravel(
-            np.asarray(self.objective.value(problem, ref_data, target_data, state))
+            np.asarray(self.objective.value(graph, reference_data, target_data, state))
         )
         aux_batch: list[dict[str, Any]] = []
         for sample_idx in range(batch_size):
@@ -205,17 +205,17 @@ class SolverSequence:
             )
         return states, aux_batch
 
-    def _run_lap_step(self, problem, ref_data, target_data, state, step):
-        groups = _scheduled_groups(problem, step)
+    def _run_lap_step(self, graph, reference_data, target_data, state, step):
+        groups = _scheduled_groups(graph, step)
         scheduled = set(groups)
         module_by_head = {
             spec.head_group: spec
-            for spec in attention_module_specs(problem)
+            for spec in attention_module_specs(graph)
             if spec.head_group in scheduled
         }
         gqa_by_kv = {
             spec.kv_group: spec
-            for spec in gqa_module_specs(problem)
+            for spec in gqa_module_specs(graph)
             if spec.kv_group in scheduled
         }
         # Intra groups of a scheduled head/kv group are updated inside the
@@ -242,9 +242,9 @@ class SolverSequence:
                     continue
                 if group_id in module_by_head:
                     state, update_aux = update_attention_module(
-                        problem,
+                        graph,
                         self.objective,
-                        ref_data,
+                        reference_data,
                         target_data,
                         state,
                         module_by_head[group_id],
@@ -252,9 +252,9 @@ class SolverSequence:
                     )
                 elif group_id in gqa_by_kv:
                     state, update_aux = update_gqa_attention_module(
-                        problem,
+                        graph,
                         self.objective,
-                        ref_data,
+                        reference_data,
                         target_data,
                         state,
                         gqa_by_kv[group_id],
@@ -262,7 +262,7 @@ class SolverSequence:
                     )
                 else:
                     state, update_aux = solver.update(
-                        problem, ref_data, target_data, state, group_id
+                        graph, reference_data, target_data, state, group_id
                     )
                 sweep_delta = max(sweep_delta, float(update_aux["delta"]))
             max_delta = sweep_delta
@@ -270,12 +270,12 @@ class SolverSequence:
                 break
         return state, {"solver": "lap", "sweeps": sweeps, "max_delta": max_delta}
 
-    def _run_procrustes_step(self, problem, ref_data, target_data, state, step):
-        scheduled = _scheduled_groups(problem, step)
+    def _run_procrustes_step(self, graph, reference_data, target_data, state, step):
+        scheduled = _scheduled_groups(graph, step)
         eligible = tuple(
             group_id
             for group_id in scheduled
-            if problem.groups[group_id].transform_family == "orthogonal"
+            if graph.groups[group_id].transform_family == "orthogonal"
         )
         if step.groups is not None or step.components is not None:
             ineligible = sorted(set(scheduled) - set(eligible))
@@ -286,7 +286,7 @@ class SolverSequence:
                 )
         if not eligible:
             raise ValueError(
-                "procrustes step scheduled, but the problem declares no "
+                "procrustes step scheduled, but the graph declares no "
                 "'orthogonal' groups."
             )
         solver = ProcrustesGroupSolver(self.objective)
@@ -297,7 +297,7 @@ class SolverSequence:
             sweep_delta = 0.0
             for group_id in eligible:
                 state, update_aux = solver.update(
-                    problem, ref_data, target_data, state, group_id
+                    graph, reference_data, target_data, state, group_id
                 )
                 sweep_delta = max(sweep_delta, float(update_aux["delta"]))
             max_delta = sweep_delta

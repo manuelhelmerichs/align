@@ -43,32 +43,32 @@ class _RunnerPipelineSink:
         runner: AlignmentRunner,
         bar,
         *,
-        output_logger: RunArtifactStore,
+        output_artifact_store: RunArtifactStore,
         final_pass: bool,
     ) -> None:
         self.runner = runner
         self.bar = bar
-        self.output_logger = output_logger
+        self.output_artifact_store = output_artifact_store
         self.final_pass = bool(final_pass)
 
     def write(self, output: SampleAlignmentResult) -> None:
         record = output.record
-        logger = self.output_logger
+        artifact_store = self.output_artifact_store
         if output.scales is not None:
-            logger.write_scales(record, output.scales)
+            artifact_store.write_scales(record, output.scales)
         if output.transforms is not None and self.runner.config.match:
-            logger.write_transforms(
+            artifact_store.write_transforms(
                 record,
                 output.transforms,
                 transform_families=output.transform_families,
             )
         if self.final_pass and self.runner.save_intermediate:
             for stage, sample in output.stage_outputs.items():
-                logger.write_stage_output(record, stage, sample)
+                artifact_store.write_stage_output(record, stage, sample)
 
-        logger.write_aligned_sample(record, output.sample)
+        artifact_store.write_aligned_sample(record, output.sample)
         if self.final_pass:
-            logger.write_diagnostics(record, output.diagnostics)
+            artifact_store.write_diagnostics(record, output.diagnostics)
             self.runner.run_state.record_progress(record=record)
             self.runner._maybe_persist_state()
         self.bar.update(label=record.label)
@@ -84,13 +84,13 @@ class AlignmentRunner:
         config: RunConfig,
         manifest: SampleManifest,
         run_state: RunState,
-        logger: RunArtifactStore,
+        artifact_store: RunArtifactStore,
         *,
         progress_logger: logging.Logger | None = None,
     ) -> None:
         self.manifest = manifest
         self.run_state = run_state
-        self.logger = logger
+        self.artifact_store = artifact_store
         self.progress_logger = progress_logger or _LOG
         self.config = config
         resolve_recipe_defaults(self.config)
@@ -162,7 +162,7 @@ class AlignmentRunner:
         loader = SampleLoader(self.manifest)
         configured_reference = loader.load_reference()
         match_reference: WeightSample | None = None
-        previous_logger: RunArtifactStore | None = None
+        previous_artifact_store: RunArtifactStore | None = None
         stability_history: list[dict[str, Any]] = []
         refinement_root = self.run_state.state_dir / "refinement"
         if barycenter_passes > 1:
@@ -174,8 +174,8 @@ class AlignmentRunner:
             final_pass = pass_index == barycenter_passes - 1
             pass_number = pass_index + 1
             pass_records = pending if final_pass else list(self.manifest.records)
-            output_logger = (
-                self.logger
+            output_artifact_store = (
+                self.artifact_store
                 if final_pass
                 else RunArtifactStore(
                     manifest=self.manifest,
@@ -192,7 +192,7 @@ class AlignmentRunner:
             self._match_reference_path = None
             if match_reference is not None:
                 reference_path = refinement_root / f"reference_{pass_number}.npz"
-                self.logger.sample_codec.save(reference_path, match_reference)
+                self.artifact_store.sample_codec.save(reference_path, match_reference)
                 self._match_reference_path = reference_path
 
             self._stage_executors = self._prepare_executors(
@@ -211,7 +211,7 @@ class AlignmentRunner:
                 elapsed += self._run_parallel(
                     pass_records,
                     processed if final_pass else 0,
-                    output_logger=output_logger,
+                    output_artifact_store=output_artifact_store,
                     final_pass=final_pass,
                 )
             else:
@@ -219,14 +219,14 @@ class AlignmentRunner:
                     pass_records,
                     loader,
                     processed if final_pass else 0,
-                    output_logger=output_logger,
+                    output_artifact_store=output_artifact_store,
                     final_pass=final_pass,
                 )
 
-            if previous_logger is not None:
+            if previous_artifact_store is not None:
                 diagnostic = self._reference_stability(
-                    previous_logger,
-                    output_logger,
+                    previous_artifact_store,
+                    output_artifact_store,
                     previous_pass=pass_number - 1,
                     current_pass=pass_number,
                 )
@@ -242,8 +242,8 @@ class AlignmentRunner:
                 )
 
             if not final_pass:
-                match_reference = self._mean_output_sample(output_logger)
-                previous_logger = output_logger
+                match_reference = self._mean_output_sample(output_artifact_store)
+                previous_artifact_store = output_artifact_store
 
         total_elapsed = self.run_state.add_elapsed(elapsed)
         diagnostics = None
@@ -251,7 +251,7 @@ class AlignmentRunner:
             latest = dict(stability_history[-1])
             latest["history"] = stability_history
             diagnostics = {"reference_stability": latest}
-        self.logger.finalize(
+        self.artifact_store.finalize(
             elapsed_seconds=total_elapsed,
             diagnostics=diagnostics,
         )
@@ -269,7 +269,7 @@ class AlignmentRunner:
                 continue
             if (
                 self._validate_artifacts_on_resume
-                and not self.logger.validate_artifacts(record)
+                and not self.artifact_store.validate_artifacts(record)
             ):
                 self.run_state.mark_unprocessed(record.index)
                 pending.append(record)
@@ -277,27 +277,27 @@ class AlignmentRunner:
                     "Artifact checksum mismatch for %s. Sample will be reprocessed.",
                     record.label,
                 )
-        self.logger.maybe_flush(force=True)
+        self.artifact_store.maybe_flush(force=True)
         return pending
 
-    def _output_samples(self, logger: RunArtifactStore):
+    def _output_samples(self, artifact_store: RunArtifactStore):
         for record in self.manifest.records:
-            path = logger.artifact_paths(record)["aligned_sample"]
-            yield logger.sample_codec.load(path)
+            path = artifact_store.artifact_paths(record)["aligned_sample"]
+            yield artifact_store.sample_codec.load(path)
 
-    def _mean_output_sample(self, logger: RunArtifactStore) -> WeightSample:
-        return tree_mean(self._output_samples(logger))
+    def _mean_output_sample(self, artifact_store: RunArtifactStore) -> WeightSample:
+        return tree_mean(self._output_samples(artifact_store))
 
     def _reference_stability(
         self,
-        previous_logger: RunArtifactStore,
-        current_logger: RunArtifactStore,
+        previous_artifact_store: RunArtifactStore,
+        current_artifact_store: RunArtifactStore,
         *,
         previous_pass: int,
         current_pass: int,
     ) -> dict[str, Any]:
         match_executor = self._get_stage_executor("match")
-        if match_executor is None or match_executor.problem is None:
+        if match_executor is None or match_executor.graph is None:
             raise RuntimeError(
                 "Reference stability requires a prepared match executor."
             )
@@ -305,9 +305,9 @@ class AlignmentRunner:
         if match_config is None:
             raise RuntimeError("Reference stability requires match configuration.")
         return reference_stability_diagnostic(
-            previous_samples=lambda: self._output_samples(previous_logger),
-            current_samples=lambda: self._output_samples(current_logger),
-            problem=match_executor.problem,
+            previous_samples=lambda: self._output_samples(previous_artifact_store),
+            current_samples=lambda: self._output_samples(current_artifact_store),
+            graph=match_executor.graph,
             solvers=match_config.solvers,
             previous_pass=previous_pass,
             current_pass=current_pass,
@@ -356,12 +356,12 @@ class AlignmentRunner:
         if not force and (now - self._last_save_time) < self._state_save_interval:
             return
         self.run_state.save()
-        self.logger.maybe_flush(force=force)
+        self.artifact_store.maybe_flush(force=force)
         self._last_save_time = now
 
     def _prepare_executors(
         self,
-        ref_sample: WeightSample,
+        reference_sample: WeightSample,
         *,
         match_reference: WeightSample | None = None,
         pass_index: int = 0,
@@ -389,7 +389,7 @@ class AlignmentRunner:
             )
 
         stage_list: list[tuple[str, StageExecutor]] = []
-        ref_current = ref_sample
+        reference_current = reference_sample
         for name in self.stage_order:
             executor = executors.get(name)
             if executor is None:
@@ -397,14 +397,14 @@ class AlignmentRunner:
             stage_reference = (
                 match_reference
                 if name == "match" and match_reference is not None
-                else ref_current
+                else reference_current
             )
             executor.prepare(self.manifest, stage_reference)
             if name == "match":
-                ref_current = stage_reference
+                reference_current = stage_reference
             else:
-                ref_current = executor.reference_output(
-                    self.manifest.reference_record, ref_current
+                reference_current = executor.reference_output(
+                    self.manifest.reference_record, reference_current
                 )
             stage_list.append((name, executor))
         return stage_list
@@ -440,7 +440,7 @@ class AlignmentRunner:
         loader: SampleLoader,
         processed_initial: int,
         *,
-        output_logger: RunArtifactStore,
+        output_artifact_store: RunArtifactStore,
         final_pass: bool,
     ) -> float:
         start = time.time()
@@ -467,7 +467,7 @@ class AlignmentRunner:
                     _RunnerPipelineSink(
                         self,
                         bar,
-                        output_logger=output_logger,
+                        output_artifact_store=output_artifact_store,
                         final_pass=final_pass,
                     ),
                     batch_size=batch_size,
@@ -483,7 +483,7 @@ class AlignmentRunner:
         pending: list[SampleRecord],
         processed_initial: int,
         *,
-        output_logger: RunArtifactStore,
+        output_artifact_store: RunArtifactStore,
         final_pass: bool,
     ) -> float:
         start = time.time()
@@ -550,7 +550,7 @@ class AlignmentRunner:
                             artifacts=message.get("artifacts", {}),
                             checksums=message.get("checksums"),
                             diagnostics=message.get("diagnostics") or {},
-                            output_logger=output_logger,
+                            output_artifact_store=output_artifact_store,
                             final_pass=final_pass,
                         )
                         try:
@@ -590,7 +590,7 @@ class AlignmentRunner:
             self.progress_logger.warning("Interrupt received, stopping workers...")
             pool.shutdown(force=False)
             self.run_state.save()
-            self.logger.maybe_flush(force=True)
+            self.artifact_store.maybe_flush(force=True)
             raise
         finally:
             pool.shutdown(force=False)
@@ -728,13 +728,15 @@ class AlignmentRunner:
         artifacts: Mapping[str, Any],
         checksums: Mapping[str, int] | None,
         diagnostics: Mapping[str, Any],
-        output_logger: RunArtifactStore | None = None,
+        output_artifact_store: RunArtifactStore | None = None,
         final_pass: bool = True,
     ) -> None:
-        logger = output_logger or self.logger
-        logger.commit_from_scratch(record, artifacts=artifacts, checksums=checksums)
+        artifact_store = output_artifact_store or self.artifact_store
+        artifact_store.commit_from_scratch(
+            record, artifacts=artifacts, checksums=checksums
+        )
         if final_pass and diagnostics:
-            logger.write_diagnostics(record, diagnostics)
+            artifact_store.write_diagnostics(record, diagnostics)
         sample_scratch = artifacts.get("scratch_dir")
         if sample_scratch:
             shutil.rmtree(Path(sample_scratch), ignore_errors=True)

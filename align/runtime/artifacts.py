@@ -47,10 +47,7 @@ def _read_npz_artifact(
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     with np.load(Path(path), allow_pickle=False) as payload:
         if _METADATA_KEY not in payload.files:
-            raise ValueError(
-                f"{expected_type} artifact has no schema metadata; version-1 "
-                "artifacts are not supported."
-            )
+            raise ValueError(f"{expected_type} artifact has no schema metadata.")
         metadata = json.loads(str(payload[_METADATA_KEY].item()))
         version = metadata.get("schema_version")
         if version != ARTIFACT_SCHEMA_VERSION:

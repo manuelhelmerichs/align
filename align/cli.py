@@ -15,9 +15,9 @@ from .config import (
     RunConfig,
     load_align_config,
     resolve_recipe_defaults,
-    validate_method,
+    validate_architecture,
     validate_paths,
-    validate_ref_sample,
+    validate_reference_sample,
 )
 from .config._utils import _parse_int_list
 from .logging_utils import configure_logging
@@ -191,9 +191,9 @@ def run(args: argparse.Namespace) -> None:
         sample_format=sample_format,
         resume=config.runtime.resume,
     )
-    validate_ref_sample(manifest, config.selection)
+    validate_reference_sample(manifest, config.selection)
 
-    validate_method(config)
+    validate_architecture(config)
 
     config_payload = config.as_dict()
     config_payload["resolved_paths"] = {
@@ -219,16 +219,6 @@ def run(args: argparse.Namespace) -> None:
     runtime_settings = _runtime_settings_snapshot(config.runtime)
 
     run_state_path = state_dir / _STATE_RUN
-    legacy_run_state_path = state_dir / "align_run_state.json"
-    if (
-        config.runtime.resume
-        and not run_state_path.exists()
-        and legacy_run_state_path.exists()
-    ):
-        raise ValueError(
-            "Cannot resume version-1 state/align_run_state.json. Start a new "
-            "schema-version-2 run."
-        )
     run_state = _load_or_create_run_state(
         run_state_path,
         run_exists=config.runtime.resume,
@@ -270,7 +260,7 @@ def run(args: argparse.Namespace) -> None:
         config=config,
         manifest=manifest,
         run_state=run_state,
-        logger=artifact_store,
+        artifact_store=artifact_store,
         progress_logger=logger,
     )
 
@@ -296,9 +286,9 @@ def _describe_symmetry(config: RunConfig, manifest: SampleManifest) -> str:
     from .symmetry import format_symmetry_description
 
     recipe = get_recipe(config.architecture.family, **config.architecture.recipe_kwargs)
-    ref_sample = SampleLoader(manifest).load_reference()
-    problem = recipe.build_graph(ref_sample.params)
-    return format_symmetry_description(problem)
+    reference_sample = SampleLoader(manifest).load_reference()
+    graph = recipe.build_graph(reference_sample.params)
+    return format_symmetry_description(graph)
 
 
 def _configure_platform_preferences(config: RunConfig) -> None:
@@ -341,8 +331,8 @@ def _format_manifest_summary(manifest) -> str:
     chains = summary.get("chains") or []
     chains_text = _format_chain_list(chains)
     reference = summary.get("reference", {})
-    ref_chain = reference.get("chain", "-")
-    ref_sample = reference.get("sample", "-")
+    reference_chain = reference.get("chain", "-")
+    reference_sample = reference.get("sample", "-")
     filters = summary.get("filters") or {}
     filter_text = _format_key_values(filters)
     total = summary.get("total_samples", "-")
@@ -352,7 +342,7 @@ def _format_manifest_summary(manifest) -> str:
         f"chains={chains_text} | "
         f"total_samples={total} | "
         f"sample_format={sample_format} | "
-        f"reference=chain{ref_chain}/sample{ref_sample} | "
+        f"reference=chain{reference_chain}/sample{reference_sample} | "
         f"filters[{filter_text}]"
     )
 
@@ -466,8 +456,8 @@ def _load_or_build_manifest(
             samples_per_chain=selection.samples_per_chain,
             sample_step=selection.sample_step,
             max_total=selection.max_total,
-            ref_chain=selection.reference_chain,
-            ref_sample=selection.reference_sample,
+            reference_chain=selection.reference_chain,
+            reference_sample=selection.reference_sample,
             sample_format=sample_format,
         )
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -516,8 +506,8 @@ def _load_or_create_run_state(
         manifest_digest=manifest.digest(),
         stages=config.active_stages(),
         reference={
-            "chain": manifest.ref_chain,
-            "sample": manifest.ref_sample,
+            "chain": manifest.reference_chain,
+            "sample": manifest.reference_sample,
             "index": manifest.reference_index,
         },
         filters=manifest.filters,

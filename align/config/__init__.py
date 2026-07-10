@@ -17,9 +17,9 @@ from .loader import (
     RunConfig,
     load_align_config,
     resolve_recipe_defaults,
-    validate_method,
+    validate_architecture,
     validate_paths,
-    validate_ref_sample,
+    validate_reference_sample,
 )
 from .paths import PathConfig
 from .runtime import RuntimeConfig
@@ -39,7 +39,7 @@ __all__ = [
     "RunConfig",
     "load_align_config",
     "resolve_recipe_defaults",
-    "validate_method",
+    "validate_architecture",
     "validate_paths",
-    "validate_ref_sample",
+    "validate_reference_sample",
 ]

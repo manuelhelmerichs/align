@@ -25,7 +25,7 @@ class ScaleState:
     @classmethod
     def identity(
         cls,
-        problem,
+        graph,
         *,
         backend: Literal["jax", "numpy"] = "numpy",
         dtype=np.float32,
@@ -38,36 +38,34 @@ class ScaleState:
             ones = np.ones
         scales = {
             group_id: ones(group.size, dtype=dtype)
-            for group_id, group in problem.groups.items()
+            for group_id, group in graph.groups.items()
         }
-        return cls(group_order=problem.group_order, scales=scales)
+        return cls(group_order=graph.group_order, scales=scales)
 
     @classmethod
     def from_scales(
         cls,
-        problem,
+        graph,
         scales: Mapping[str, Any],
         *,
         backend: Literal["jax", "numpy"] = "numpy",
     ) -> ScaleState:
         """Build a state, defaulting unspecified groups to an identity scale."""
 
-        state = cls.identity(problem, backend=backend)
+        state = cls.identity(graph, backend=backend)
         state.scales.update(dict(scales))
         return state
 
-    def validate(self, problem) -> None:
+    def validate(self, graph) -> None:
         """Validate group coverage, vector shapes, and positivity."""
 
-        if set(self.group_order) != set(problem.groups):
+        if set(self.group_order) != set(graph.groups):
             raise ValueError(
-                "ScaleState group_order must contain exactly the problem groups."
+                "ScaleState group_order must contain exactly the graph groups."
             )
-        if set(self.scales) != set(problem.groups):
-            raise ValueError(
-                "ScaleState scales must contain exactly the problem groups."
-            )
-        for group_id, group in problem.groups.items():
+        if set(self.scales) != set(graph.groups):
+            raise ValueError("ScaleState scales must contain exactly the graph groups.")
+        for group_id, group in graph.groups.items():
             vector = np.asarray(self.scales[group_id])
             if vector.shape != (int(group.size),):
                 raise ValueError(

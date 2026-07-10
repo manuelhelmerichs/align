@@ -20,7 +20,7 @@ unaffected by other groups' scales, so their energies are equivariant and the
 normalization is one-shot for any residual topology. Bare-conv producers
 consume upstream channels; their already-computed upstream scales are folded
 into the kernel first (walking groups in graph order, as in the dense chain).
-A bare-conv producer whose upstream group is not yet normalized (a residual
+A bare-conv producer whose upstream group is not yet canonicalized (a residual
 cycle of bare convs) has no one-shot canonical scale and is rejected.
 """
 
@@ -35,10 +35,10 @@ from ..symmetry import SymmetryGraph, binding_axis_interval
 from ..symmetry.tensor_ops import _descend, binding_selector
 
 
-def has_convnet_component(problem: SymmetryGraph) -> bool:
+def has_convnet_component(graph: SymmetryGraph) -> bool:
     """True if the graph contains a ``convnet`` component."""
 
-    return any(component.kind == "convnet" for component in problem.components.values())
+    return any(component.kind == "convnet" for component in graph.components.values())
 
 
 def _multiply_axis_interval(
@@ -61,25 +61,25 @@ def _multiply_axis_interval(
 
 
 def convnet_producer_scales(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
     params: Mapping[str, Any],
     *,
     epsilon: float = 1e-8,
 ) -> dict[str, jnp.ndarray]:
     """Canonical per-group scales from joint producer energies.
 
-    Walks groups in graph order, folding already-normalized upstream scales
+    Walks groups in graph order, folding already-canonicalized upstream scales
     into bare-conv producers before measuring their energy (norm-affine
     producers are 1-D and need no folding). Degenerate channels (joint energy
     at or below ``epsilon``) keep scale 1.
     """
 
     scales: dict[str, jnp.ndarray] = {}
-    for group_id in problem.group_order:
-        group = problem.groups[group_id]
+    for group_id in graph.group_order:
+        group = graph.groups[group_id]
         producers = [
             binding
-            for binding in problem.bindings_for_group(group_id)
+            for binding in graph.bindings_for_group(group_id)
             if binding.role == "out" and binding.scale_power != 0.0
         ]
         if not producers:
@@ -90,21 +90,21 @@ def convnet_producer_scales(
             )
         energy = jnp.zeros((int(group.size),), dtype=jnp.float32)
         for binding in producers:
-            spec = problem.tensors[binding.tensor_id]
+            spec = graph.tensors[binding.tensor_id]
             if binding_selector(spec.shape, binding):
                 raise ValueError(
                     "Conv-stack scale canonicalization does not support "
                     f"selector-restricted producer bindings ({binding.tensor_id})."
                 )
             tensor = jnp.asarray(_descend(params, spec.path))
-            for other in problem.bindings_for_tensor(binding.tensor_id):
+            for other in graph.bindings_for_tensor(binding.tensor_id):
                 if other.role != "in" or other.scale_power == 0.0:
                     continue
                 if other.group not in scales:
                     raise ValueError(
                         f"Group {group_id!r} has a bare producer "
                         f"{binding.tensor_id!r} consuming group {other.group!r}, "
-                        "which is not normalized yet (a residual cycle of "
+                        "which is not canonicalized yet (a residual cycle of "
                         "bare convs). This has no one-shot canonical scale; "
                         "attach normalization layers or disable the canonicalize "
                         "stage."

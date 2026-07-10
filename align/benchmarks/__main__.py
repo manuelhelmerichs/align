@@ -138,8 +138,8 @@ def _add_experiment_arguments(
     group.add_argument("--samples-per-chain", type=int)
     group.add_argument("--sample-step", type=int, default=1)
     group.add_argument("--max-total", type=int)
-    group.add_argument("--ref-chain", type=int, default=0)
-    group.add_argument("--ref-sample", type=int, default=0)
+    group.add_argument("--reference-chain", type=int, default=0)
+    group.add_argument("--reference-sample", type=int, default=0)
 
 
 def _parse_json_dict(text: str, *, flag: str) -> dict[str, Any]:
@@ -181,8 +181,8 @@ def _load_experiment_case(args: argparse.Namespace):
         samples_per_chain=args.samples_per_chain,
         sample_step=args.sample_step,
         max_total=args.max_total,
-        ref_chain=args.ref_chain,
-        ref_sample=args.ref_sample,
+        reference_chain=args.reference_chain,
+        reference_sample=args.reference_sample,
     )
 
 

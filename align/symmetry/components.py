@@ -1,9 +1,9 @@
-"""Component-level views of alignment problems.
+"""Component-level views of symmetry graphs.
 
-Components partition a problem's permutation groups into named sub-problems (the FCN
+Components partition a graph's symmetry groups into named selection units (the FCN
 stack, one attention module, ...). This module derives component listings, extracts
-self-contained sub-problems, and matches structurally identical components across
-different networks so they can be aligned against each other.
+self-contained component subgraphs, and matches structurally identical components
+across different networks so they can be aligned against each other.
 """
 
 from __future__ import annotations
@@ -19,39 +19,38 @@ from .graph import SymmetryGraph
 from .tensor_ops import _canonical_axis, binding_axis_interval
 
 
-def tensors_for_component(problem: SymmetryGraph, component_id: str) -> tuple[str, ...]:
-    """Return tensor ids bound to any of the component's groups, in problem order."""
+def tensors_for_component(graph: SymmetryGraph, component_id: str) -> tuple[str, ...]:
+    """Return tensor ids bound to any of the component's groups, in graph order."""
 
-    component = problem.components[component_id]
+    component = graph.components[component_id]
     members = set(component.groups)
     return tuple(
         tensor_id
-        for tensor_id in problem.tensors
+        for tensor_id in graph.tensors
         if any(
-            binding.group in members
-            for binding in problem.bindings_for_tensor(tensor_id)
+            binding.group in members for binding in graph.bindings_for_tensor(tensor_id)
         )
     )
 
 
 def resolve_component_patterns(
-    problem: SymmetryGraph, patterns: Sequence[str]
+    graph: SymmetryGraph, patterns: Sequence[str]
 ) -> tuple[str, ...]:
     """Resolve fnmatch ``patterns`` to component ids; every pattern must match."""
 
-    if not problem.components:
+    if not graph.components:
         raise ValueError(
-            "Problem declares no components; component selectors cannot be resolved."
+            "Graph declares no components; component selectors cannot be resolved."
         )
     resolved: list[str] = []
     for pattern in patterns:
         matches = [
             component_id
-            for component_id in problem.components
+            for component_id in graph.components
             if fnmatch.fnmatchcase(component_id, pattern)
         ]
         if not matches:
-            available = ", ".join(problem.components)
+            available = ", ".join(graph.components)
             raise ValueError(
                 f"Component pattern {pattern!r} matches no components. Available: {available}"
             )
@@ -62,30 +61,30 @@ def resolve_component_patterns(
 
 
 def groups_for_components(
-    problem: SymmetryGraph, patterns: Sequence[str]
+    graph: SymmetryGraph, patterns: Sequence[str]
 ) -> tuple[str, ...]:
     """Resolve component ``patterns`` to the union of their groups, in group order."""
 
-    component_ids = resolve_component_patterns(problem, patterns)
+    component_ids = resolve_component_patterns(graph, patterns)
     members = {
         group_id
         for component_id in component_ids
-        for group_id in problem.components[component_id].groups
+        for group_id in graph.components[component_id].groups
     }
-    return tuple(gid for gid in problem.group_order if gid in members)
+    return tuple(gid for gid in graph.group_order if gid in members)
 
 
-def describe_symmetry(problem: SymmetryGraph) -> dict[str, Any]:
-    """Return a JSON-friendly listing of the problem's components.
+def describe_symmetry(graph: SymmetryGraph) -> dict[str, Any]:
+    """Return a JSON-friendly listing of the graph's components.
 
-    Problems without declared components are reported as one implicit component ``all``
-    so the listing is uniform for older recipes.
+    Graphs without declared components are reported as one implicit component ``all``
+    so the listing is uniform.
     """
 
-    repeated = problem.repeated_group_terms()
+    repeated = graph.repeated_group_terms()
     attention_groups = {
         group_id
-        for constraint in problem.constraints
+        for constraint in graph.constraints
         if isinstance(constraint, MHACircuitConstraint)
         for group_id in constraint.groups
     }
@@ -96,14 +95,13 @@ def describe_symmetry(problem: SymmetryGraph) -> dict[str, Any]:
         tensor_ids = sorted(
             {
                 binding.tensor_id
-                for binding in problem.axis_bindings
+                for binding in graph.axis_bindings
                 if binding.group in set(group_ids)
             }
         )
         param_count = int(
             sum(
-                int(np.prod(problem.tensors[tensor_id].shape))
-                for tensor_id in tensor_ids
+                int(np.prod(graph.tensors[tensor_id].shape)) for tensor_id in tensor_ids
             )
         )
         notes: list[str] = []
@@ -115,7 +113,7 @@ def describe_symmetry(problem: SymmetryGraph) -> dict[str, Any]:
             "id": component_id,
             "kind": kind,
             "groups": [
-                {"id": group_id, "size": int(problem.groups[group_id].size)}
+                {"id": group_id, "size": int(graph.groups[group_id].size)}
                 for group_id in group_ids
             ],
             "num_tensors": len(tensor_ids),
@@ -124,31 +122,29 @@ def describe_symmetry(problem: SymmetryGraph) -> dict[str, Any]:
             "notes": notes,
         }
 
-    if problem.components:
+    if graph.components:
         components = [
             _component_entry(
                 component.id,
                 component.kind,
-                [gid for gid in problem.group_order if gid in set(component.groups)],
+                [gid for gid in graph.group_order if gid in set(component.groups)],
             )
-            for component in problem.components.values()
+            for component in graph.components.values()
         ]
     else:
-        components = [
-            _component_entry("all", "unstructured", list(problem.group_order))
-        ]
+        components = [_component_entry("all", "unstructured", list(graph.group_order))]
     return {
-        "architecture": problem.metadata.get("architecture"),
-        "num_groups": len(problem.groups),
-        "num_tensors": len(problem.tensors),
+        "architecture": graph.metadata.get("architecture"),
+        "num_groups": len(graph.groups),
+        "num_tensors": len(graph.tensors),
         "components": components,
     }
 
 
-def format_symmetry_description(problem: SymmetryGraph) -> str:
+def format_symmetry_description(graph: SymmetryGraph) -> str:
     """Render :func:`describe_symmetry` as human-readable text."""
 
-    description = describe_symmetry(problem)
+    description = describe_symmetry(graph)
     lines = [
         f"architecture: {description['architecture']}",
         f"groups: {description['num_groups']}  tensors: {description['num_tensors']}",
@@ -170,24 +166,24 @@ def format_symmetry_description(problem: SymmetryGraph) -> str:
 
 
 def extract_component_graph(
-    problem: SymmetryGraph, component_ids: Sequence[str]
+    graph: SymmetryGraph, component_ids: Sequence[str]
 ) -> SymmetryGraph:
-    """Return the self-contained sub-problem covering ``component_ids``.
+    """Return the self-contained subgraph covering ``component_ids``.
 
-    The sub-problem keeps only the selected components' groups, their bindings, and
+    The subgraph keeps only the selected components' groups, their bindings, and
     the tensors those bindings touch. Constraints referencing dropped groups or
-    tensors are dropped. Aligning the sub-problem permutes only internal units of
+    tensors are dropped. Aligning the subgraph transforms only internal units of
     the selected components, so it stays function-preserving for the full network.
     """
 
-    unknown = sorted(set(component_ids) - set(problem.components))
+    unknown = sorted(set(component_ids) - set(graph.components))
     if unknown:
         raise ValueError("Unknown component id(s): " + ", ".join(unknown))
     if not component_ids:
         raise ValueError("extract_component_graph requires at least one component id.")
 
     kept_components = {
-        component_id: problem.components[component_id] for component_id in component_ids
+        component_id: graph.components[component_id] for component_id in component_ids
     }
     kept_groups = {
         group_id
@@ -195,42 +191,42 @@ def extract_component_graph(
         for group_id in component.groups
     }
     bindings = tuple(
-        binding for binding in problem.axis_bindings if binding.group in kept_groups
+        binding for binding in graph.axis_bindings if binding.group in kept_groups
     )
     kept_tensor_ids = {binding.tensor_id for binding in bindings}
     constraints = tuple(
         constraint
-        for constraint in problem.constraints
+        for constraint in graph.constraints
         if set(constraint.groups) <= kept_groups
         and set(constraint.tensors) <= kept_tensor_ids
     )
     metadata: dict[str, Any] = {
-        "architecture": problem.metadata.get("architecture"),
-        "group_order": [gid for gid in problem.group_order if gid in kept_groups],
+        "architecture": graph.metadata.get("architecture"),
+        "group_order": [gid for gid in graph.group_order if gid in kept_groups],
         "extracted_components": list(component_ids),
     }
-    sub_problem = SymmetryGraph(
-        groups={gid: problem.groups[gid] for gid in kept_groups},
-        tensors={tid: problem.tensors[tid] for tid in kept_tensor_ids},
+    subgraph = SymmetryGraph(
+        groups={gid: graph.groups[gid] for gid in kept_groups},
+        tensors={tid: graph.tensors[tid] for tid in kept_tensor_ids},
         axis_bindings=bindings,
         constraints=constraints,
         components=kept_components,
         metadata=metadata,
     )
-    sub_problem.validate()
-    return sub_problem
+    subgraph.validate()
+    return subgraph
 
 
 def _binding_profile(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
     tensor_id: str,
     group_index: dict[str, int],
 ) -> tuple[Any, ...]:
     """Canonical per-tensor profile: shape + component-group binding structure."""
 
-    tensor = problem.tensors[tensor_id]
+    tensor = graph.tensors[tensor_id]
     entries = []
-    for binding in problem.bindings_for_tensor(tensor_id):
+    for binding in graph.bindings_for_tensor(tensor_id):
         if binding.group not in group_index:
             continue
         axis, start, stop = binding_axis_interval(tensor.shape, binding)
@@ -254,7 +250,7 @@ def _binding_profile(
     return (tuple(tensor.shape), tuple(sorted(entries)))
 
 
-def component_signature(problem: SymmetryGraph, component_id: str) -> tuple[Any, ...]:
+def component_signature(graph: SymmetryGraph, component_id: str) -> tuple[Any, ...]:
     """Canonical structural signature of one component.
 
     Two components with equal signatures have identical group sizes and identically
@@ -262,27 +258,25 @@ def component_signature(problem: SymmetryGraph, component_id: str) -> tuple[Any,
     against each other regardless of the surrounding architecture.
     """
 
-    component = problem.components[component_id]
-    ordered_groups = [
-        gid for gid in problem.group_order if gid in set(component.groups)
-    ]
+    component = graph.components[component_id]
+    ordered_groups = [gid for gid in graph.group_order if gid in set(component.groups)]
     group_index = {gid: idx for idx, gid in enumerate(ordered_groups)}
     profiles = sorted(
-        _binding_profile(problem, tensor_id, group_index)
-        for tensor_id in tensors_for_component(problem, component_id)
+        _binding_profile(graph, tensor_id, group_index)
+        for tensor_id in tensors_for_component(graph, component_id)
     )
     return (
         component.kind,
-        tuple(int(problem.groups[gid].size) for gid in ordered_groups),
+        tuple(int(graph.groups[gid].size) for gid in ordered_groups),
         tuple(profiles),
     )
 
 
 def match_component_tensors(
-    ref_problem: SymmetryGraph,
-    ref_block: str,
-    target_problem: SymmetryGraph,
-    target_block: str,
+    reference_graph: SymmetryGraph,
+    reference_component: str,
+    target_graph: SymmetryGraph,
+    target_component: str,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Match tensors and groups of two structurally identical components.
 
@@ -290,49 +284,51 @@ def match_component_tensors(
     Raises if the component signatures differ or the correspondence is ambiguous.
     """
 
-    ref_signature = component_signature(ref_problem, ref_block)
-    target_signature = component_signature(target_problem, target_block)
-    if ref_signature != target_signature:
+    reference_signature = component_signature(reference_graph, reference_component)
+    target_signature = component_signature(target_graph, target_component)
+    if reference_signature != target_signature:
         raise ValueError(
-            f"Component {ref_block!r} and {target_block!r} have incompatible "
+            f"Component {reference_component!r} and {target_component!r} have incompatible "
             "structures; cannot align across networks."
         )
 
-    ref_groups = [
+    reference_groups = [
         gid
-        for gid in ref_problem.group_order
-        if gid in set(ref_problem.components[ref_block].groups)
+        for gid in reference_graph.group_order
+        if gid in set(reference_graph.components[reference_component].groups)
     ]
     target_groups = [
         gid
-        for gid in target_problem.group_order
-        if gid in set(target_problem.components[target_block].groups)
+        for gid in target_graph.group_order
+        if gid in set(target_graph.components[target_component].groups)
     ]
-    group_map = dict(zip(ref_groups, target_groups, strict=True))
+    group_map = dict(zip(reference_groups, target_groups, strict=True))
 
-    ref_index = {gid: idx for idx, gid in enumerate(ref_groups)}
+    reference_index = {gid: idx for idx, gid in enumerate(reference_groups)}
     target_index = {gid: idx for idx, gid in enumerate(target_groups)}
 
-    def _profiles(problem, component_id, group_index):
+    def _profiles(graph, component_id, group_index):
         profiles: dict[tuple[Any, ...], list[str]] = {}
-        for tensor_id in tensors_for_component(problem, component_id):
-            profile = _binding_profile(problem, tensor_id, group_index)
+        for tensor_id in tensors_for_component(graph, component_id):
+            profile = _binding_profile(graph, tensor_id, group_index)
             profiles.setdefault(profile, []).append(tensor_id)
         return profiles
 
-    ref_profiles = _profiles(ref_problem, ref_block, ref_index)
-    target_profiles = _profiles(target_problem, target_block, target_index)
+    reference_profiles = _profiles(
+        reference_graph, reference_component, reference_index
+    )
+    target_profiles = _profiles(target_graph, target_component, target_index)
 
     tensor_map: dict[str, str] = {}
-    for profile, ref_ids in ref_profiles.items():
+    for profile, reference_ids in reference_profiles.items():
         target_ids = target_profiles.get(profile, [])
-        if len(ref_ids) != 1 or len(target_ids) != 1:
+        if len(reference_ids) != 1 or len(target_ids) != 1:
             raise ValueError(
-                f"Ambiguous tensor correspondence between components {ref_block!r} "
-                f"and {target_block!r}: profile {profile!r} matches "
-                f"{ref_ids} vs {target_ids}."
+                f"Ambiguous tensor correspondence between components {reference_component!r} "
+                f"and {target_component!r}: profile {profile!r} matches "
+                f"{reference_ids} vs {target_ids}."
             )
-        tensor_map[ref_ids[0]] = target_ids[0]
+        tensor_map[reference_ids[0]] = target_ids[0]
     return tensor_map, group_map
 
 

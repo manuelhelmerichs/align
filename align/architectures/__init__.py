@@ -1,6 +1,6 @@
 """Architecture recipes and the component rules they compose.
 
-Component rules (``align.architectures.rules``) construct alignment problems
+Component rules (``align.architectures.rules``) construct symmetry graphs
 through a shared ``SymmetryGraphBuilder``; architecture recipes discover component
 locations in a parameter tree and compose them.
 """

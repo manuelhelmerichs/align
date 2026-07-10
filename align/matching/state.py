@@ -1,4 +1,4 @@
-"""Permutation state and projection utilities."""
+"""Transform state and permutation-projection utilities."""
 
 from __future__ import annotations
 
@@ -107,7 +107,7 @@ class TransformState:
     @classmethod
     def identity(
         cls,
-        problem,
+        graph,
         *,
         backend: Literal["jax", "numpy"] = "jax",
         dtype=np.float32,
@@ -115,21 +115,21 @@ class TransformState:
         eye = jnp.eye if backend == "jax" else np.eye
         matrices = {
             group_id: eye(group.size, dtype=dtype)
-            for group_id, group in problem.groups.items()
+            for group_id, group in graph.groups.items()
         }
-        return cls(group_order=problem.group_order, matrices=matrices)
+        return cls(group_order=graph.group_order, matrices=matrices)
 
     @classmethod
     def from_transforms(
         cls,
-        problem,
+        graph,
         transforms: Mapping[str, Any],
         *,
         backend: Literal["jax", "numpy"] = "numpy",
     ) -> TransformState:
         """Build a hard state, defaulting unspecified groups to identity."""
 
-        state = cls.identity(problem, backend=backend)
+        state = cls.identity(graph, backend=backend)
         return state.with_matrices(transforms)
 
     def with_matrices(self, updates: Mapping[str, Any]) -> TransformState:
@@ -209,7 +209,7 @@ class TransformState:
             metadata=metadata,
         )
 
-    def validate(self, problem, *, hard: bool = False) -> None:
+    def validate(self, graph, *, hard: bool = False) -> None:
         """Validate shapes, group keys, and optionally hard-transform constraints.
 
         With ``hard=True`` every matrix must be a hard member of its group's
@@ -218,13 +218,13 @@ class TransformState:
         (rotation-pair and orthogonal groups).
         """
 
-        if set(self.group_order) != set(problem.groups):
-            raise ValueError("State group_order must contain exactly problem groups.")
-        if set(self.matrices) != set(problem.groups):
+        if set(self.group_order) != set(graph.groups):
+            raise ValueError("State group_order must contain exactly the graph groups.")
+        if set(self.matrices) != set(graph.groups):
             raise ValueError(
-                "State matrices mapping must contain exactly problem groups."
+                "State matrices mapping must contain exactly the graph groups."
             )
-        for group_id, group in problem.groups.items():
+        for group_id, group in graph.groups.items():
             value = np.asarray(self.matrices[group_id])
             if value.ndim == 1:
                 _validate_indices(value, group.size)
@@ -254,13 +254,13 @@ class TransformState:
                     f"Group {group_id!r} is not a hard {transform_family.replace('_', ' ')}."
                 )
         if self.logits is not None:
-            unknown = sorted(set(self.logits) - set(problem.groups))
+            unknown = sorted(set(self.logits) - set(graph.groups))
             if unknown:
                 raise ValueError(
                     "State logits reference unknown group(s): " + ", ".join(unknown)
                 )
             for group_id, logits in self.logits.items():
-                size = problem.groups[group_id].size
+                size = graph.groups[group_id].size
                 if logits.shape[-2:] != (size, size):
                     raise ValueError(
                         f"Group {group_id!r} logits shape {logits.shape}, "

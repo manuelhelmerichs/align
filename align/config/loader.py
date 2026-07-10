@@ -1,4 +1,4 @@
-"""Configuration loader, validation, and the schema-v2 RunConfig class."""
+"""Configuration loader, validation, and the current RunConfig class."""
 
 from __future__ import annotations
 
@@ -54,10 +54,7 @@ class RunConfig:
         _validate_fields("top-level", payload, _TOP_LEVEL_FIELDS)
         version = payload.get("schema_version")
         if version is None:
-            raise ValueError(
-                "Config must set 'schema_version: 2'. Version-1 configs are not "
-                "translated; migrate to the schema-v2 layout."
-            )
+            raise ValueError("Config must set 'schema_version: 2'.")
         if int(version) != SCHEMA_VERSION:
             raise ValueError(
                 f"Unsupported schema_version {version!r}; this build requires "
@@ -194,18 +191,22 @@ def resolve_recipe_defaults(config: RunConfig) -> None:
         options["residual_topology"] = str(topology_path)
 
 
-def validate_ref_sample(manifest: SampleManifest, selection: SelectionConfig) -> None:
+def validate_reference_sample(
+    manifest: SampleManifest, selection: SelectionConfig
+) -> None:
     """Ensure the reference sample exists inside the manifest."""
 
-    ref_label = f"chain{selection.reference_chain}_sample{selection.reference_sample}"
-    if not any(record.label == ref_label for record in manifest.records):
+    reference_label = (
+        f"chain{selection.reference_chain}_sample{selection.reference_sample}"
+    )
+    if not any(record.label == reference_label for record in manifest.records):
         raise ValueError(
-            f"Reference sample {ref_label} missing from manifest. "
+            f"Reference sample {reference_label} missing from manifest. "
             "Adjust selection filters."
         )
 
 
-def validate_method(config: RunConfig) -> None:
+def validate_architecture(config: RunConfig) -> None:
     """Validate architecture-family availability (stage options self-validate)."""
 
     from ..architectures import available_recipes
@@ -222,7 +223,7 @@ __all__ = [
     "RunConfig",
     "load_align_config",
     "resolve_recipe_defaults",
-    "validate_method",
+    "validate_architecture",
     "validate_paths",
-    "validate_ref_sample",
+    "validate_reference_sample",
 ]

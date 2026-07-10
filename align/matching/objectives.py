@@ -1,4 +1,4 @@
-"""Objectives for graph-native alignment problems."""
+"""Objectives for graph-native symmetry matching."""
 
 from __future__ import annotations
 
@@ -28,19 +28,19 @@ class Objective(ABC):
     name: str
 
     @abstractmethod
-    def value(self, problem, ref_data, target_data, state):
+    def value(self, graph, reference_data, target_data, state):
         """Return scalar or batched objective value."""
 
-    def linearize_group(self, problem, ref_data, target_data, state, group_id: str):
+    def linearize_group(self, graph, reference_data, target_data, state, group_id: str):
         """Return an LAP maximization cost matrix for one group."""
 
         signed, invariant = self.linearize_group_split(
-            problem, ref_data, target_data, state, group_id
+            graph, reference_data, target_data, state, group_id
         )
         return signed + invariant
 
     def linearize_group_split(
-        self, problem, ref_data, target_data, state, group_id: str
+        self, graph, reference_data, target_data, state, group_id: str
     ):
         """Return the group's linear payoff split as ``(signed, invariant)``.
 
@@ -87,8 +87,8 @@ def available_objectives() -> list[str]:
     return sorted(OBJECTIVES)
 
 
-def _is_batched_tensor(problem, tensor_id: str, tensor) -> bool:
-    return jnp.asarray(tensor).ndim == len(problem.tensors[tensor_id].shape) + 1
+def _is_batched_tensor(graph, tensor_id: str, tensor) -> bool:
+    return jnp.asarray(tensor).ndim == len(graph.tensors[tensor_id].shape) + 1
 
 
 def _apply_matrix_axis(tensor, matrix, *, axis: int, tensor_is_batched: bool):
@@ -126,22 +126,22 @@ def _apply_matrix_axis(tensor, matrix, *, axis: int, tensor_is_batched: bool):
     return jnp.moveaxis(out, 1, axis)
 
 
-def _sorted_bindings(problem, tensor_id: str):
-    shape = problem.tensors[tensor_id].shape
+def _sorted_bindings(graph, tensor_id: str):
+    shape = graph.tensors[tensor_id].shape
     return sorted(
-        problem.bindings_for_tensor(tensor_id),
+        graph.bindings_for_tensor(tensor_id),
         key=lambda binding: binding_sort_key(shape, binding),
     )
 
 
-def _apply_state_to_tensor(problem, tensor_id: str, tensor, state):
+def _apply_state_to_tensor(graph, tensor_id: str, tensor, state):
     updated = jnp.asarray(tensor)
-    shape = problem.tensors[tensor_id].shape
-    for binding in _sorted_bindings(problem, tensor_id):
-        tensor_is_batched = _is_batched_tensor(problem, tensor_id, updated)
+    shape = graph.tensors[tensor_id].shape
+    for binding in _sorted_bindings(graph, tensor_id):
+        tensor_is_batched = _is_batched_tensor(graph, tensor_id, updated)
         matrix = binding_transform_matrix(
             state.matrices[binding.group],
-            transform_family=problem.groups[binding.group].transform_family,
+            transform_family=graph.groups[binding.group].transform_family,
             scope=binding.transform_scope,
         )
         if matrix is None:
@@ -178,18 +178,18 @@ def _apply_state_to_tensor(problem, tensor_id: str, tensor, state):
 
 
 def _apply_other_groups_hard(
-    problem, tensor_id: str, tensor, state, skip_groups: frozenset[str] | set[str]
+    graph, tensor_id: str, tensor, state, skip_groups: frozenset[str] | set[str]
 ):
     """Apply all hard group actions except ``skip_groups`` to one tensor."""
 
     updated = np.asarray(tensor)
-    shape = problem.tensors[tensor_id].shape
-    for binding in _sorted_bindings(problem, tensor_id):
+    shape = graph.tensors[tensor_id].shape
+    for binding in _sorted_bindings(graph, tensor_id):
         if binding.group in skip_groups:
             continue
         matrix = binding_transform_matrix(
             np.asarray(state.matrices[binding.group]),
-            transform_family=problem.groups[binding.group].transform_family,
+            transform_family=graph.groups[binding.group].transform_family,
             scope=binding.transform_scope,
         )
         if matrix is None:
@@ -207,10 +207,10 @@ def _apply_other_groups_hard(
     return updated
 
 
-def _require_lap_linearizable(problem, group_id: str) -> None:
+def _require_lap_linearizable(graph, group_id: str) -> None:
     """Reject groups whose exact hard update is not a linear assignment."""
 
-    for constraint in problem.constraints:
+    for constraint in graph.constraints:
         if isinstance(constraint, MHACircuitConstraint) and (
             constraint.head_group == group_id
         ):
@@ -232,13 +232,13 @@ def _require_lap_linearizable(problem, group_id: str) -> None:
                 "or a Sinkhorn schedule."
             )
 
-    repeated = problem.repeated_group_terms().get(group_id, ())
+    repeated = graph.repeated_group_terms().get(group_id, ())
     if repeated:
         joined = ", ".join(repeated)
         raise UnsupportedGroupLinearization(
             f"Group {group_id!r} appears multiple times in tensor term(s) "
             f"{joined}. The exact hard update is a quadratic assignment "
-            "problem, not an LAP. Use a Sinkhorn schedule for this problem."
+            "problem, not an LAP. Use a Sinkhorn schedule for this update."
         )
 
 
@@ -256,12 +256,12 @@ class EuclideanObjective(Objective):
             )
         self.repeated_group_policy = repeated_group_policy
 
-    def value(self, problem, ref_data, target_data, state):
+    def value(self, graph, reference_data, target_data, state):
         loss = None
-        for tensor_id in problem.tensors:
-            ref = jnp.asarray(ref_data[tensor_id])
+        for tensor_id in graph.tensors:
+            ref = jnp.asarray(reference_data[tensor_id])
             target = jnp.asarray(target_data[tensor_id])
-            aligned = _apply_state_to_tensor(problem, tensor_id, target, state)
+            aligned = _apply_state_to_tensor(graph, tensor_id, target, state)
             if aligned.ndim == ref.ndim + 1:
                 diff = ref[None, ...] - aligned
                 axes = tuple(range(1, diff.ndim))
@@ -275,17 +275,17 @@ class EuclideanObjective(Objective):
         return loss
 
     def linearize_group_split(
-        self, problem, ref_data, target_data, state, group_id: str
+        self, graph, reference_data, target_data, state, group_id: str
     ):
-        _require_lap_linearizable(problem, group_id)
+        _require_lap_linearizable(graph, group_id)
 
-        group = problem.groups[group_id]
+        group = graph.groups[group_id]
         signed = np.zeros((group.size, group.size), dtype=np.float64)
         invariant = np.zeros((group.size, group.size), dtype=np.float64)
-        for tensor_id in problem.tensors:
+        for tensor_id in graph.tensors:
             bindings = [
                 binding
-                for binding in problem.bindings_for_tensor(tensor_id)
+                for binding in graph.bindings_for_tensor(tensor_id)
                 if binding.group == group_id
             ]
             if not bindings:
@@ -294,10 +294,10 @@ class EuclideanObjective(Objective):
             # binding each spatial position's channel slice) contribute a sum
             # of independent linear terms; multi-axis repeats are rejected by
             # the linearizability check above.
-            shape = problem.tensors[tensor_id].shape
-            ref = np.asarray(ref_data[tensor_id])
+            shape = graph.tensors[tensor_id].shape
+            ref = np.asarray(reference_data[tensor_id])
             target = _apply_other_groups_hard(
-                problem, tensor_id, target_data[tensor_id], state, {group_id}
+                graph, tensor_id, target_data[tensor_id], state, {group_id}
             )
             for binding in bindings:
                 axis, start, stop = binding_axis_interval(shape, binding)
@@ -352,14 +352,14 @@ class DiagonalFisherObjective(Objective):
                     f"diagonal_fisher weights for tensor {tensor_id!r} must be non-negative."
                 )
 
-    def _weight(self, problem, tensor_id: str) -> np.ndarray:
+    def _weight(self, graph, tensor_id: str) -> np.ndarray:
         weight = self.tensor_weights.get(tensor_id)
         if weight is None:
             raise ValueError(
                 f"diagonal_fisher has no weights for tensor {tensor_id!r}; weights "
-                "must cover every problem tensor."
+                "must cover every graph tensor."
             )
-        expected = tuple(problem.tensors[tensor_id].shape)
+        expected = tuple(graph.tensors[tensor_id].shape)
         if tuple(weight.shape) != expected:
             raise ValueError(
                 f"diagonal_fisher weights for tensor {tensor_id!r} have shape "
@@ -367,13 +367,13 @@ class DiagonalFisherObjective(Objective):
             )
         return weight
 
-    def value(self, problem, ref_data, target_data, state):
+    def value(self, graph, reference_data, target_data, state):
         loss = None
-        for tensor_id in problem.tensors:
-            ref = jnp.asarray(ref_data[tensor_id])
+        for tensor_id in graph.tensors:
+            ref = jnp.asarray(reference_data[tensor_id])
             target = jnp.asarray(target_data[tensor_id])
-            weight = jnp.asarray(self._weight(problem, tensor_id), dtype=ref.dtype)
-            aligned = _apply_state_to_tensor(problem, tensor_id, target, state)
+            weight = jnp.asarray(self._weight(graph, tensor_id), dtype=ref.dtype)
+            aligned = _apply_state_to_tensor(graph, tensor_id, target, state)
             if aligned.ndim == ref.ndim + 1:
                 diff = ref[None, ...] - aligned
                 axes = tuple(range(1, diff.ndim))
@@ -387,28 +387,28 @@ class DiagonalFisherObjective(Objective):
         return loss
 
     def linearize_group_split(
-        self, problem, ref_data, target_data, state, group_id: str
+        self, graph, reference_data, target_data, state, group_id: str
     ):
-        _require_lap_linearizable(problem, group_id)
+        _require_lap_linearizable(graph, group_id)
 
-        group = problem.groups[group_id]
+        group = graph.groups[group_id]
         signed = np.zeros((group.size, group.size), dtype=np.float64)
         invariant = np.zeros((group.size, group.size), dtype=np.float64)
-        for tensor_id in problem.tensors:
+        for tensor_id in graph.tensors:
             bindings = [
                 binding
-                for binding in problem.bindings_for_tensor(tensor_id)
+                for binding in graph.bindings_for_tensor(tensor_id)
                 if binding.group == group_id
             ]
             if not bindings:
                 continue
             # Same-axis multi-bindings sum independent linear terms (see the
             # L2 linearization); multi-axis repeats are rejected above.
-            shape = problem.tensors[tensor_id].shape
-            ref = np.asarray(ref_data[tensor_id])
-            weight = self._weight(problem, tensor_id)
+            shape = graph.tensors[tensor_id].shape
+            ref = np.asarray(reference_data[tensor_id])
+            weight = self._weight(graph, tensor_id)
             target = _apply_other_groups_hard(
-                problem, tensor_id, target_data[tensor_id], state, {group_id}
+                graph, tensor_id, target_data[tensor_id], state, {group_id}
             )
             for binding in bindings:
                 axis, start, stop = binding_axis_interval(shape, binding)

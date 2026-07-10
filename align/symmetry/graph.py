@@ -1,4 +1,4 @@
-"""Alignment graph data model and tensor materialization."""
+"""Symmetry graph data model and tensor materialization."""
 
 from __future__ import annotations
 
@@ -73,17 +73,17 @@ class TensorSpec:
 
 @dataclass(frozen=True)
 class AxisBinding:
-    """Bind one tensor axis to one permutation group.
+    """Bind one tensor axis to one symmetry group.
 
     ``role`` records how the bound channel relates to the group for *scale*
     actions: an ``"out"`` axis produces the channel (kernel output axis and its
     attached bias) and is divided by the group's scale, while an ``"in"`` axis
     consumes the channel (the next tensor's input axis) and is multiplied by it.
-    Permutation actions are role-independent and ignore this field.
+    Transform actions are role-independent and ignore this field.
 
     ``scale_power`` is the exponent of the group scale applied to this axis
-    (``factor = scale ** scale_power``); permutations ignore it. ``0.0`` marks
-    axes that permute with the group but do not participate in its scale
+    (``factor = scale ** scale_power``); transforms ignore it. ``0.0`` marks
+    axes that transform with the group but do not participate in its scale
     symmetry — e.g. a conv kernel feeding a normalization layer (the norm
     absorbs pre-norm scales only in the ε→0 limit, so an exact action must not
     touch it), FRN's learned ``eps``, or BatchNorm running statistics.
@@ -116,9 +116,9 @@ class AxisBinding:
 
 @dataclass(frozen=True)
 class ComponentSpec:
-    """A named sub-problem: a set of permutation groups solved as one unit.
+    """A named selection unit containing a set of symmetry groups.
 
-    Components partition the problem's groups (each group belongs to exactly one
+    Components partition the graph's groups (each group belongs to exactly one
     component). Tensors are not listed explicitly; a component's tensors are derived
     from the bindings of its groups and may be shared with other components (e.g.
     attention kernels carry both stream and head bindings).
@@ -163,23 +163,23 @@ class MaterializedTensors(Mapping[str, Any]):
     def __init__(
         self,
         *,
-        problem: SymmetryGraph,
+        graph: SymmetryGraph,
         params: Mapping[str, Any],
         backend: Literal["jax", "numpy"],
         cache: bool,
     ) -> None:
-        self._problem = problem
+        self._graph = graph
         self._params = params
         self._xp = _array_namespace(backend)
         self._cache_enabled = bool(cache)
         self._cache: dict[str, Any] = {}
 
     def __getitem__(self, tensor_id: str) -> Any:
-        if tensor_id not in self._problem.tensors:
+        if tensor_id not in self._graph.tensors:
             raise KeyError(tensor_id)
         if self._cache_enabled and tensor_id in self._cache:
             return self._cache[tensor_id]
-        spec = self._problem.tensors[tensor_id]
+        spec = self._graph.tensors[tensor_id]
         value = self._xp.asarray(_descend(self._params, spec.path))
         if tuple(int(dim) for dim in value.shape) != tuple(spec.shape):
             raise ValueError(
@@ -191,10 +191,10 @@ class MaterializedTensors(Mapping[str, Any]):
         return value
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self._problem.tensors)
+        return iter(self._graph.tensors)
 
     def __len__(self) -> int:
-        return len(self._problem.tensors)
+        return len(self._graph.tensors)
 
     def materialize(self) -> dict[str, Any]:
         """Return all tensors as a concrete dictionary."""
@@ -226,14 +226,14 @@ class SymmetryGraph:
 
     @property
     def group_order(self) -> tuple[str, ...]:
-        """Stable group order used by schedulers and artifact serialization."""
+        """Stable group order used by solver sequences and artifact serialization."""
 
         metadata_order = self.metadata.get("group_order")
         if metadata_order is not None:
             ordered = tuple(str(gid) for gid in metadata_order)
             if set(ordered) != set(self.groups):
                 raise ValueError(
-                    "metadata['group_order'] must contain exactly the problem groups."
+                    "metadata['group_order'] must contain exactly the graph groups."
                 )
             return ordered
         return tuple(self.groups)
@@ -286,7 +286,7 @@ class SymmetryGraph:
         """Lazily materialize tensors for one parameter tree."""
 
         return MaterializedTensors(
-            problem=self,
+            graph=self,
             params=params,
             backend=backend,
             cache=cache,
@@ -712,7 +712,7 @@ class SymmetryGraph:
 
 
 def materialize_many(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
     params_batch: Sequence[Mapping[str, Any]],
     *,
     backend: Literal["jax", "numpy"] = "jax",
@@ -721,14 +721,14 @@ def materialize_many(
 
     xp = _array_namespace(backend)
     per_sample = [
-        problem.materialize(params, backend=backend, cache=False).materialize()
+        graph.materialize(params, backend=backend, cache=False).materialize()
         for params in params_batch
     ]
     if not per_sample:
         return {}
     return {
         tensor_id: xp.stack([sample[tensor_id] for sample in per_sample], axis=0)
-        for tensor_id in problem.tensors
+        for tensor_id in graph.tensors
     }
 
 

@@ -1,7 +1,7 @@
 """Low-level array and pytree primitives shared by the alignment core.
 
 These helpers are backend-agnostic (NumPy or ``jax.numpy``) and underpin both the
-graph problem (axis bindings, scale/permutation actions) and the architecture
+symmetry graph (axis bindings, scale/transform actions) and the architecture
 recipes that emit it.
 """
 

@@ -7,7 +7,7 @@ vectors, and applies the symmetry through
 :meth:`align.symmetry.SymmetryGraph.apply_scales`. Degenerate-neuron cleanup
 remains an explicit post-pass because it is not a positive scale symmetry.
 
-Plans are dispatched on problem structure:
+Plans are dispatched on graph structure:
 
 - **RMSNorm/RoPE/GQA canonicalization** for graphs with typed RMSNorm-scale or
   GQA + RoPE circuit constraints: RMSNorm
@@ -50,7 +50,7 @@ from .convnet import convnet_producer_scales, has_convnet_component
 from .dense import (
     DenseLayer,
     _canonicalize_degenerate,
-    _outgoing_scale_factors,
+    _outgoing_scales,
     _require_bool,
     _validate_degenerate_channels,
     compute_degenerate_mask,
@@ -83,11 +83,11 @@ class _DenseScalePlan:
     head_kernel_path: tuple[str, ...]
 
 
-def _dense_scale_plan(problem: SymmetryGraph) -> _DenseScalePlan:
+def _dense_scale_plan(graph: SymmetryGraph) -> _DenseScalePlan:
     """Validate and summarize the supported linear dense scale graph."""
 
-    tensors = problem.tensors
-    if not problem.group_order:
+    tensors = graph.tensors
+    if not graph.group_order:
         raise ValueError(
             "Scale canonicalization requires at least one hidden permutation group."
         )
@@ -95,10 +95,10 @@ def _dense_scale_plan(problem: SymmetryGraph) -> _DenseScalePlan:
     producer_kernel_ids: set[str] = set()
     previous_group: str | None = None
 
-    for group_id in problem.group_order:
+    for group_id in graph.group_order:
         out_bindings = [
             binding
-            for binding in problem.bindings_for_group(group_id)
+            for binding in graph.bindings_for_group(group_id)
             if binding.role == "out"
         ]
         kernel_ids = list(
@@ -168,7 +168,7 @@ def _dense_scale_plan(problem: SymmetryGraph) -> _DenseScalePlan:
             )
         in_bindings = [
             binding
-            for binding in problem.bindings_for_tensor(kernel_id)
+            for binding in graph.bindings_for_tensor(kernel_id)
             if binding.role == "in"
         ]
         in_binding: AxisBinding | None = None
@@ -203,11 +203,11 @@ def _dense_scale_plan(problem: SymmetryGraph) -> _DenseScalePlan:
         )
         previous_group = group_id
 
-    last_group = problem.group_order[-1]
+    last_group = graph.group_order[-1]
     head_ids = list(
         dict.fromkeys(
             binding.tensor_id
-            for binding in problem.bindings_for_group(last_group)
+            for binding in graph.bindings_for_group(last_group)
             if binding.role == "in"
             and binding.tensor_id not in producer_kernel_ids
             and len(tensors[binding.tensor_id].shape) == 2
@@ -279,10 +279,10 @@ def _group_scales(
             layer, epsilon=epsilon, include_bias_in_norm=include_bias_in_norm
         )
 
-        action_scales[site.group_id] = _outgoing_scale_factors(
+        action_scales[site.group_id] = _outgoing_scales(
             norms, mask, degenerate_channels="preserve"
         )
-        outgoing_scales[site.group_id] = _outgoing_scale_factors(
+        outgoing_scales[site.group_id] = _outgoing_scales(
             norms, mask, degenerate_channels=degenerate_channels
         )
         reported_scales[site.group_id] = norms
@@ -360,7 +360,7 @@ def _balanced_group_scales(
 
 
 def _zero_degenerate_consumers(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
     params: ParamTree,
     degenerate_masks: Mapping[str, Any],
 ) -> ParamTree:
@@ -378,7 +378,7 @@ def _zero_degenerate_consumers(
             return segment
         return _multiply_axis(segment, active_masks[binding.group], axis=axis)
 
-    return problem._transform_bound_tensors(params, _mask)
+    return graph._transform_bound_tensors(params, _mask)
 
 
 def _canonicalize_degenerate_producers(
@@ -405,35 +405,38 @@ class ScaleCanonicalizer:
 
     def canonicalize(
         self,
-        problem: SymmetryGraph,
+        graph: SymmetryGraph,
         params: ParamTree,
-        **method_kwargs: Any,
+        **canonicalizer_kwargs: Any,
     ) -> tuple[ParamTree, dict[str, Any], dict[str, Any]]:
         """Return ``(canonical_params, scales, diagnostics)`` for ``params``."""
 
-        method_kwargs = dict(method_kwargs)
-        epsilon = float(method_kwargs.pop("epsilon", 1e-8))
+        canonicalizer_kwargs = dict(canonicalizer_kwargs)
+        epsilon = float(canonicalizer_kwargs.pop("epsilon", 1e-8))
         degenerate_channels = _validate_degenerate_channels(
-            method_kwargs.pop("degenerate_channels", "preserve")
+            canonicalizer_kwargs.pop("degenerate_channels", "preserve")
         )
         include_bias_in_norm = _require_bool(
-            "include_bias_in_norm", method_kwargs.pop("include_bias_in_norm", True)
+            "include_bias_in_norm",
+            canonicalizer_kwargs.pop("include_bias_in_norm", True),
         )
-        activation = validate_activation(method_kwargs.pop("activation", "relu"), None)
-        strategy = method_kwargs.pop("strategy", None)
+        activation = validate_activation(
+            canonicalizer_kwargs.pop("activation", "relu"), None
+        )
+        strategy = canonicalizer_kwargs.pop("strategy", None)
         if strategy is not None and strategy not in ("balanced", "unit_norm"):
             raise ValueError(
                 f"Unknown canonicalize strategy {strategy!r}. Available: "
                 "balanced, unit_norm."
             )
-        if method_kwargs:
-            unexpected = next(iter(method_kwargs))
+        if canonicalizer_kwargs:
+            unexpected = next(iter(canonicalizer_kwargs))
             raise TypeError(
                 "ScaleCanonicalizer.canonicalize() got an unexpected keyword argument "
                 f"{unexpected!r}"
             )
 
-        if has_rmsnorm_gqa_rope_transformer_plan(problem):
+        if has_rmsnorm_gqa_rope_transformer_plan(graph):
             if strategy is not None:
                 raise ValueError(
                     "The RMSNorm/RoPE/GQA plan has one canonical form (gamma "
@@ -441,7 +444,7 @@ class ScaleCanonicalizer:
                     "option is undefined for it. Omit the option."
                 )
             return self._canonicalize_rmsnorm_gqa_rope_transformer(
-                problem,
+                graph,
                 params,
                 epsilon=epsilon,
                 degenerate_channels=degenerate_channels,
@@ -449,7 +452,7 @@ class ScaleCanonicalizer:
                 include_bias_in_norm=include_bias_in_norm,
             )
 
-        if mha_circuit_constraints(problem):
+        if mha_circuit_constraints(graph):
             if strategy == "unit_norm":
                 raise ValueError(
                     "strategy='unit_norm' is undefined for attention circuit "
@@ -458,7 +461,7 @@ class ScaleCanonicalizer:
                     "or omit the option."
                 )
             return self._canonicalize_attention_circuits(
-                problem,
+                graph,
                 params,
                 epsilon=epsilon,
                 include_bias_in_norm=include_bias_in_norm,
@@ -466,7 +469,7 @@ class ScaleCanonicalizer:
                 activation=activation,
             )
 
-        if has_convnet_component(problem):
+        if has_convnet_component(graph):
             if strategy == "balanced":
                 raise ValueError(
                     "strategy='balanced' is not implemented for conv-stack "
@@ -474,7 +477,7 @@ class ScaleCanonicalizer:
                     "producer energy. Use strategy='unit_norm' or omit the option."
                 )
             return self._canonicalize_convnet(
-                problem,
+                graph,
                 params,
                 epsilon=epsilon,
                 include_bias_in_norm=include_bias_in_norm,
@@ -490,7 +493,7 @@ class ScaleCanonicalizer:
                 "architecture."
             )
         dense_strategy = strategy or "balanced"
-        plan = _dense_scale_plan(problem)
+        plan = _dense_scale_plan(graph)
         if dense_strategy == "balanced":
             action_scales, scales, degenerate_masks = _balanced_group_scales(
                 params,
@@ -506,14 +509,14 @@ class ScaleCanonicalizer:
                 degenerate_channels=degenerate_channels,
                 include_bias_in_norm=include_bias_in_norm,
             )
-        canonical_params = problem.apply_scales(
+        canonical_params = graph.apply_scales(
             params,
-            ScaleState.from_scales(problem, action_scales, backend="jax"),
+            ScaleState.from_scales(graph, action_scales, backend="jax"),
         )
 
         if degenerate_channels in ("zero_outgoing", "canonical_vector"):
             canonical_params = _zero_degenerate_consumers(
-                problem, canonical_params, degenerate_masks
+                graph, canonical_params, degenerate_masks
             )
         if degenerate_channels == "canonical_vector":
             canonical_params = _canonicalize_degenerate_producers(
@@ -532,7 +535,7 @@ class ScaleCanonicalizer:
 
     def _canonicalize_convnet(
         self,
-        problem: SymmetryGraph,
+        graph: SymmetryGraph,
         params: ParamTree,
         *,
         epsilon: float,
@@ -561,10 +564,10 @@ class ScaleCanonicalizer:
                 "kernel plus bias)."
             )
 
-        scales = convnet_producer_scales(problem, params, epsilon=epsilon)
-        canonical_params = problem.apply_scales(
+        scales = convnet_producer_scales(graph, params, epsilon=epsilon)
+        canonical_params = graph.apply_scales(
             params,
-            ScaleState.from_scales(problem, scales, backend="jax"),
+            ScaleState.from_scales(graph, scales, backend="jax"),
         )
         aux: dict[str, Any] = {
             "plan": "conv_producer_energy",
@@ -578,7 +581,7 @@ class ScaleCanonicalizer:
 
     def _canonicalize_rmsnorm_gqa_rope_transformer(
         self,
-        problem: SymmetryGraph,
+        graph: SymmetryGraph,
         params: ParamTree,
         *,
         epsilon: float,
@@ -602,22 +605,22 @@ class ScaleCanonicalizer:
                 "channels keep scale 1); use 'preserve'."
             )
 
-        gamma_scales = rms_gamma_scales(problem, params, epsilon=epsilon)
-        canonical = apply_rms_gamma_scales(problem, params, gamma_scales)
-        pair_scales = qk_pair_scales(problem, canonical, epsilon=epsilon)
-        vo_scales = gqa_vo_balancing_scales(problem, canonical, epsilon=epsilon)
+        gamma_scales = rms_gamma_scales(graph, params, epsilon=epsilon)
+        canonical = apply_rms_gamma_scales(graph, params, gamma_scales)
+        pair_scales = qk_pair_scales(graph, canonical, epsilon=epsilon)
+        vo_scales = gqa_vo_balancing_scales(graph, canonical, epsilon=epsilon)
         circuit_scales = {**pair_scales, **vo_scales}
         if circuit_scales:
-            canonical = problem.apply_scales(
+            canonical = graph.apply_scales(
                 canonical,
-                ScaleState.from_scales(problem, circuit_scales, backend="jax"),
+                ScaleState.from_scales(graph, circuit_scales, backend="jax"),
             )
 
         scales = {
             **gamma_scales,
             **{
                 group_id: circuit_scales[group_id]
-                for group_id in problem.group_order
+                for group_id in graph.group_order
                 if group_id in circuit_scales
             },
         }
@@ -630,17 +633,17 @@ class ScaleCanonicalizer:
             "activation": activation,
             "rmsnorm_scales": sorted(gamma_scales),
             "balanced_qk_groups": [
-                gid for gid in problem.group_order if gid in pair_scales
+                gid for gid in graph.group_order if gid in pair_scales
             ],
             "balanced_vo_groups": [
-                gid for gid in problem.group_order if gid in vo_scales
+                gid for gid in graph.group_order if gid in vo_scales
             ],
         }
         return canonical, scales, aux
 
     def _canonicalize_attention_circuits(
         self,
-        problem: SymmetryGraph,
+        graph: SymmetryGraph,
         params: ParamTree,
         *,
         epsilon: float,
@@ -658,14 +661,14 @@ class ScaleCanonicalizer:
             )
 
         scales = attention_balancing_scales(
-            problem,
+            graph,
             params,
             epsilon=epsilon,
             include_bias_in_norm=include_bias_in_norm,
         )
-        canonical_params = problem.apply_scales(
+        canonical_params = graph.apply_scales(
             params,
-            ScaleState.from_scales(problem, scales, backend="jax"),
+            ScaleState.from_scales(graph, scales, backend="jax"),
         )
         aux: dict[str, Any] = {
             "plan": "attention_balance",
@@ -675,12 +678,12 @@ class ScaleCanonicalizer:
             "include_bias_in_norm": include_bias_in_norm,
             "activation": activation,
             "balanced_groups": [
-                group_id for group_id in problem.group_order if group_id in scales
+                group_id for group_id in graph.group_order if group_id in scales
             ],
         }
         ordered_scales = {
             group_id: scales[group_id]
-            for group_id in problem.group_order
+            for group_id in graph.group_order
             if group_id in scales
         }
         return canonical_params, ordered_scales, aux

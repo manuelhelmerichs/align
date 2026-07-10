@@ -48,7 +48,7 @@ def estimate_diag_fisher_tree(
 
 
 def estimate_diag_fisher_weights(
-    problem,
+    graph,
     params: Mapping[str, Any],
     apply_fn: Callable[[Mapping[str, Any], jax.Array], jax.Array],
     inputs: jax.Array,
@@ -56,7 +56,7 @@ def estimate_diag_fisher_weights(
     damping: float = 1.0,
     normalize: bool = True,
 ) -> dict[str, np.ndarray]:
-    """Per-tensor diagonal Fisher weights for ``problem``'s tensors.
+    """Per-tensor diagonal Fisher weights for ``graph`` tensors.
 
     ``damping`` adds ``damping * mean(F)`` to every coordinate, interpolating
     between pure Fisher geometry (``damping -> 0``) and plain L2
@@ -76,7 +76,7 @@ def estimate_diag_fisher_weights(
     fisher_tree = estimate_diag_fisher_tree(params, apply_fn, inputs)
     weights = {
         tensor_id: np.asarray(_descend(fisher_tree, spec.path), dtype=np.float64)
-        for tensor_id, spec in problem.tensors.items()
+        for tensor_id, spec in graph.tensors.items()
     }
     flat = np.concatenate([np.ravel(value) for value in weights.values()])
     mean_fisher = float(np.mean(flat))
@@ -113,7 +113,7 @@ def load_tensor_weights_npz(path: str | Path) -> dict[str, np.ndarray]:
 def resolve_calibration_kwargs(
     objective_kwargs: Mapping[str, Any] | None,
     *,
-    problem,
+    graph,
     params: Mapping[str, Any],
     apply_fn: Callable[[Mapping[str, Any], jax.Array], jax.Array] | None,
     inputs: jax.Array | None,
@@ -140,7 +140,7 @@ def resolve_calibration_kwargs(
             "'weights_path' instead."
         )
     kwargs["tensor_weights"] = estimate_diag_fisher_weights(
-        problem, params, apply_fn, inputs, damping=damping
+        graph, params, apply_fn, inputs, damping=damping
     )
     return kwargs
 

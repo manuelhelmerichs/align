@@ -60,7 +60,7 @@ def reference_stability_diagnostic(
     *,
     previous_samples: Callable[[], Iterable[WeightSample]],
     current_samples: Callable[[], Iterable[WeightSample]],
-    problem,
+    graph,
     solvers: Sequence[Mapping[str, Any]] | Sequence[Any],
     previous_pass: int,
     current_pass: int,
@@ -83,14 +83,14 @@ def reference_stability_diagnostic(
     # objective (e.g. diagonal_fisher): here we want the geometric movement of canonical
     # positions between passes, not an objective-weighted distance.
     _, frame, _ = match_sample(
-        problem,
+        graph,
         previous_mean.params,
         current_mean.params,
         objective="euclidean",
         schedule=solvers,
         rng_key=jax.random.PRNGKey(0),
     )
-    frame_state = TransformState.from_transforms(problem, frame)
+    frame_state = TransformState.from_transforms(graph, frame)
 
     shift_total = 0.0
     spread_total = 0.0
@@ -115,7 +115,7 @@ def reference_stability_diagnostic(
                 "Canonicalized clouds have different sample counts."
             ) from exc
 
-        moved = problem.apply_transforms(current.params, frame_state)
+        moved = graph.apply_transforms(current.params, frame_state)
         shift_total += _tree_distance(previous.params, moved)
         spread_total += _tree_distance(previous.params, previous_mean.params)
         count += 1

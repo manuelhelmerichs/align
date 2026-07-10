@@ -295,7 +295,7 @@ class _WorkerLoop:
 def _build_stage_executors(
     job: dict[str, Any],
     manifest: SampleManifest,
-    ref_sample: WeightSample,
+    reference_sample: WeightSample,
     match_reference: WeightSample | None = None,
 ):
     from .stages import CanonicalizeExecutor, MatchExecutor
@@ -344,19 +344,19 @@ def _build_stage_executors(
             (name, name_to_exec[name]) for name in stage_order if name in name_to_exec
         ]
 
-    ref_current = ref_sample
+    reference_current = reference_sample
     for name, executor in stages:
         stage_reference = (
             match_reference
             if name == "match" and match_reference is not None
-            else ref_current
+            else reference_current
         )
         executor.prepare(manifest, stage_reference)
         if name == "match":
-            ref_current = stage_reference
+            reference_current = stage_reference
         else:
-            ref_current = executor.reference_output(
-                manifest.reference_record, ref_current
+            reference_current = executor.reference_output(
+                manifest.reference_record, reference_current
             )
 
     return stages
@@ -373,7 +373,7 @@ def run_worker(job: dict[str, Any], command_queue, progress_queue) -> None:
     from .loaders import SampleLoader  # Imported after device visibility is set
 
     loader = SampleLoader(manifest)
-    ref_sample = loader.load_reference()
+    reference_sample = loader.load_reference()
     match_reference = None
     reference_path = job.get("match_reference_path")
     if reference_path:
@@ -381,7 +381,7 @@ def run_worker(job: dict[str, Any], command_queue, progress_queue) -> None:
     stages = _build_stage_executors(
         job,
         manifest,
-        ref_sample,
+        reference_sample,
         match_reference=match_reference,
     )
 

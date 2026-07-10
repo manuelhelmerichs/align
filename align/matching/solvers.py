@@ -20,11 +20,11 @@ from .state import (
 )
 
 
-def _scheduled_groups(problem, step: SolverStep) -> tuple[str, ...]:
+def _scheduled_groups(graph, step: SolverStep) -> tuple[str, ...]:
     if step.components is not None:
-        return groups_for_components(problem, step.components)
-    groups = step.groups or problem.group_order
-    unknown = sorted(set(groups) - set(problem.groups))
+        return groups_for_components(graph, step.components)
+    groups = step.groups or graph.group_order
+    unknown = sorted(set(groups) - set(graph.groups))
     if unknown:
         raise ValueError("Schedule references unknown group(s): " + ", ".join(unknown))
     return tuple(groups)
@@ -76,7 +76,7 @@ def solve_orthogonal_maximize(cross: np.ndarray) -> np.ndarray:
 
 
 def update_group_transform(
-    problem, objective, ref_data, target_data, state, group_id: str
+    graph, objective, reference_data, target_data, state, group_id: str
 ):
     """One exact coordinate update of a group within its declared class.
 
@@ -89,9 +89,9 @@ def update_group_transform(
     ``procrustes`` schedule step.
     """
 
-    group = problem.groups[group_id]
+    group = graph.groups[group_id]
     signed, invariant = objective.linearize_group_split(
-        problem, ref_data, target_data, state, group_id
+        graph, reference_data, target_data, state, group_id
     )
     signed = np.asarray(signed)
     invariant = np.asarray(invariant)
@@ -101,7 +101,7 @@ def update_group_transform(
         updated = solve_signed_lap_maximize(signed, invariant)
     elif group.transform_family == "rotation_pairs":
         updated = solve_rotation_pairs_maximize(signed)
-    else:  # pragma: no cover - guarded by problem validation
+    else:  # pragma: no cover - guarded by graph validation
         raise ValueError(f"Unknown group transform family {group.transform_family!r}.")
     previous = as_permutation_matrix(
         state.matrices[group_id], size=group.size, dtype=np.float64
@@ -118,9 +118,9 @@ class LAPGroupSolver:
     def __init__(self, objective) -> None:
         self.objective = objective
 
-    def update(self, problem, ref_data, target_data, state, group_id: str):
+    def update(self, graph, reference_data, target_data, state, group_id: str):
         state, delta = update_group_transform(
-            problem, self.objective, ref_data, target_data, state, group_id
+            graph, self.objective, reference_data, target_data, state, group_id
         )
         return state, {"delta": delta}
 
@@ -133,8 +133,8 @@ class ProcrustesGroupSolver:
     def __init__(self, objective) -> None:
         self.objective = objective
 
-    def update(self, problem, ref_data, target_data, state, group_id: str):
-        group = problem.groups[group_id]
+    def update(self, graph, reference_data, target_data, state, group_id: str):
+        group = graph.groups[group_id]
         if group.transform_family != "orthogonal":
             raise ValueError(
                 f"Group {group_id!r} declares transform family "
@@ -142,7 +142,7 @@ class ProcrustesGroupSolver:
                 "'orthogonal' groups."
             )
         signed, _ = self.objective.linearize_group_split(
-            problem, ref_data, target_data, state, group_id
+            graph, reference_data, target_data, state, group_id
         )
         updated = solve_orthogonal_maximize(np.asarray(signed))
         previous = as_permutation_matrix(
@@ -161,24 +161,24 @@ class SinkhornSolver:
         self.objective = objective
         self.step = step
 
-    def _groups(self, problem) -> tuple[str, ...]:
+    def _groups(self, graph) -> tuple[str, ...]:
         # Rotation-pair groups contain no non-trivial permutations, so the
         # doubly stochastic relaxation is not a valid symmetry relaxation for
         # them; their hard matrices stay fixed through Sinkhorn steps.
         return tuple(
             group_id
-            for group_id in _scheduled_groups(problem, self.step)
-            if problem.groups[group_id].transform_family != "rotation_pairs"
+            for group_id in _scheduled_groups(graph, self.step)
+            if graph.groups[group_id].transform_family != "rotation_pairs"
         )
 
     def _init_logits(
-        self, problem, state, *, batch_size: int, rng_key
+        self, graph, state, *, batch_size: int, rng_key
     ) -> dict[str, jnp.ndarray]:
-        groups = self._groups(problem)
+        groups = self._groups(graph)
         keys = jax.random.split(rng_key, len(groups))
         logits: dict[str, jnp.ndarray] = {}
         for key, group_id in zip(keys, groups, strict=True):
-            group = problem.groups[group_id]
+            group = graph.groups[group_id]
             base = jnp.asarray(
                 as_permutation_matrix(
                     state.matrices[group_id], size=group.size, dtype=np.float32
@@ -192,13 +192,11 @@ class SinkhornSolver:
             logits[group_id] = base + noise
         return logits
 
-    def solve(self, problem, ref_data, target_data, state, *, rng_key=None):
-        batch_size = _batch_size(problem, target_data)
+    def solve(self, graph, reference_data, target_data, state, *, rng_key=None):
+        batch_size = _batch_size(graph, target_data)
         rng_key = rng_key if rng_key is not None else jax.random.PRNGKey(0)
-        logits = self._init_logits(
-            problem, state, batch_size=batch_size, rng_key=rng_key
-        )
-        groups = self._groups(problem)
+        logits = self._init_logits(graph, state, batch_size=batch_size, rng_key=rng_key)
+        groups = self._groups(graph)
         optimizer = optax.adam(self.step.learning_rate)
         opt_state = optimizer.init(tuple(logits[gid] for gid in groups))
 
@@ -211,11 +209,13 @@ class SinkhornSolver:
             }
             matrices = dict(state.matrices)
             matrices.update(soft)
-            return TransformState(group_order=problem.group_order, matrices=matrices)
+            return TransformState(group_order=graph.group_order, matrices=matrices)
 
         def loss_fn(logit_tuple):
             soft_state = pack(logit_tuple)
-            values = self.objective.value(problem, ref_data, target_data, soft_state)
+            values = self.objective.value(
+                graph, reference_data, target_data, soft_state
+            )
             return jnp.sum(values), values
 
         value_and_grad = jax.value_and_grad(loss_fn, has_aux=True)
@@ -272,12 +272,12 @@ class SinkhornSolver:
         return output_state, aux
 
 
-def _batch_size(problem, target_data) -> int:
-    if not problem.tensors:
+def _batch_size(graph, target_data) -> int:
+    if not graph.tensors:
         return 1
-    first_id = next(iter(problem.tensors))
+    first_id = next(iter(graph.tensors))
     target = jnp.asarray(target_data[first_id])
-    expected = len(problem.tensors[first_id].shape)
+    expected = len(graph.tensors[first_id].shape)
     return int(target.shape[0]) if target.ndim == expected + 1 else 1
 
 

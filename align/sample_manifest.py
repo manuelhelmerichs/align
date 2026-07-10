@@ -197,8 +197,8 @@ class SampleManifest:
     samples_dir: Path
     tree_path: Path
     records: Sequence[SampleRecord]
-    ref_chain: int
-    ref_sample: int
+    reference_chain: int
+    reference_sample: int
     reference_index: int
     filters: Mapping[str, Any]
     sample_format: str = DEFAULT_SAMPLE_FORMAT
@@ -218,8 +218,8 @@ class SampleManifest:
             "tree_path": str(self.tree_path),
             "sample_format": self.sample_format,
             "records": [record.to_dict() for record in self.records],
-            "ref_chain": self.ref_chain,
-            "ref_sample": self.ref_sample,
+            "reference_chain": self.reference_chain,
+            "reference_sample": self.reference_sample,
             "reference_index": self.reference_index,
             "filters": dict(self.filters),
             "created_at": self.created_at,
@@ -229,8 +229,8 @@ class SampleManifest:
     def digest(self) -> str:
         payload = {
             "records": [record.relative_path for record in self.records],
-            "ref_chain": self.ref_chain,
-            "ref_sample": self.ref_sample,
+            "reference_chain": self.reference_chain,
+            "reference_sample": self.reference_sample,
             "sample_format": self.sample_format,
             "total": self.total,
         }
@@ -250,8 +250,8 @@ class SampleManifest:
             "total_samples": self.total,
             "sample_format": self.sample_format,
             "reference": {
-                "chain": self.ref_chain,
-                "sample": self.ref_sample,
+                "chain": self.reference_chain,
+                "sample": self.reference_sample,
                 "index": self.reference_index,
             },
             "filters": dict(self.filters),
@@ -333,8 +333,8 @@ class SampleManifest:
             samples_dir=Path(payload["samples_dir"]).resolve(),
             tree_path=Path(payload["tree_path"]).resolve(),
             records=[SampleRecord.from_dict(item) for item in payload["records"]],
-            ref_chain=int(payload["ref_chain"]),
-            ref_sample=int(payload["ref_sample"]),
+            reference_chain=int(payload["reference_chain"]),
+            reference_sample=int(payload["reference_sample"]),
             reference_index=int(payload["reference_index"]),
             filters=payload.get("filters", {}),
             sample_format=normalize_sample_format(str(payload["sample_format"])),
@@ -354,8 +354,8 @@ class SampleManifest:
         samples_per_chain: int | None = None,
         sample_step: int = 1,
         max_total: int | None = None,
-        ref_chain: int = 0,
-        ref_sample: int = 0,
+        reference_chain: int = 0,
+        reference_sample: int = 0,
         sample_format: str = DEFAULT_SAMPLE_FORMAT,
     ) -> SampleManifest:
         samples_dir = Path(samples_dir).resolve()
@@ -382,7 +382,7 @@ class SampleManifest:
                     relative_path=file_path.relative_to(samples_dir).as_posix(),
                 )
                 records.append(record)
-                if chain_id == ref_chain and sample_id == ref_sample:
+                if chain_id == reference_chain and sample_id == reference_sample:
                     reference_index = record.index
                 loaded += 1
                 if max_total is not None and len(records) >= max_total:
@@ -402,8 +402,8 @@ class SampleManifest:
             samples_dir=samples_dir,
             tree_path=tree_path,
             records=records,
-            ref_chain=ref_chain,
-            ref_sample=ref_sample,
+            reference_chain=reference_chain,
+            reference_sample=reference_sample,
             reference_index=reference_index,
             filters={
                 "chain_indices": sorted(chain_filter) if chain_filter else None,

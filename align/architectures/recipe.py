@@ -3,10 +3,10 @@
 An :class:`ArchitectureRecipe` is a thin *recipe*: it discovers where components
 live in a parameter tree and composes
 :class:`~align.architectures.rules.SymmetryRule` instances, which perform all
-problem construction through a shared
+graph construction through a shared
 :class:`~align.architectures.graph_builder.SymmetryGraphBuilder`. The resulting
 :class:`~align.symmetry.SymmetryGraph` is consumed by both the matching
-(permutation) and canonicalization (scale) stages. Concrete recipes live
+(matrix-transform) and canonicalization (scale) stages. Concrete recipes live
 alongside this module under ``align.architectures``.
 """
 
@@ -28,7 +28,7 @@ class ArchitectureRecipe(ABC):
 
     @abstractmethod
     def build_graph(self, params: Mapping[str, Any]):
-        """Return the graph-native alignment problem for ``params``."""
+        """Return the architecture-derived symmetry graph for ``params``."""
 
 
 _RECIPES: dict[str, type[ArchitectureRecipe]] = {}

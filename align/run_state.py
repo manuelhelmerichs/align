@@ -271,7 +271,7 @@ class RunState:
         if version != RUN_STATE_SCHEMA_VERSION:
             raise ValueError(
                 f"Unsupported run-state schema_version {version!r}; expected "
-                f"{RUN_STATE_SCHEMA_VERSION}. Version-1 state cannot be resumed."
+                f"{RUN_STATE_SCHEMA_VERSION}."
             )
         return cls(
             path=Path(path),

@@ -183,7 +183,7 @@ class CanonicalizeConfig:
         )
 
     @property
-    def method_kwargs(self) -> dict[str, Any]:
+    def canonicalizer_kwargs(self) -> dict[str, Any]:
         """Keyword arguments for :meth:`ScaleCanonicalizer.canonicalize`."""
 
         return {
@@ -248,7 +248,7 @@ class ObjectiveConfig:
 
 @dataclass
 class MatchConfig:
-    """Configuration for the match (permutation/transform) stage."""
+    """Configuration for the matrix-transform matching stage."""
 
     objective: ObjectiveConfig = field(default_factory=ObjectiveConfig)
     seed: int | None = None

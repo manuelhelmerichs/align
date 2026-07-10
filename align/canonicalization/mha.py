@@ -32,34 +32,34 @@ from ..symmetry.tensor_ops import _descend
 
 
 def mha_circuit_constraints(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
 ) -> tuple[MHACircuitConstraint, ...]:
     """Return the graph's MHA circuit constraints."""
 
     return tuple(
         constraint
-        for constraint in problem.constraints
+        for constraint in graph.constraints
         if isinstance(constraint, MHACircuitConstraint)
     )
 
 
 def _bias_energy(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
     params: Mapping[str, Any],
     kernel_tensor_id: str,
 ) -> jnp.ndarray | None:
     """Squared per-``(head, dim)`` bias energy for a q/k/v kernel, if present."""
 
-    kernel_path = problem.tensors[kernel_tensor_id].path
+    kernel_path = graph.tensors[kernel_tensor_id].path
     bias_path = (*kernel_path[:-1], "bias")
     bias_id = "/".join(bias_path)
-    if bias_id not in problem.tensors:
+    if bias_id not in graph.tensors:
         return None
     return jnp.square(jnp.asarray(_descend(params, bias_path)))
 
 
 def _projection_energy(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
     params: Mapping[str, Any],
     tensor_id: str,
     *,
@@ -67,17 +67,17 @@ def _projection_energy(
 ) -> jnp.ndarray:
     """Squared per-``(head, dim)`` energy of one q/k/v kernel (+ bias)."""
 
-    kernel = jnp.asarray(_descend(params, problem.tensors[tensor_id].path))
+    kernel = jnp.asarray(_descend(params, graph.tensors[tensor_id].path))
     energy = jnp.sum(jnp.square(kernel), axis=0)
     if include_bias_in_norm:
-        bias_energy = _bias_energy(problem, params, tensor_id)
+        bias_energy = _bias_energy(graph, params, tensor_id)
         if bias_energy is not None:
             energy = energy + bias_energy
     return energy
 
 
 def attention_balancing_scales(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
     params: Mapping[str, Any],
     *,
     epsilon: float = 1e-8,
@@ -94,30 +94,30 @@ def attention_balancing_scales(
     """
 
     scales: dict[str, jnp.ndarray] = {}
-    for constraint in mha_circuit_constraints(problem):
+    for constraint in mha_circuit_constraints(graph):
         tensor_ids = {
             role: getattr(constraint, role) for role in ("query", "key", "value", "out")
         }
         query_energy = _projection_energy(
-            problem,
+            graph,
             params,
             tensor_ids["query"],
             include_bias_in_norm=include_bias_in_norm,
         )
         key_energy = _projection_energy(
-            problem,
+            graph,
             params,
             tensor_ids["key"],
             include_bias_in_norm=include_bias_in_norm,
         )
         value_energy = _projection_energy(
-            problem,
+            graph,
             params,
             tensor_ids["value"],
             include_bias_in_norm=include_bias_in_norm,
         )
         out_kernel = jnp.asarray(
-            _descend(params, problem.tensors[tensor_ids["out"]].path)
+            _descend(params, graph.tensors[tensor_ids["out"]].path)
         )
         out_energy = jnp.sum(jnp.square(out_kernel), axis=-1)
 

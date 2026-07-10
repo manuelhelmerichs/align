@@ -92,7 +92,7 @@ def compute_incoming_norms(
     return jnp.sqrt(kernel_sq + bias_sq + epsilon)
 
 
-def _outgoing_scale_factors(
+def _outgoing_scales(
     norms: jnp.ndarray, degenerate_mask: jnp.ndarray, *, degenerate_channels: str
 ) -> jnp.ndarray:
     degenerate_channels = _validate_degenerate_channels(degenerate_channels)

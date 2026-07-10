@@ -1,4 +1,4 @@
-"""Shared problem accumulator used by component rules.
+"""Shared symmetry-graph accumulator used by component rules.
 
 A :class:`SymmetryGraphBuilder` collects groups, tensors, bindings, constraints, and
 component specs while component rules run, then assembles and validates the final
@@ -23,7 +23,7 @@ from ..symmetry.tensor_ops import _descend
 
 
 class SymmetryGraphBuilder:
-    """Accumulates one alignment problem across component rules."""
+    """Accumulates one symmetry graph across component rules."""
 
     def __init__(self, params: Mapping[str, Any], *, architecture: str) -> None:
         self.params = params
@@ -114,11 +114,11 @@ class SymmetryGraphBuilder:
         return component
 
     def finish(self) -> SymmetryGraph:
-        """Assemble and validate the accumulated problem."""
+        """Assemble and validate the accumulated graph."""
 
         metadata = dict(self.metadata)
         metadata.setdefault("group_order", list(self.group_order))
-        problem = SymmetryGraph(
+        graph = SymmetryGraph(
             groups=self.groups,
             tensors=self.tensors,
             axis_bindings=tuple(self.bindings),
@@ -126,8 +126,8 @@ class SymmetryGraphBuilder:
             components=self.components,
             metadata=metadata,
         )
-        problem.validate(self.params)
-        return problem
+        graph.validate(self.params)
+        return graph
 
 
 __all__ = ["SymmetryGraphBuilder"]

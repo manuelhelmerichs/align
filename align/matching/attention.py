@@ -41,7 +41,7 @@ class AttentionModuleSpec:
 
     @classmethod
     def from_constraint(
-        cls, problem, constraint: MHACircuitConstraint
+        cls, graph, constraint: MHACircuitConstraint
     ) -> AttentionModuleSpec:
         head_group = constraint.head_group
         qk_groups = constraint.qk_groups
@@ -54,8 +54,8 @@ class AttentionModuleSpec:
             key=constraint.key,
             value=constraint.value,
             out=constraint.out,
-            num_heads=int(problem.groups[head_group].size),
-            head_dim=int(problem.groups[qk_groups[0]].size),
+            num_heads=int(graph.groups[head_group].size),
+            head_dim=int(graph.groups[qk_groups[0]].size),
         )
 
     @property
@@ -63,28 +63,28 @@ class AttentionModuleSpec:
         return (self.head_group, *self.qk_groups, *self.vo_groups)
 
 
-def attention_module_specs(problem) -> tuple[AttentionModuleSpec, ...]:
-    """Return specs for every MHA circuit constraint of ``problem``."""
+def attention_module_specs(graph) -> tuple[AttentionModuleSpec, ...]:
+    """Return specs for every MHA circuit constraint in ``graph``."""
 
     return tuple(
-        AttentionModuleSpec.from_constraint(problem, constraint)
-        for constraint in problem.constraints
+        AttentionModuleSpec.from_constraint(graph, constraint)
+        for constraint in graph.constraints
         if isinstance(constraint, MHACircuitConstraint)
     )
 
 
-def _head_matrices(problem, spec, tensor_id: str, tensor) -> np.ndarray:
+def _head_matrices(graph, spec, tensor_id: str, tensor) -> np.ndarray:
     """Return per-head matrices ``(H, other, dk)`` for one q/k/v/out tensor.
 
     ``other`` collects the remaining axes (the stream axis for the bayesmates
     layout); ``dk`` is the intra-head axis bound by the module's qk/vo groups.
     """
 
-    shape = problem.tensors[tensor_id].shape
+    shape = graph.tensors[tensor_id].shape
     head_axis = None
     intra_axis = None
     intra_groups = {*spec.qk_groups, *spec.vo_groups}
-    for binding in problem.bindings_for_tensor(tensor_id):
+    for binding in graph.bindings_for_tensor(tensor_id):
         axis, _, _ = binding_axis_interval(shape, binding)
         if binding.group == spec.head_group:
             head_axis = axis
@@ -101,7 +101,7 @@ def _head_matrices(problem, spec, tensor_id: str, tensor) -> np.ndarray:
 
 
 def _circuits(
-    problem, spec, data, *, state=None, skip_groups: set[str] | None = None
+    graph, spec, data, *, state=None, skip_groups: set[str] | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return stacked QK and OV circuit matrices, one pair per head."""
 
@@ -110,9 +110,9 @@ def _circuits(
         tensor = data[tensor_id]
         if state is not None:
             tensor = _apply_other_groups_hard(
-                problem, tensor_id, tensor, state, skip_groups or set()
+                graph, tensor_id, tensor, state, skip_groups or set()
             )
-        tensors[tensor_id] = _head_matrices(problem, spec, tensor_id, tensor)
+        tensors[tensor_id] = _head_matrices(graph, spec, tensor_id, tensor)
 
     query, key = tensors[spec.query], tensors[spec.key]
     value, out = tensors[spec.value], tensors[spec.out]
@@ -122,7 +122,7 @@ def _circuits(
 
 
 def head_cost_matrix(
-    problem, ref_data, target_data, state, spec: AttentionModuleSpec
+    graph, reference_data, target_data, state, spec: AttentionModuleSpec
 ) -> np.ndarray:
     """Circuit-distance cost of assigning target head ``j`` to ref slot ``i``.
 
@@ -131,9 +131,9 @@ def head_cost_matrix(
     exact because circuit costs are invariant to intra-head permutations.
     """
 
-    ref_qk, ref_ov = _circuits(problem, spec, ref_data)
+    ref_qk, ref_ov = _circuits(graph, spec, reference_data)
     target_qk, target_ov = _circuits(
-        problem,
+        graph,
         spec,
         target_data,
         state=state,
@@ -153,9 +153,9 @@ def head_cost_matrix(
 
 
 def update_attention_module(
-    problem,
+    graph,
     objective,
-    ref_data,
+    reference_data,
     target_data,
     state: TransformState,
     spec: AttentionModuleSpec,
@@ -172,7 +172,7 @@ def update_attention_module(
 
     from .solvers import update_group_transform
 
-    cost = head_cost_matrix(problem, ref_data, target_data, state, spec)
+    cost = head_cost_matrix(graph, reference_data, target_data, state, spec)
     row_ind, col_ind = linear_sum_assignment(cost)
     head_matrix = np.zeros((spec.num_heads, spec.num_heads), dtype=np.float64)
     head_matrix[row_ind, col_ind] = 1.0
@@ -190,7 +190,7 @@ def update_attention_module(
     ]
     for group_id in intra_groups:
         state, group_delta = update_group_transform(
-            problem, objective, ref_data, target_data, state, group_id
+            graph, objective, reference_data, target_data, state, group_id
         )
         delta = max(delta, group_delta)
 
@@ -229,7 +229,7 @@ class GQAModuleSpec:
 
     @classmethod
     def from_constraint(
-        cls, problem, constraint: GQARoPECircuitConstraint
+        cls, graph, constraint: GQARoPECircuitConstraint
     ) -> GQAModuleSpec:
         return cls(
             kv_group=constraint.kv_group,
@@ -255,18 +255,18 @@ class GQAModuleSpec:
         )
 
 
-def gqa_module_specs(problem) -> tuple[GQAModuleSpec, ...]:
-    """Return specs for every GQA + RoPE circuit constraint of ``problem``."""
+def gqa_module_specs(graph) -> tuple[GQAModuleSpec, ...]:
+    """Return specs for every GQA + RoPE circuit constraint in ``graph``."""
 
     return tuple(
-        GQAModuleSpec.from_constraint(problem, constraint)
-        for constraint in problem.constraints
+        GQAModuleSpec.from_constraint(graph, constraint)
+        for constraint in graph.constraints
         if isinstance(constraint, GQARoPECircuitConstraint)
     )
 
 
 def _gqa_circuits(
-    problem, spec: GQAModuleSpec, data, *, state=None, skip_groups=None
+    graph, spec: GQAModuleSpec, data, *, state=None, skip_groups=None
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-query-head QK and OV circuit matrices, shape ``(G, R, d, d)``.
 
@@ -282,7 +282,7 @@ def _gqa_circuits(
         tensor = data[tensor_id]
         if state is not None:
             tensor = _apply_other_groups_hard(
-                problem, tensor_id, tensor, state, skip_groups or set()
+                graph, tensor_id, tensor, state, skip_groups or set()
             )
         tensors[tensor_id] = np.asarray(tensor)
 
@@ -296,7 +296,7 @@ def _gqa_circuits(
 
 
 def gqa_head_cost_matrix(
-    problem, ref_data, target_data, state, spec: GQAModuleSpec
+    graph, reference_data, target_data, state, spec: GQAModuleSpec
 ) -> tuple[np.ndarray, np.ndarray]:
     """Two-level circuit cost of assigning target kv group ``j`` to ref slot ``i``.
 
@@ -308,9 +308,9 @@ def gqa_head_cost_matrix(
     because circuit costs are invariant to the unresolved intra transform_family.
     """
 
-    ref_qk, ref_ov = _gqa_circuits(problem, spec, ref_data)
+    ref_qk, ref_ov = _gqa_circuits(graph, spec, reference_data)
     target_qk, target_ov = _gqa_circuits(
-        problem,
+        graph,
         spec,
         target_data,
         state=state,
@@ -337,9 +337,9 @@ def gqa_head_cost_matrix(
 
 
 def update_gqa_attention_module(
-    problem,
+    graph,
     objective,
-    ref_data,
+    reference_data,
     target_data,
     state: TransformState,
     spec: GQAModuleSpec,
@@ -358,7 +358,7 @@ def update_gqa_attention_module(
 
     from .solvers import update_group_transform
 
-    cost, _ = gqa_head_cost_matrix(problem, ref_data, target_data, state, spec)
+    cost, _ = gqa_head_cost_matrix(graph, reference_data, target_data, state, spec)
     row_ind, col_ind = linear_sum_assignment(cost)
     kv_matrix = np.zeros_like(cost)
     kv_matrix[row_ind, col_ind] = 1.0
@@ -376,7 +376,7 @@ def update_gqa_attention_module(
     ]
     for group_id in intra_groups:
         state, group_delta = update_group_transform(
-            problem, objective, ref_data, target_data, state, group_id
+            graph, objective, reference_data, target_data, state, group_id
         )
         delta = max(delta, group_delta)
 

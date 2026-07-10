@@ -54,34 +54,34 @@ from ._tree import replace_paths
 
 
 def rmsnorm_scale_constraints(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
 ) -> tuple[RMSNormScaleConstraint, ...]:
     """Return the graph's RMSNorm scale constraints."""
 
     return tuple(
         constraint
-        for constraint in problem.constraints
+        for constraint in graph.constraints
         if isinstance(constraint, RMSNormScaleConstraint)
     )
 
 
 def gqa_rope_circuit_constraints(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
 ) -> tuple[GQARoPECircuitConstraint, ...]:
     """Return the graph's GQA + RoPE circuit constraints."""
 
     return tuple(
         constraint
-        for constraint in problem.constraints
+        for constraint in graph.constraints
         if isinstance(constraint, GQARoPECircuitConstraint)
     )
 
 
-def has_rmsnorm_gqa_rope_transformer_plan(problem: SymmetryGraph) -> bool:
-    """True if the problem carries RMSNorm or GQA attention constraints."""
+def has_rmsnorm_gqa_rope_transformer_plan(graph: SymmetryGraph) -> bool:
+    """True if the graph carries RMSNorm or GQA attention constraints."""
 
-    return bool(rmsnorm_scale_constraints(problem)) or bool(
-        gqa_rope_circuit_constraints(problem)
+    return bool(rmsnorm_scale_constraints(graph)) or bool(
+        gqa_rope_circuit_constraints(graph)
     )
 
 
@@ -93,7 +93,7 @@ def _multiply_axis(tensor: Any, factors: Any, *, axis: int) -> Any:
 
 
 def rms_gamma_scales(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
     params: Mapping[str, Any],
     *,
     epsilon: float = 1e-8,
@@ -108,9 +108,9 @@ def rms_gamma_scales(
     """
 
     scales: dict[str, jnp.ndarray] = {}
-    for constraint in rmsnorm_scale_constraints(problem):
+    for constraint in rmsnorm_scale_constraints(graph):
         scale_id = constraint.scale
-        gamma = jnp.asarray(_descend(params, problem.tensors[scale_id].path))
+        gamma = jnp.asarray(_descend(params, graph.tensors[scale_id].path))
         energy = jnp.square(gamma)
         signs = jnp.where(gamma < 0.0, -1.0, 1.0)
         scales[scale_id] = jnp.where(
@@ -120,7 +120,7 @@ def rms_gamma_scales(
 
 
 def apply_rms_gamma_scales(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
     params: Mapping[str, Any],
     scales: Mapping[str, Any],
 ) -> Mapping[str, Any]:
@@ -132,16 +132,16 @@ def apply_rms_gamma_scales(
     """
 
     replacements: list[tuple[tuple[str, ...], Any]] = []
-    for constraint in rmsnorm_scale_constraints(problem):
+    for constraint in rmsnorm_scale_constraints(graph):
         scale_id = constraint.scale
         if scale_id not in scales:
             continue
         factors = jnp.asarray(scales[scale_id])
-        gamma_path = problem.tensors[scale_id].path
+        gamma_path = graph.tensors[scale_id].path
         gamma = jnp.asarray(_descend(params, gamma_path))
         replacements.append((gamma_path, gamma / factors))
         for tensor_id, axis in constraint.consumers:
-            path = problem.tensors[str(tensor_id)].path
+            path = graph.tensors[str(tensor_id)].path
             tensor = jnp.asarray(_descend(params, path))
             replacements.append((path, _multiply_axis(tensor, factors, axis=int(axis))))
     return replace_paths(params, replacements) if replacements else params
@@ -154,7 +154,7 @@ def _pair_tiled(factors: jnp.ndarray) -> jnp.ndarray:
 
 
 def qk_pair_scales(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
     params: Mapping[str, Any],
     *,
     epsilon: float = 1e-8,
@@ -170,13 +170,13 @@ def qk_pair_scales(
     """
 
     scales: dict[str, jnp.ndarray] = {}
-    for constraint in gqa_rope_circuit_constraints(problem):
+    for constraint in gqa_rope_circuit_constraints(graph):
         tensors = {
             role: getattr(constraint, role) for role in ("query", "key", "value", "out")
         }
         half = constraint.head_dim // 2
-        query = jnp.asarray(_descend(params, problem.tensors[tensors["query"]].path))
-        key = jnp.asarray(_descend(params, problem.tensors[tensors["key"]].path))
+        query = jnp.asarray(_descend(params, graph.tensors[tensors["query"]].path))
+        key = jnp.asarray(_descend(params, graph.tensors[tensors["key"]].path))
         query_sq = jnp.square(query)
         key_sq = jnp.square(key)
         # (d, G, R, dk) -> (G, dk/2); (d, G, dk) -> (G, dk/2)
@@ -189,7 +189,7 @@ def qk_pair_scales(
 
 
 def gqa_vo_balancing_scales(
-    problem: SymmetryGraph,
+    graph: SymmetryGraph,
     params: Mapping[str, Any],
     *,
     epsilon: float = 1e-8,
@@ -205,12 +205,12 @@ def gqa_vo_balancing_scales(
     """
 
     scales: dict[str, jnp.ndarray] = {}
-    for constraint in gqa_rope_circuit_constraints(problem):
+    for constraint in gqa_rope_circuit_constraints(graph):
         tensors = {
             role: getattr(constraint, role) for role in ("query", "key", "value", "out")
         }
-        value = jnp.asarray(_descend(params, problem.tensors[tensors["value"]].path))
-        out = jnp.asarray(_descend(params, problem.tensors[tensors["out"]].path))
+        value = jnp.asarray(_descend(params, graph.tensors[tensors["value"]].path))
+        out = jnp.asarray(_descend(params, graph.tensors[tensors["out"]].path))
         value_energy = jnp.sum(jnp.square(value), axis=0)  # (G, dk)
         out_energy = jnp.sum(jnp.square(out), axis=(1, 3))  # (G, dk)
         factors = ((value_energy + epsilon) / (out_energy + epsilon)) ** 0.25
