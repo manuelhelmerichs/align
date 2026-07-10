@@ -687,7 +687,7 @@ def load_experiment_posterior_case(
 
 
 def _normalize_tree(problem: SymmetryGraph, params: ParamTree) -> ParamTree:
-    normalized, _, _ = ScaleCanonicalizer().normalize(
+    normalized, _, _ = ScaleCanonicalizer().canonicalize(
         problem,
         params,
         task_type="regression",

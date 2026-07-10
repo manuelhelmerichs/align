@@ -990,7 +990,7 @@ def make_modern_transformer_orthogonal_orbit_case(seed: int = 0) -> SyntheticOrb
     base = make_modern_transformer_params(key=param_key)
     adapter = RMSNormGQARoPETransformerRecipe(stream_transform_family="orthogonal")
     problem = adapter.build_problem(base)
-    reference, _, _ = ScaleCanonicalizer().normalize(
+    reference, _, _ = ScaleCanonicalizer().canonicalize(
         problem, base, task_type="regression"
     )
 
@@ -1281,7 +1281,7 @@ def make_split_concat_conv_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
     }
     target = problem.apply(
         reference,
-        TransformState(group_order=problem.group_order, hard=forward_perms),
+        TransformState(group_order=problem.group_order, matrices=forward_perms),
     )
     inputs = jax.random.normal(input_key, (9, 3, 3, input_channels), dtype=jnp.float32)
 
@@ -1376,7 +1376,7 @@ def _normalize_if_requested(
 ) -> ParamTree:
     if not normalize:
         return params
-    normalized, _, _ = ScaleCanonicalizer().normalize(
+    normalized, _, _ = ScaleCanonicalizer().canonicalize(
         case.problem,
         params,
         task_type="regression",

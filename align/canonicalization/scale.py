@@ -433,7 +433,7 @@ def _rescale_classification_head(
 class ScaleCanonicalizer:
     """Deterministic graph-native scale canonicalization."""
 
-    def normalize(
+    def canonicalize(
         self,
         problem: SymmetryGraph,
         params: ParamTree,
@@ -469,7 +469,7 @@ class ScaleCanonicalizer:
         if method_kwargs:
             unexpected = next(iter(method_kwargs))
             raise TypeError(
-                "ScaleCanonicalizer.normalize() got an unexpected keyword argument "
+                "ScaleCanonicalizer.canonicalize() got an unexpected keyword argument "
                 f"{unexpected!r}"
             )
 

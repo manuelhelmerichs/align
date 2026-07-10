@@ -92,10 +92,15 @@ def sinkhorn_operator(
 
 @dataclass
 class TransformState:
-    """Solver state keyed by permutation group id."""
+    """Solver state keyed by symmetry group id.
+
+    ``matrices`` holds one hard group transform per group (a permutation,
+    signed permutation, rotation-pair block, or orthogonal matrix); ``logits``
+    optionally carries the Sinkhorn relaxation's pre-projection parameters.
+    """
 
     group_order: tuple[str, ...]
-    hard: dict[str, Any]
+    matrices: dict[str, Any]
     logits: dict[str, jnp.ndarray] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -108,31 +113,31 @@ class TransformState:
         dtype=np.float32,
     ) -> TransformState:
         eye = jnp.eye if backend == "jax" else np.eye
-        hard = {
+        matrices = {
             group_id: eye(group.size, dtype=dtype)
             for group_id, group in problem.groups.items()
         }
-        return cls(group_order=problem.group_order, hard=hard)
+        return cls(group_order=problem.group_order, matrices=matrices)
 
     @classmethod
     def from_transforms(
         cls,
         problem,
-        perms: Mapping[str, Any],
+        transforms: Mapping[str, Any],
         *,
         backend: Literal["jax", "numpy"] = "numpy",
     ) -> TransformState:
         """Build a hard state, defaulting unspecified groups to identity."""
 
         state = cls.identity(problem, backend=backend)
-        return state.with_hard(perms)
+        return state.with_matrices(transforms)
 
-    def with_hard(self, updates: Mapping[str, Any]) -> TransformState:
-        hard = dict(self.hard)
-        hard.update(dict(updates))
+    def with_matrices(self, updates: Mapping[str, Any]) -> TransformState:
+        matrices = dict(self.matrices)
+        matrices.update(dict(updates))
         return TransformState(
             group_order=self.group_order,
-            hard=hard,
+            matrices=matrices,
             logits=self.logits,
             metadata=dict(self.metadata),
         )
@@ -140,7 +145,7 @@ class TransformState:
     def with_logits(self, logits: Mapping[str, jnp.ndarray]) -> TransformState:
         return TransformState(
             group_order=self.group_order,
-            hard=dict(self.hard),
+            matrices=dict(self.matrices),
             logits=dict(logits),
             metadata=dict(self.metadata),
         )
@@ -156,7 +161,9 @@ class TransformState:
         return {
             gid: sinkhorn_operator(logits[gid], tau=tau, n_iters=n_iters)
             if gid in logits
-            else jnp.asarray(as_permutation_matrix(self.hard[gid], dtype=np.float32))
+            else jnp.asarray(
+                as_permutation_matrix(self.matrices[gid], dtype=np.float32)
+            )
             for gid in self.group_order
         }
 
@@ -166,7 +173,7 @@ class TransformState:
         """Convert current matrices or projected logits to hard permutations.
 
         ``groups`` restricts hardening to the listed groups; others keep
-        their current hard matrices untouched. Solvers that relax only the
+        their current matrices untouched. Solvers that relax only the
         permutation-capable groups must pass their group subset so
         rotation/orthogonal matrices held by other groups are not projected
         onto permutations.
@@ -174,18 +181,18 @@ class TransformState:
 
         if method.lower() != "hungarian":
             raise ValueError(f"Unsupported hardening method {method!r}.")
-        matrices = self.soft() if self.logits is not None else self.hard
+        source = self.soft() if self.logits is not None else self.matrices
         selected = set(self.group_order if groups is None else groups)
-        hard: dict[str, Any] = {}
+        hardened: dict[str, Any] = {}
         for group_id in self.group_order:
             if group_id not in selected:
-                hard[group_id] = self.hard[group_id]
+                hardened[group_id] = self.matrices[group_id]
                 continue
-            matrix = as_permutation_matrix(matrices[group_id])
+            matrix = as_permutation_matrix(source[group_id])
             if matrix.ndim == 2:
-                hard[group_id] = solve_lap_maximize(matrix)
+                hardened[group_id] = solve_lap_maximize(matrix)
             elif matrix.ndim == 3:
-                hard[group_id] = np.stack(
+                hardened[group_id] = np.stack(
                     [solve_lap_maximize(matrix[idx]) for idx in range(matrix.shape[0])],
                     axis=0,
                 )
@@ -197,7 +204,7 @@ class TransformState:
         metadata["hardening_method"] = method.lower()
         return TransformState(
             group_order=self.group_order,
-            hard=hard,
+            matrices=hardened,
             logits=None,
             metadata=metadata,
         )
@@ -206,17 +213,19 @@ class TransformState:
         """Validate shapes, group keys, and optionally hard-transform constraints.
 
         With ``hard=True`` every matrix must be a hard member of its group's
-        declared transform class: a permutation, a signed permutation (its
+        declared transform family: a permutation, a signed permutation (its
         entrywise absolute value is a permutation), or an orthogonal matrix
         (rotation-pair and orthogonal groups).
         """
 
         if set(self.group_order) != set(problem.groups):
             raise ValueError("State group_order must contain exactly problem groups.")
-        if set(self.hard) != set(problem.groups):
-            raise ValueError("State hard mapping must contain exactly problem groups.")
+        if set(self.matrices) != set(problem.groups):
+            raise ValueError(
+                "State matrices mapping must contain exactly problem groups."
+            )
         for group_id, group in problem.groups.items():
-            value = np.asarray(self.hard[group_id])
+            value = np.asarray(self.matrices[group_id])
             if value.ndim == 1:
                 _validate_indices(value, group.size)
                 continue
@@ -258,22 +267,19 @@ class TransformState:
                         f"expected (..., {size}, {size})."
                     )
 
-    def to_artifacts(self, dtype_policy: str = "hard_uint8") -> dict[str, np.ndarray]:
-        """Serialize final hard transform_family keyed by group id.
+    def to_artifacts(self) -> dict[str, np.ndarray]:
+        """Serialize the final hard transforms keyed by group id.
 
         Plain permutation matrices are stored as compact ``uint8``; signed
         permutations, rotations, and orthogonal matrices (which are not
         binary) are stored as ``float32``. The distinction is content-based,
-        so artifacts stay self-describing.
+        so artifacts stay self-describing and every transform family
+        round-trips exactly through :func:`align.artifacts.write_transforms_artifact`.
         """
 
-        if dtype_policy != "hard_uint8":
-            raise ValueError(
-                f"Unsupported permutation artifact policy {dtype_policy!r}."
-            )
         artifacts: dict[str, np.ndarray] = {}
         for group_id in self.group_order:
-            matrix = as_permutation_matrix(self.hard[group_id])
+            matrix = as_permutation_matrix(self.matrices[group_id])
             binary_error = float(
                 np.max(np.minimum(np.abs(matrix), np.abs(matrix - 1.0)))
             )

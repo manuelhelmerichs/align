@@ -135,7 +135,7 @@ def _apply_state_to_tensor(problem, tensor_id: str, tensor, state):
     for binding in _sorted_bindings(problem, tensor_id):
         tensor_is_batched = _is_batched_tensor(problem, tensor_id, updated)
         matrix = binding_transform_matrix(
-            state.hard[binding.group],
+            state.matrices[binding.group],
             transform_family=problem.groups[binding.group].transform_family,
             scope=binding.transform_scope,
         )
@@ -183,7 +183,7 @@ def _apply_other_groups_hard(
         if binding.group in skip_groups:
             continue
         matrix = binding_transform_matrix(
-            np.asarray(state.hard[binding.group]),
+            np.asarray(state.matrices[binding.group]),
             transform_family=problem.groups[binding.group].transform_family,
             scope=binding.transform_scope,
         )

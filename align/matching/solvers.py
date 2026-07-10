@@ -104,10 +104,10 @@ def update_group_transform(
     else:  # pragma: no cover - guarded by problem validation
         raise ValueError(f"Unknown group transform class {group.transform_family!r}.")
     previous = as_permutation_matrix(
-        state.hard[group_id], size=group.size, dtype=np.float64
+        state.matrices[group_id], size=group.size, dtype=np.float64
     )
     delta = float(np.max(np.abs(updated - previous)))
-    return state.with_hard({group_id: updated}), delta
+    return state.with_matrices({group_id: updated}), delta
 
 
 class LAPGroupSolver:
@@ -146,10 +146,10 @@ class ProcrustesGroupSolver:
         )
         updated = solve_orthogonal_maximize(np.asarray(signed))
         previous = as_permutation_matrix(
-            state.hard[group_id], size=group.size, dtype=np.float64
+            state.matrices[group_id], size=group.size, dtype=np.float64
         )
         delta = float(np.max(np.abs(updated - previous)))
-        return state.with_hard({group_id: updated}), {"delta": delta}
+        return state.with_matrices({group_id: updated}), {"delta": delta}
 
 
 class SinkhornSolver:
@@ -181,7 +181,7 @@ class SinkhornSolver:
             group = problem.groups[group_id]
             base = jnp.asarray(
                 as_permutation_matrix(
-                    state.hard[group_id], size=group.size, dtype=np.float32
+                    state.matrices[group_id], size=group.size, dtype=np.float32
                 )
             )
             if base.ndim == 2:
@@ -209,9 +209,9 @@ class SinkhornSolver:
                 )
                 for gid, logit in zip(groups, logit_tuple, strict=True)
             }
-            hard = dict(state.hard)
-            hard.update(soft)
-            return TransformState(group_order=problem.group_order, hard=hard)
+            matrices = dict(state.matrices)
+            matrices.update(soft)
+            return TransformState(group_order=problem.group_order, matrices=matrices)
 
         def loss_fn(logit_tuple):
             soft_state = pack(logit_tuple)

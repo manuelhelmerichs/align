@@ -91,7 +91,7 @@ class CanonicalizeExecutor(StageExecutor):
         self.adapter_kwargs = dict(adapter_kwargs)
         self.adapter = None
         self.problem = None
-        self.normalizer = None
+        self.canonicalizer = None
 
     def prepare(self, manifest: SampleManifest, ref_sample: WeightSample) -> None:
         from ..canonicalization import ScaleCanonicalizer
@@ -101,13 +101,13 @@ class CanonicalizeExecutor(StageExecutor):
             adapter_kwargs.setdefault("parameter_root", self.config.parameter_root)
         self.adapter = get_recipe(self.architecture, **adapter_kwargs)
         self.problem = self.adapter.build_problem(ref_sample.params)
-        self.normalizer = ScaleCanonicalizer()
+        self.canonicalizer = ScaleCanonicalizer()
 
     def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
-        if self.adapter is None or self.problem is None or self.normalizer is None:
+        if self.adapter is None or self.problem is None or self.canonicalizer is None:
             raise RuntimeError("CanonicalizeExecutor not prepared.")
 
-        normalized_params, scale_factors, aux = self.normalizer.normalize(
+        normalized_params, scale_factors, aux = self.canonicalizer.canonicalize(
             self.problem,
             sample.params,
             task_type=self.config.task_type,

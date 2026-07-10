@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Any
 
 from ..artifacts import (
     write_aux_artifact,
-    write_permutations_artifact,
     write_scale_factors_artifact,
+    write_transforms_artifact,
 )
 from ..state import SampleManifest, SampleRecord, _file_checksum
 from .pipeline import SampleAlignmentResult, StagePipeline
@@ -62,7 +62,7 @@ class _ArtifactWriter:
 
         perm_path = None
         if permutations is not None:
-            perm_path = write_permutations_artifact(
+            perm_path = write_transforms_artifact(
                 sample_dir / "permutations.npz",
                 permutations,
             )

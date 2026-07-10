@@ -9,8 +9,8 @@ from typing import Any
 import jax.numpy as jnp
 
 from ..artifacts import (
-    write_permutations_artifact,
     write_scale_factors_artifact,
+    write_transforms_artifact,
 )
 from ..samples import WeightSample, create_sample_codec
 from ..state import ArtifactChecksumStore, SampleManifest, SampleRecord, _file_checksum
@@ -264,7 +264,7 @@ class RunArtifactStore:
         path = self.artifact_paths(record).get("permutations")
         if path is None:
             return
-        perm_path = write_permutations_artifact(path, perms)
+        perm_path = write_transforms_artifact(path, perms)
         if perm_path is None:
             self._update_checksum(
                 record, kind="permutations", path=None, checksum_value=0

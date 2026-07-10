@@ -61,7 +61,6 @@ class TensorSpec:
     id: str
     path: tuple[str, ...]
     shape: tuple[int, ...]
-    dtype_role: str = "param"
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -684,7 +683,7 @@ class SymmetryGraph:
 
         def _transform(segment, axis, binding):
             matrix = binding_transform_matrix(
-                state.hard[binding.group],
+                state.matrices[binding.group],
                 transform_family=self.groups[binding.group].transform_family,
                 scope=binding.transform_scope,
             )

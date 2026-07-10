@@ -7,34 +7,31 @@ from typing import Any
 
 import numpy as np
 
-_HARD_PERMUTATION_DTYPE = np.dtype(np.uint8)
 
-
-def write_permutations_artifact(
+def write_transforms_artifact(
     path: str | Path,
-    perms: Sequence[Any] | Mapping[str, Any],
-    *,
-    dtype: np.dtype = _HARD_PERMUTATION_DTYPE,
+    transforms: Mapping[str, Any],
 ) -> Path | None:
-    """Persist final hard permutation matrices keyed by group id."""
+    """Persist final hard group transforms keyed by group id.
+
+    ``transforms`` is the self-describing mapping produced by
+    :meth:`align.matching.TransformState.to_artifacts`: plain permutations are
+    already compact ``uint8`` while signed permutations, rotation-pair blocks,
+    and orthogonal matrices are ``float32``. The matrices are stored verbatim —
+    unlike the retired permutation writer, nothing is thresholded to binary, so
+    every transform family round-trips exactly.
+    """
 
     path = Path(path)
-    if not perms:
+    if not transforms:
         if path.exists():
             path.unlink()
         return None
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload: dict[str, np.ndarray] = {}
-    if isinstance(perms, Mapping):
-        items = perms.items()
-    else:
-        items = [(f"P{idx + 1}", matrix) for idx, matrix in enumerate(perms)]
-
-    for key, matrix in items:
-        array = np.asarray(matrix)
-        encoded = (array > 0.5).astype(dtype, copy=False)
-        payload[str(key)] = encoded
+    payload = {
+        str(group_id): np.asarray(matrix) for group_id, matrix in transforms.items()
+    }
     np.savez_compressed(path, **payload)
     return path
 

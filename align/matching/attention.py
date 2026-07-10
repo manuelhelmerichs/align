@@ -174,10 +174,10 @@ def update_attention_module(
     head_matrix[row_ind, col_ind] = 1.0
 
     previous = as_permutation_matrix(
-        state.hard[spec.head_group], size=spec.num_heads, dtype=np.float64
+        state.matrices[spec.head_group], size=spec.num_heads, dtype=np.float64
     )
     delta = float(np.max(np.abs(head_matrix - previous)))
-    state = state.with_hard({spec.head_group: head_matrix})
+    state = state.with_matrices({spec.head_group: head_matrix})
 
     intra_groups = [
         group_id
@@ -360,10 +360,10 @@ def update_gqa_attention_module(
     kv_matrix[row_ind, col_ind] = 1.0
 
     previous = as_permutation_matrix(
-        state.hard[spec.kv_group], size=spec.num_kv_groups, dtype=np.float64
+        state.matrices[spec.kv_group], size=spec.num_kv_groups, dtype=np.float64
     )
     delta = float(np.max(np.abs(kv_matrix - previous)))
-    state = state.with_hard({spec.kv_group: kv_matrix})
+    state = state.with_matrices({spec.kv_group: kv_matrix})
 
     intra_groups = [
         group_id

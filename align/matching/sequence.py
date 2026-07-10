@@ -312,13 +312,13 @@ class SolverSequence:
 
 
 def _unbatch_state(state: TransformState, *, sample_index: int) -> TransformState:
-    hard = {}
-    for group_id, matrix in state.hard.items():
+    matrices = {}
+    for group_id, matrix in state.matrices.items():
         arr = np.asarray(matrix)
-        hard[group_id] = arr[sample_index] if arr.ndim == 3 else arr
+        matrices[group_id] = arr[sample_index] if arr.ndim == 3 else arr
     return TransformState(
         group_order=state.group_order,
-        hard=hard,
+        matrices=matrices,
         logits=None,
         metadata=dict(state.metadata),
     )

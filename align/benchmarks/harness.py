@@ -67,7 +67,7 @@ ORBIT_CASE_FACTORIES: dict[str, CaseFactory] = {
     "modern_transformer_orthogonal": make_modern_transformer_orthogonal_orbit_case,
 }
 
-# Cases whose scale symmetry the normalizer can remove before rebasin.
+# Cases whose scale symmetry the canonicalizer can remove before rebasin.
 _NORMALIZABLE_CASES = frozenset(
     {"dense_mlp", "frn_residual_conv", "transformer_scaled"}
 )
