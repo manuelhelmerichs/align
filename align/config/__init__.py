@@ -13,7 +13,6 @@ Configuration is split across submodules for maintainability:
 
 from .architecture import ArchitectureConfig
 from .loader import (
-    SCHEMA_VERSION,
     RunConfig,
     load_align_config,
     resolve_recipe_defaults,
@@ -27,7 +26,6 @@ from .selection import SelectionConfig
 from .stages import CanonicalizeConfig, MatchConfig, ObjectiveConfig, SolverStep
 
 __all__ = [
-    "SCHEMA_VERSION",
     "ArchitectureConfig",
     "SolverStep",
     "PathConfig",

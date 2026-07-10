@@ -23,14 +23,19 @@ from .loaders import SampleLoader
 from .parallel import WorkerPool
 from .pipeline import SampleAlignmentResult, StagePipeline
 from .resources import (
-    _LOG_SAMPLE_INTERVAL,
-    _LOG_TIME_INTERVAL_SECONDS,
-    _STATE_SAVE_INTERVAL_SECONDS,
-    _WORKER_HEARTBEAT_INTERVAL,
-    _WORKER_HEARTBEAT_TIMEOUT,
+    LOG_SAMPLE_INTERVAL,
+    LOG_TIME_INTERVAL_SECONDS,
+    STATE_SAVE_INTERVAL_SECONDS,
+    WORKER_HEARTBEAT_INTERVAL,
+    WORKER_HEARTBEAT_TIMEOUT,
     available_cpu_count,
 )
-from .stages import CanonicalizeExecutor, MatchExecutor, StageExecutor
+from .stages import (
+    CanonicalizeExecutor,
+    MatchExecutor,
+    StageExecutor,
+    prepare_stage_executors,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -101,13 +106,9 @@ class AlignmentRunner:
         self._stage_executors: list[tuple[str, StageExecutor]] = []
         now = time.time()
         processed_so_far = self.run_state.processed_count()
-        self._log_sample_interval = _LOG_SAMPLE_INTERVAL
-        self._log_time_interval = _LOG_TIME_INTERVAL_SECONDS
-        self._state_save_interval = _STATE_SAVE_INTERVAL_SECONDS
         self._last_logged_count = processed_so_far
         self._last_log_time = now
         self._last_save_time = now
-        self._progress_bar_uses_tqdm = False
         self._validate_artifacts_on_resume = bool(
             config.runtime.validate_artifacts_on_resume
         )
@@ -326,18 +327,17 @@ class AlignmentRunner:
         self.progress_logger.info("Dry run summary written to %s", summary_path)
 
     def _maybe_log_progress(self, label: str | None = None) -> None:
-        if (
-            self._progress_bar_uses_tqdm
-            and self.progress_logger.getEffectiveLevel() >= logging.INFO
-        ):
+        # The progress bar already shows progress; log lines only add value in
+        # debug mode.
+        if self.progress_logger.getEffectiveLevel() >= logging.INFO:
             return
         processed = self.run_state.processed_count()
         now = time.time()
         if processed <= self._last_logged_count:
             return
-        if (processed - self._last_logged_count) < self._log_sample_interval and (
+        if (processed - self._last_logged_count) < LOG_SAMPLE_INTERVAL and (
             now - self._last_log_time
-        ) < self._log_time_interval:
+        ) < LOG_TIME_INTERVAL_SECONDS:
             return
         percent = (processed / max(1, self.manifest.total)) * 100.0
         suffix = f" | last={label}" if label else ""
@@ -353,7 +353,7 @@ class AlignmentRunner:
 
     def _maybe_persist_state(self, *, force: bool = False) -> None:
         now = time.time()
-        if not force and (now - self._last_save_time) < self._state_save_interval:
+        if not force and (now - self._last_save_time) < STATE_SAVE_INTERVAL_SECONDS:
             return
         self.run_state.save()
         self.artifact_store.maybe_flush(force=force)
@@ -388,26 +388,15 @@ class AlignmentRunner:
                 recipe_kwargs=recipe_kwargs,
             )
 
-        stage_list: list[tuple[str, StageExecutor]] = []
-        reference_current = reference_sample
-        for name in self.stage_order:
-            executor = executors.get(name)
-            if executor is None:
-                continue
-            stage_reference = (
-                match_reference
-                if name == "match" and match_reference is not None
-                else reference_current
-            )
-            executor.prepare(self.manifest, stage_reference)
-            if name == "match":
-                reference_current = stage_reference
-            else:
-                reference_current = executor.reference_output(
-                    self.manifest.reference_record, reference_current
-                )
-            stage_list.append((name, executor))
-        return stage_list
+        stage_list = [
+            (name, executors[name]) for name in self.stage_order if name in executors
+        ]
+        return prepare_stage_executors(
+            stage_list,
+            self.manifest,
+            reference_sample,
+            match_reference=match_reference,
+        )
 
     def _get_stage_executor(self, name: str) -> StageExecutor | None:
         for stage_name, executor in self._stage_executors:
@@ -451,29 +440,25 @@ class AlignmentRunner:
         use_batched = pipeline.can_batch_match(self.per_device_batch)
         batch_size = self.per_device_batch if use_batched else 1
 
-        try:
-            with progress_bar(
-                total=self.manifest.total,
-                initial=min(processed_initial, self.manifest.total),
-            ) as bar:
-                self._progress_bar_uses_tqdm = getattr(bar, "uses_tqdm", False)
-                if use_batched:
-                    self.progress_logger.info(
-                        "Using batched matching with batch_size=%d", batch_size
-                    )
-                pipeline.run_records(
-                    pending,
-                    loader,
-                    _RunnerPipelineSink(
-                        self,
-                        bar,
-                        output_artifact_store=output_artifact_store,
-                        final_pass=final_pass,
-                    ),
-                    batch_size=batch_size,
+        with progress_bar(
+            total=self.manifest.total,
+            initial=min(processed_initial, self.manifest.total),
+        ) as bar:
+            if use_batched:
+                self.progress_logger.info(
+                    "Using batched matching with batch_size=%d", batch_size
                 )
-        finally:
-            self._progress_bar_uses_tqdm = False
+            pipeline.run_records(
+                pending,
+                loader,
+                _RunnerPipelineSink(
+                    self,
+                    bar,
+                    output_artifact_store=output_artifact_store,
+                    final_pass=final_pass,
+                ),
+                batch_size=batch_size,
+            )
 
         self._maybe_persist_state(force=True)
         return time.time() - start
@@ -517,7 +502,6 @@ class AlignmentRunner:
                 total=self.manifest.total,
                 initial=min(processed_initial, self.manifest.total),
             ) as bar:
-                self._progress_bar_uses_tqdm = getattr(bar, "uses_tqdm", False)
                 while completed < total_samples:
                     message = pool.next_message(timeout=1.0)
                     if message is None:
@@ -594,7 +578,6 @@ class AlignmentRunner:
             raise
         finally:
             pool.shutdown(force=False)
-            self._progress_bar_uses_tqdm = False
 
         self._maybe_persist_state(force=True)
         return time.time() - start
@@ -653,11 +636,7 @@ class AlignmentRunner:
             len(item.assigned) for item in pool.states.values()
         )
         if remaining > 0:
-            new_state = pool.respawn(state.worker_id, job_template, scratch_root)
-            if new_state:
-                pool.states[state.worker_id] = new_state
-                if new_state.ready:
-                    self._assign_work(new_state, pending_indices, chunk_size)
+            pool.respawn(state.worker_id, job_template, scratch_root)
         else:
             state.stopping = True
 
@@ -684,7 +663,7 @@ class AlignmentRunner:
                     f"exitcode={state.process.exitcode}",
                 )
                 continue
-            timeout_seconds = _WORKER_HEARTBEAT_TIMEOUT * max(1, len(state.assigned))
+            timeout_seconds = WORKER_HEARTBEAT_TIMEOUT * max(1, len(state.assigned))
             if state.assigned and (now - state.last_heartbeat) > timeout_seconds:
                 self._handle_worker_failure(
                     pool,
@@ -718,7 +697,7 @@ class AlignmentRunner:
             "save_intermediate": self.save_intermediate,
             "family": self.config.architecture.family,
             "recipe_kwargs": dict(self.config.architecture.recipe_kwargs),
-            "heartbeat_interval": _WORKER_HEARTBEAT_INTERVAL,
+            "heartbeat_interval": WORKER_HEARTBEAT_INTERVAL,
         }
 
     def _apply_commit(

@@ -48,7 +48,6 @@ The default sample format is `pytree_npz`: each `.npz` stores leaves in the same
 The public `EmanuelSommer/MILE` and `EmanuelSommer/SMILE` repositories use the same basic sample layout for posterior samples: `<experiment>/samples/<chain_id>/sample_<n>.npz` plus a pickled tree file. For tabular FCNs, use:
 
 ```yaml
-schema_version: 2
 paths:
   sample_format: pytree_npz
 architecture:

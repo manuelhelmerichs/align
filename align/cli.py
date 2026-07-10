@@ -163,13 +163,7 @@ def run(args: argparse.Namespace) -> None:
     config.paths.experiment_root = exp_root
     samples_dir = (config.paths.samples_dir or (exp_root / "samples")).resolve()
     sample_format = config.paths.sample_format
-    explicit_tree_path = config.paths.tree_path is not None
     tree_path = (config.paths.tree_path or _detect_tree_path(exp_root)).resolve()
-    if explicit_tree_path:
-        if not tree_path.exists():
-            raise FileNotFoundError(f"Tree path not found: {tree_path}")
-        if not tree_path.is_file():
-            raise FileNotFoundError(f"Tree path must be a file: {tree_path}")
     output_dir = (config.paths.output_dir or _default_output_dir(exp_root)).resolve()
     config.paths.output_dir = output_dir
     config.paths.samples_dir = samples_dir

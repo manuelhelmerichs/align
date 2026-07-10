@@ -21,11 +21,9 @@ from .stages import CanonicalizeConfig, MatchConfig
 if TYPE_CHECKING:
     from ..sample_manifest import SampleManifest
 
-SCHEMA_VERSION = 2
 _STAGES = ("canonicalize", "match")
 _TOP_LEVEL_FIELDS = frozenset(
     {
-        "schema_version",
         "paths",
         "architecture",
         "selection",
@@ -39,7 +37,7 @@ _TOP_LEVEL_FIELDS = frozenset(
 
 @dataclass
 class RunConfig:
-    """Resolved configuration for one alignment run (schema version 2)."""
+    """Resolved configuration for one alignment run."""
 
     paths: PathConfig = field(default_factory=PathConfig)
     architecture: ArchitectureConfig = field(default_factory=ArchitectureConfig)
@@ -52,15 +50,6 @@ class RunConfig:
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> RunConfig:
         _validate_fields("top-level", payload, _TOP_LEVEL_FIELDS)
-        version = payload.get("schema_version")
-        if version is None:
-            raise ValueError("Config must set 'schema_version: 2'.")
-        if int(version) != SCHEMA_VERSION:
-            raise ValueError(
-                f"Unsupported schema_version {version!r}; this build requires "
-                f"schema_version {SCHEMA_VERSION}."
-            )
-
         pipeline_raw = payload.get("pipeline")
         if not isinstance(pipeline_raw, list) or not pipeline_raw:
             raise ValueError("Config must define a non-empty 'pipeline' list.")
@@ -113,7 +102,6 @@ class RunConfig:
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "schema_version": SCHEMA_VERSION,
             "paths": path_to_dict(self.paths),
             "architecture": self.architecture.as_dict(),
             "selection": asdict(self.selection),
@@ -123,15 +111,7 @@ class RunConfig:
         payload["canonicalize"] = (
             self.canonicalize.as_dict() if self.canonicalize is not None else None
         )
-        if self.match is not None:
-            payload["match"] = {
-                "objective": self.match.objective.as_dict(),
-                "seed": self.match.seed,
-                "barycenter_passes": self.match.barycenter_passes,
-                "solvers": self.match.solvers_payload(),
-            }
-        else:
-            payload["match"] = None
+        payload["match"] = self.match.as_dict() if self.match is not None else None
         return payload
 
 
@@ -219,7 +199,6 @@ def validate_architecture(config: RunConfig) -> None:
 
 
 __all__ = [
-    "SCHEMA_VERSION",
     "RunConfig",
     "load_align_config",
     "resolve_recipe_defaults",

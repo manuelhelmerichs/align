@@ -201,9 +201,6 @@ class MaterializedTensors(Mapping[str, Any]):
 
         return {tensor_id: self[tensor_id] for tensor_id in self}
 
-    def clear_cache(self) -> None:
-        self._cache.clear()
-
 
 @dataclass
 class SymmetryGraph:
@@ -237,12 +234,6 @@ class SymmetryGraph:
                 )
             return ordered
         return tuple(self.groups)
-
-    @property
-    def component_order(self) -> tuple[str, ...]:
-        """Stable component order (declaration order)."""
-
-        return tuple(self.components)
 
     def component_for_group(self, group_id: str) -> str | None:
         """Return the id of the component owning ``group_id``, if components exist."""

@@ -1,4 +1,4 @@
-"""Versioned alignment-artifact serialization and runtime storage."""
+"""Alignment-artifact serialization and runtime storage."""
 
 from __future__ import annotations
 
@@ -13,9 +13,8 @@ import numpy as np
 from ..run_state import ArtifactChecksumStore, file_checksum
 from ..sample_manifest import SampleManifest, SampleRecord
 from ..samples import WeightSample, create_sample_codec
-from .resources import _STATE_SAVE_INTERVAL_SECONDS
+from .resources import STATE_SAVE_INTERVAL_SECONDS
 
-ARTIFACT_SCHEMA_VERSION = 2
 _METADATA_KEY = "__metadata__"
 
 _CANONICALIZE_STATIC_KEYS = frozenset(
@@ -35,11 +34,7 @@ _MATCH_PER_SAMPLE_KEYS = frozenset({"reference"})
 
 
 def _artifact_metadata(payload: Mapping[str, Any]) -> np.ndarray:
-    metadata = {
-        "schema_version": ARTIFACT_SCHEMA_VERSION,
-        **dict(payload),
-    }
-    return np.asarray(json.dumps(metadata, sort_keys=True))
+    return np.asarray(json.dumps(dict(payload), sort_keys=True))
 
 
 def _read_npz_artifact(
@@ -47,14 +42,8 @@ def _read_npz_artifact(
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
     with np.load(Path(path), allow_pickle=False) as payload:
         if _METADATA_KEY not in payload.files:
-            raise ValueError(f"{expected_type} artifact has no schema metadata.")
+            raise ValueError(f"{expected_type} artifact has no metadata.")
         metadata = json.loads(str(payload[_METADATA_KEY].item()))
-        version = metadata.get("schema_version")
-        if version != ARTIFACT_SCHEMA_VERSION:
-            raise ValueError(
-                f"Unsupported {expected_type} artifact schema_version {version!r}; "
-                f"expected {ARTIFACT_SCHEMA_VERSION}."
-            )
         if metadata.get("artifact_type") != expected_type:
             raise ValueError(
                 f"Expected a {expected_type} artifact, found "
@@ -104,7 +93,7 @@ def write_transforms_artifact(
 def read_transforms_artifact(
     path: str | Path,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """Load a version-2 transform artifact and its metadata."""
+    """Load a transform artifact and its metadata."""
 
     return _read_npz_artifact(path, expected_type="transforms")
 
@@ -129,7 +118,7 @@ def write_scales_artifact(path: str | Path, scales: Mapping[str, Any]) -> Path |
 def read_scales_artifact(
     path: str | Path,
 ) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    """Load a version-2 scale artifact and its metadata."""
+    """Load a scale artifact and its metadata."""
 
     return _read_npz_artifact(path, expected_type="scales")
 
@@ -150,7 +139,7 @@ def write_diagnostics_artifact(
 
 
 class RunArtifactStore:
-    """Own the version-2 output layout, checksums, and run summaries."""
+    """Own the output layout, checksums, and run summaries."""
 
     def __init__(
         self,
@@ -195,7 +184,7 @@ class RunArtifactStore:
         )
         self.primary_kind = "aligned_sample"
         self._last_flush = time.time()
-        self._flush_interval = _STATE_SAVE_INTERVAL_SECONDS
+        self._flush_interval = STATE_SAVE_INTERVAL_SECONDS
         self._structure_copied: set[Path] = set()
 
         self.aligned_samples_dir = self.output_dir / "aligned_samples"
@@ -451,7 +440,6 @@ class RunArtifactStore:
     ) -> None:
         self.maybe_flush(force=True)
         summary: dict[str, Any] = {
-            "schema_version": ARTIFACT_SCHEMA_VERSION,
             "stages": self.stages,
             "stage_outputs": list(self.stage_output_stages),
             "elapsed_seconds": float(elapsed_seconds),
@@ -479,7 +467,6 @@ class RunArtifactStore:
 
 
 __all__ = [
-    "ARTIFACT_SCHEMA_VERSION",
     "RunArtifactStore",
     "read_scales_artifact",
     "read_transforms_artifact",

@@ -148,7 +148,7 @@ def split_rhat(draws: np.ndarray) -> np.ndarray:
     split = np.concatenate(
         [draws[:, :half, :], draws[:, half : 2 * half, :]], axis=0
     ).astype(np.float64)
-    m, n, _ = split.shape
+    _, n, _ = split.shape
 
     chain_means = split.mean(axis=1)
     chain_vars = split.var(axis=1, ddof=1)

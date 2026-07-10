@@ -9,8 +9,6 @@
 # is equally valid; `lap` routes attention head groups through the structured
 # circuit-cost update automatically.
 
-schema_version: 2
-
 paths:
   experiment_root: /Users/manuel/Projects/align/data/bayesmates_module_graph_samples/bayesmates_gpt_tiny
   samples_dir: null

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -42,7 +41,6 @@ class GQARoPECircuitConstraint:
     num_kv_groups: int
     heads_per_group: int
     head_dim: int
-    rope_pairing: Literal["half"] = "half"
 
     @property
     def groups(self) -> tuple[str, ...]:

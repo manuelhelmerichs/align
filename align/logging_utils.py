@@ -3,13 +3,8 @@
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 
-try:  # Optional dependency for rich progress bars.
-    from tqdm.auto import tqdm
-except Exception:  # pragma: no cover - tqdm is optional
-    tqdm = None
-
+from tqdm.auto import tqdm
 
 _VERBOSITY = {
     "quiet": logging.WARNING,
@@ -29,35 +24,25 @@ def configure_logging(verbosity: str = "info") -> logging.Logger:
     return logger
 
 
-@dataclass
 class ProgressReporter:
-    total: int
-    initial: int = 0
+    """Progress bar with labeled updates."""
 
-    def __post_init__(self) -> None:
-        self.count = self.initial
-        self._bar = None
-        self.uses_tqdm = False
-        if tqdm is not None:
-            self._bar = tqdm(
-                total=self.total,
-                initial=self.initial,
-                dynamic_ncols=True,
-                leave=False,
-                position=0,
-            )
-            self.uses_tqdm = True
+    def __init__(self, total: int, initial: int = 0) -> None:
+        self._bar = tqdm(
+            total=total,
+            initial=initial,
+            dynamic_ncols=True,
+            leave=False,
+            position=0,
+        )
 
     def update(self, label: str | None = None, advance: int = 1) -> None:
-        self.count += advance
-        if self._bar is not None:
-            if label:
-                self._bar.set_description_str(label)
-            self._bar.update(advance)
+        if label:
+            self._bar.set_description_str(label)
+        self._bar.update(advance)
 
     def close(self) -> None:
-        if self._bar is not None:
-            self._bar.close()
+        self._bar.close()
 
 
 @contextmanager

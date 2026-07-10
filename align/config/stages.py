@@ -292,6 +292,14 @@ class MatchConfig:
     def solvers_payload(self) -> list[dict[str, Any]]:
         return [step.to_dict() for step in self.solvers]
 
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "objective": self.objective.as_dict(),
+            "seed": self.seed,
+            "barycenter_passes": self.barycenter_passes,
+            "solvers": self.solvers_payload(),
+        }
+
 
 __all__ = [
     "CanonicalizeConfig",

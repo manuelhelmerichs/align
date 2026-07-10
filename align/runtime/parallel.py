@@ -10,7 +10,7 @@ from queue import Empty
 from typing import Any
 
 from .._jax_platforms import is_gpu_platform
-from .resources import _WORKER_HEARTBEAT_INTERVAL
+from .resources import WORKER_HEARTBEAT_INTERVAL
 
 
 def worker_process_main(job: dict[str, object], command_queue, progress_queue) -> None:
@@ -115,10 +115,8 @@ class WorkerPool:
         worker_id: int,
         job_template: dict[str, Any],
         scratch_root: Path,
-    ) -> WorkerState | None:
+    ) -> WorkerState:
         plan = self._device_plan or self.device_plan()
-        if not plan:
-            return None
         config = plan[worker_id % len(plan)]
         return self._spawn_worker(worker_id, config, job_template, scratch_root)
 
@@ -178,7 +176,7 @@ class WorkerPool:
                 "device_id": config.device_id,
                 "device_type": config.device_type,
                 "scratch_dir": str(scratch_dir),
-                "heartbeat_interval": _WORKER_HEARTBEAT_INTERVAL,
+                "heartbeat_interval": WORKER_HEARTBEAT_INTERVAL,
             }
         )
         proc = self._ctx.Process(
@@ -221,5 +219,4 @@ __all__ = [
     "WorkerState",
     "WorkerPool",
     "worker_process_main",
-    "_WORKER_HEARTBEAT_INTERVAL",
 ]

@@ -298,7 +298,7 @@ def _build_stage_executors(
     reference_sample: WeightSample,
     match_reference: WeightSample | None = None,
 ):
-    from .stages import CanonicalizeExecutor, MatchExecutor
+    from .stages import CanonicalizeExecutor, MatchExecutor, prepare_stage_executors
 
     stages: list[tuple[str, Any]] = []
     canonicalize_cfg = job.get("canonicalize_config")
@@ -344,22 +344,12 @@ def _build_stage_executors(
             (name, name_to_exec[name]) for name in stage_order if name in name_to_exec
         ]
 
-    reference_current = reference_sample
-    for name, executor in stages:
-        stage_reference = (
-            match_reference
-            if name == "match" and match_reference is not None
-            else reference_current
-        )
-        executor.prepare(manifest, stage_reference)
-        if name == "match":
-            reference_current = stage_reference
-        else:
-            reference_current = executor.reference_output(
-                manifest.reference_record, reference_current
-            )
-
-    return stages
+    return prepare_stage_executors(
+        stages,
+        manifest,
+        reference_sample,
+        match_reference=match_reference,
+    )
 
 
 def run_worker(job: dict[str, Any], command_queue, progress_queue) -> None:

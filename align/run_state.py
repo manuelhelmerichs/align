@@ -1,4 +1,4 @@
-"""Versioned mutable run state, progress tracking, and artifact checksums."""
+"""Mutable run state, progress tracking, and artifact checksums."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ import numpy as np
 
 from .sample_manifest import SampleRecord
 
-RUN_STATE_SCHEMA_VERSION = 2
 _CHECKSUM_CHUNK_SIZE = 1 << 20
 
 
@@ -165,7 +164,7 @@ class ArtifactChecksumStore:
 
 @dataclass
 class RunState:
-    """Version-2 mutable state persisted between runner invocations."""
+    """Mutable state persisted between runner invocations."""
 
     path: Path
     experiment_root: Path
@@ -206,7 +205,6 @@ class RunState:
         if self._tracker is not None:
             self._tracker.flush()
         payload = {
-            "schema_version": RUN_STATE_SCHEMA_VERSION,
             "experiment_root": str(self.experiment_root),
             "output_dir": str(self.output_dir),
             "manifest_path": str(self.manifest_path),
@@ -267,12 +265,6 @@ class RunState:
     @classmethod
     def load(cls, path: Path) -> RunState:
         payload = json.loads(Path(path).read_text())
-        version = payload.get("schema_version")
-        if version != RUN_STATE_SCHEMA_VERSION:
-            raise ValueError(
-                f"Unsupported run-state schema_version {version!r}; expected "
-                f"{RUN_STATE_SCHEMA_VERSION}."
-            )
         return cls(
             path=Path(path),
             experiment_root=Path(payload["experiment_root"]),
@@ -306,7 +298,6 @@ def compute_config_digest(payload: Mapping[str, Any]) -> str:
 __all__ = [
     "ArtifactChecksumStore",
     "ProcessedTracker",
-    "RUN_STATE_SCHEMA_VERSION",
     "RunState",
     "compute_config_digest",
     "file_checksum",

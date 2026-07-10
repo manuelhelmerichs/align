@@ -28,8 +28,6 @@
 #         max_sweeps: 5
 #         tolerance: 0.0
 
-schema_version: 2
-
 paths:
   experiment_root: /Users/manuel/Projects/align/data/synthetic_rmsnorm_gqa_rope_transformer_samples/synthetic_rmsnorm_gqa_rope_transformer_tiny
   samples_dir: null

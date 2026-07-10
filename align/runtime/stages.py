@@ -30,12 +30,6 @@ class StageResult:
     scales: Mapping[str, Any] | None = None
     diagnostics: dict[str, Any] | None = None
 
-    @property
-    def params(self):
-        """Convenience access to the canonical parameter PyTree."""
-
-        return self.sample.params
-
 
 class StageExecutor(ABC):
     """Abstract interface for pipeline stages (canonicalize, match)."""
@@ -75,6 +69,38 @@ class StageExecutor(ABC):
         the already-aligned reference.
         """
         return self.process_single(record, sample).sample
+
+
+def prepare_stage_executors(
+    stages: Sequence[tuple[str, StageExecutor]],
+    manifest: SampleManifest,
+    reference_sample: WeightSample,
+    *,
+    match_reference: WeightSample | None = None,
+) -> list[tuple[str, StageExecutor]]:
+    """Prepare executors in pipeline order, threading the reference through.
+
+    Each non-match stage transforms the reference so later stages prepare
+    against the already-aligned reference. The match stage instead uses
+    ``match_reference`` when given (barycenter refinement passes), and never
+    advances the reference itself.
+    """
+
+    reference_current = reference_sample
+    for name, executor in stages:
+        stage_reference = (
+            match_reference
+            if name == "match" and match_reference is not None
+            else reference_current
+        )
+        executor.prepare(manifest, stage_reference)
+        if name == "match":
+            reference_current = stage_reference
+        else:
+            reference_current = executor.reference_output(
+                manifest.reference_record, reference_current
+            )
+    return list(stages)
 
 
 class CanonicalizeExecutor(StageExecutor):
@@ -275,8 +301,7 @@ class MatchExecutor(StageExecutor):
             target_records = [record_list[idx] for idx in target_positions]
             target_samples = [sample_batch[idx] for idx in target_positions]
             target_params = [sample.params for sample in target_samples]
-            rng_keys = [self._rng_for_record(rec) for rec in target_records]
-            rng_key = rng_keys[0] if rng_keys else None
+            rng_key = self._rng_for_record(target_records[0])
             batch_results = match_batch(
                 self.graph,
                 self.reference_sample.params,
@@ -312,4 +337,5 @@ __all__ = [
     "StageExecutor",
     "CanonicalizeExecutor",
     "MatchExecutor",
+    "prepare_stage_executors",
 ]
