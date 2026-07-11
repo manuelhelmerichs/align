@@ -298,10 +298,16 @@ def _build_stage_executors(
     reference_sample: WeightSample,
     match_reference: WeightSample | None = None,
 ):
-    from .stages import CanonicalizeExecutor, MatchExecutor, prepare_stage_executors
+    from .stages import (
+        CanonicalizeExecutor,
+        CenterSoftmaxHeadExecutor,
+        MatchExecutor,
+        prepare_stage_executors,
+    )
 
     stages: list[tuple[str, Any]] = []
     canonicalize_cfg = job.get("canonicalize_config")
+    center_softmax_head_cfg = job.get("center_softmax_head_config")
     match_cfg = job.get("match_config")
     stage_order = job.get("stages") or []
     family = job.get("family", "mlp")
@@ -313,6 +319,17 @@ def _build_stage_executors(
                 "canonicalize",
                 CanonicalizeExecutor(
                     canonicalize_cfg,
+                    family=family,
+                    recipe_kwargs=recipe_kwargs,
+                ),
+            )
+        )
+    if center_softmax_head_cfg:
+        stages.append(
+            (
+                "center_softmax_head",
+                CenterSoftmaxHeadExecutor(
+                    center_softmax_head_cfg,
                     family=family,
                     recipe_kwargs=recipe_kwargs,
                 ),

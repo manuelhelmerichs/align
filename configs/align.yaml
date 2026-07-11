@@ -10,6 +10,11 @@ architecture:
   parameter_root: params.fcn  # Dot path to the dense layer subtree in the PyTree.
 
 pipeline: [canonicalize, match]  # Stages to run, in order.
+# Classification runs can insert the opt-in softmax-head translation stage
+# (probability-preserving, logit-changing; never use for regression heads):
+# pipeline: [canonicalize, center_softmax_head, match]
+# center_softmax_head:
+#   head: null             # Dot path to the head module (kernel [+ bias]); null auto-detects the unique head.
 
 selection:
   chain_indices: null      # Only align these chains; leave empty to include every chain in samples/.
@@ -21,7 +26,7 @@ selection:
 
 canonicalize:
   epsilon: 1e-8            # Numerical stabiliser for variance scaling.
-  strategy: null          # Dense-chain canonical form: balanced (default; minimum-norm) or unit_norm (incoming norm 1).
+  strategy: null          # Dense/conv canonical form: balanced (default; minimum-norm) or unit_norm (unit producer energy).
   degenerate_channels: preserve  # Alternatives: zero_outgoing, canonical_vector.
   include_bias_in_norm: true
   activation: relu

@@ -32,6 +32,7 @@ from .resources import (
 )
 from .stages import (
     CanonicalizeExecutor,
+    CenterSoftmaxHeadExecutor,
     MatchExecutor,
     StageExecutor,
     prepare_stage_executors,
@@ -375,6 +376,12 @@ class AlignmentRunner:
                 family=family,
                 recipe_kwargs=recipe_kwargs,
             )
+        if self.config.center_softmax_head is not None:
+            executors["center_softmax_head"] = CenterSoftmaxHeadExecutor(
+                self.config.center_softmax_head,
+                family=family,
+                recipe_kwargs=recipe_kwargs,
+            )
         if self.config.match is not None:
             executors["match"] = MatchExecutor(
                 self.config.match,
@@ -686,6 +693,7 @@ class AlignmentRunner:
             "manifest_path": str(self.run_state.manifest_path),
             "stages": [name for name, _ in self._stage_executors],
             "canonicalize_config": self.config.canonicalize,
+            "center_softmax_head_config": self.config.center_softmax_head,
             "match_config": self.config.match,
             "seed": self.config.match.seed if self.config.match else None,
             "rng_offset": self._refinement_pass_index * self.manifest.total,

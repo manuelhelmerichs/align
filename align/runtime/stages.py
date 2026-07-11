@@ -9,7 +9,7 @@ from typing import Any
 import jax
 
 from ..architectures import get_recipe
-from ..config.stages import CanonicalizeConfig, MatchConfig
+from ..config.stages import CanonicalizeConfig, CenterSoftmaxHeadConfig, MatchConfig
 from ..matching import (
     build_solver_sequence,
     match_batch,
@@ -140,6 +140,65 @@ class CanonicalizeExecutor(StageExecutor):
             sample=sample.with_params(canonical_params),
             scales=scales,
             diagnostics=dict(diagnostics or {}),
+        )
+
+    def process_batch(
+        self,
+        records: Sequence[SampleRecord],
+        samples: Sequence[WeightSample],
+    ) -> list[StageResult]:
+        return [
+            self.process_single(record, sample)
+            for record, sample in zip(records, samples, strict=True)
+        ]
+
+    @property
+    def supports_batching(self) -> bool:
+        return False
+
+    @property
+    def prefers_gpu(self) -> bool:
+        return False
+
+
+class CenterSoftmaxHeadExecutor(StageExecutor):
+    """Executes the opt-in softmax-head translation stage.
+
+    Probability-preserving only (logits change), so it is not part of the
+    exact-logit ``canonicalize`` stage; see
+    ``align.canonicalization.softmax_head``.
+    """
+
+    def __init__(
+        self,
+        config: CenterSoftmaxHeadConfig,
+        *,
+        family: str,
+        recipe_kwargs: Mapping[str, Any],
+    ) -> None:
+        self.config = config
+        self.family = family
+        self.recipe_kwargs = dict(recipe_kwargs)
+        self.head_path: tuple[str, ...] | None = None
+
+    def prepare(self, manifest: SampleManifest, reference_sample: WeightSample) -> None:
+        from ..canonicalization.softmax_head import detect_softmax_head
+
+        self.head_path = self.config.head_path
+        if self.head_path is None:
+            recipe = get_recipe(self.family, **self.recipe_kwargs)
+            graph = recipe.build_graph(reference_sample.params)
+            self.head_path = detect_softmax_head(graph)
+
+    def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
+        from ..canonicalization.softmax_head import center_softmax_head
+
+        if self.head_path is None:
+            raise RuntimeError("CenterSoftmaxHeadExecutor not prepared.")
+        centered, diagnostics = center_softmax_head(sample.params, self.head_path)
+        return StageResult(
+            sample=sample.with_params(centered),
+            diagnostics=diagnostics,
         )
 
     def process_batch(
@@ -336,6 +395,7 @@ __all__ = [
     "StageResult",
     "StageExecutor",
     "CanonicalizeExecutor",
+    "CenterSoftmaxHeadExecutor",
     "MatchExecutor",
     "prepare_stage_executors",
 ]

@@ -27,6 +27,7 @@ _CANONICALIZE_STATIC_KEYS = frozenset(
         "activation",
     }
 )
+_CENTER_SOFTMAX_HEAD_STATIC_KEYS = frozenset({"plan", "head"})
 _MATCH_STATIC_KEYS = frozenset(
     {"objective", "solvers", "barycenter_passes", "transform_families"}
 )
@@ -399,6 +400,22 @@ class RunArtifactStore:
                         if key in _CANONICALIZE_STATIC_KEYS
                     },
                 )
+            elif stage == "center_softmax_head" and isinstance(stage_data, dict):
+                self._static_config.setdefault(
+                    "center_softmax_head",
+                    {
+                        key: value
+                        for key, value in stage_data.items()
+                        if key in _CENTER_SOFTMAX_HEAD_STATIC_KEYS
+                    },
+                )
+                per_sample = {
+                    key: value
+                    for key, value in stage_data.items()
+                    if key not in _CENTER_SOFTMAX_HEAD_STATIC_KEYS
+                }
+                if per_sample:
+                    filtered_payload[stage] = per_sample
             elif stage == "match" and isinstance(stage_data, dict):
                 self._static_config.setdefault(
                     "match",
