@@ -91,13 +91,15 @@ def test_structure_and_registration():
     assert graph.components["features"].kind == "convnet"
     assert "core/conv1" in graph.groups
     assert {"classifier/h0", "classifier/h1"} <= set(graph.groups)
-    # One flatten binding per spatial position on the first dense kernel.
+    # One repeated flatten binding covers every spatial position compactly.
     flatten_bindings = [
         binding
         for binding in graph.bindings_for_tensor("core/fc1/kernel")
         if binding.group == "core/conv1"
     ]
-    assert len(flatten_bindings) == 9  # (6/2)^2 positions
+    assert len(flatten_bindings) == 1
+    assert flatten_bindings[0].repeat == 9  # (6/2)^2 positions
+    assert flatten_bindings[0].stride == 4
     assert graph.metadata["spatial_positions"] == 9
     # Same-axis multi-bindings must stay LAP-linearizable (not a QAP).
     assert "core/conv1" not in graph.repeated_group_terms()
@@ -171,7 +173,7 @@ def test_multi_binding_linearization_is_exact():
         inverse[indices, np.arange(len(indices))] = 1
         return inverse
 
-    align_perms = {gid: invert(p) for gid, p in true_state.matrices.items()}
+    align_perms = {gid: invert(true_state.matrix(gid)) for gid in true_state.transforms}
     objective = get_objective("euclidean")
     reference_data = graph.materialize(params, backend="numpy")
     target_data = graph.materialize(target, backend="numpy")

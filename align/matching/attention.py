@@ -22,7 +22,7 @@ from ..symmetry import (
     binding_axis_interval,
 )
 from .objectives import DiagonalFisherObjective, _apply_other_groups_hard
-from .state import TransformState, as_permutation_matrix
+from .state import PermutationTransform, TransformState
 
 
 @dataclass(frozen=True)
@@ -213,8 +213,51 @@ def _weighted_circuit_cost(
 ) -> np.ndarray:
     """Directed pairwise circuit distances in a reference-slot metric."""
 
-    residual = reference[:, None, :, :] - target[None, :, :, :]
-    return np.sum(precision[:, None, :, :] * np.square(residual), axis=(-2, -1))
+    ref = reference.reshape(reference.shape[0], -1)
+    tgt = target.reshape(target.shape[0], -1)
+    weight = precision.reshape(precision.shape[0], -1)
+    ref_term = np.sum(weight * np.square(ref), axis=1)[:, None]
+    target_term = weight @ np.square(tgt).T
+    cross = (weight * ref) @ tgt.T
+    distances = np.maximum(ref_term + target_term - 2.0 * cross, 0.0)
+    scale = np.maximum(ref_term + target_term, 1.0)
+    for ref_index, target_index in np.argwhere(distances <= 1e-6 * scale):
+        residual = ref[ref_index] - tgt[target_index]
+        distances[ref_index, target_index] = np.sum(
+            weight[ref_index] * np.square(residual)
+        )
+    return distances
+
+
+def _pairwise_squared(reference: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Pairwise squared distances without materializing broadcast residuals."""
+
+    ref = np.asarray(reference).reshape(reference.shape[0], -1)
+    tgt = np.asarray(target).reshape(target.shape[0], -1)
+    distances = (
+        np.sum(np.square(ref), axis=1)[:, None]
+        + np.sum(np.square(tgt), axis=1)[None, :]
+        - 2.0 * (ref @ tgt.T)
+    )
+    distances = np.maximum(distances, 0.0)
+    scale = np.maximum(
+        np.sum(np.square(ref), axis=1)[:, None]
+        + np.sum(np.square(tgt), axis=1)[None, :],
+        1.0,
+    )
+    for ref_index, target_index in np.argwhere(distances <= 1e-6 * scale):
+        distances[ref_index, target_index] = np.sum(
+            np.square(ref[ref_index] - tgt[target_index])
+        )
+    return distances
+
+
+def _reference_attention_cache(objective) -> dict[Any, Any]:
+    cache = getattr(objective, "_reference_attention_cache", None)
+    if cache is None:
+        cache = {}
+        objective._reference_attention_cache = cache
+    return cache
 
 
 def _mha_circuit_precisions(graph, objective, reference_data, spec):
@@ -281,7 +324,19 @@ def head_cost_matrix(
     exact because circuit costs are invariant to intra-head permutations.
     """
 
-    ref_qk, ref_ov = _circuits(graph, spec, reference_data)
+    cache = _reference_attention_cache(objective)
+    cache_key = ("mha", id(graph), id(reference_data), spec)
+    prepared = cache.get(cache_key)
+    if prepared is None:
+        ref_qk, ref_ov = _circuits(graph, spec, reference_data)
+        precisions = (
+            _mha_circuit_precisions(graph, objective, reference_data, spec)
+            if isinstance(objective, DiagonalFisherObjective)
+            else None
+        )
+        prepared = (ref_qk, ref_ov, precisions)
+        cache[cache_key] = prepared
+    ref_qk, ref_ov, precisions = prepared
     target_qk, target_ov = _circuits(
         graph,
         spec,
@@ -290,20 +345,12 @@ def head_cost_matrix(
         skip_groups=set(spec.groups),
     )
     if isinstance(objective, DiagonalFisherObjective):
-        qk_precision, ov_precision = _mha_circuit_precisions(
-            graph, objective, reference_data, spec
-        )
+        qk_precision, ov_precision = precisions
         qk_cost = _weighted_circuit_cost(ref_qk, target_qk, qk_precision)
         ov_cost = _weighted_circuit_cost(ref_ov, target_ov, ov_precision)
     else:
-        qk_cost = np.sum(
-            np.square(ref_qk[:, None, :, :] - target_qk[None, :, :, :]),
-            axis=(2, 3),
-        )
-        ov_cost = np.sum(
-            np.square(ref_ov[:, None, :, :] - target_ov[None, :, :, :]),
-            axis=(2, 3),
-        )
+        qk_cost = _pairwise_squared(ref_qk, target_qk)
+        ov_cost = _pairwise_squared(ref_ov, target_ov)
     return qk_cost + ov_cost
 
 
@@ -316,6 +363,7 @@ def update_attention_module(
     spec: AttentionModuleSpec,
     *,
     scheduled_groups: set[str] | None = None,
+    record_ambiguity: bool = False,
 ) -> tuple[TransformState, dict[str, Any]]:
     """One structured coordinate update for an attention module.
 
@@ -325,18 +373,25 @@ def update_attention_module(
     signed-LAP update).
     """
 
-    from .solvers import update_group_transform
+    from .solvers import (
+        assignment_objective_margin,
+        group_assignment_ambiguity,
+        update_group_transform,
+    )
 
     cost = head_cost_matrix(graph, objective, reference_data, target_data, state, spec)
     row_ind, col_ind = linear_sum_assignment(cost)
-    head_matrix = np.zeros((spec.num_heads, spec.num_heads), dtype=np.float64)
-    head_matrix[row_ind, col_ind] = 1.0
-
-    previous = as_permutation_matrix(
-        state.matrices[spec.head_group], size=spec.num_heads, dtype=np.float64
-    )
-    delta = float(np.max(np.abs(head_matrix - previous)))
-    state = state.with_matrices({spec.head_group: head_matrix})
+    head_indices = np.empty(spec.num_heads, dtype=np.int32)
+    head_indices[row_ind] = col_ind
+    previous = state.transforms[spec.head_group]
+    delta = 0.0 if np.array_equal(previous.indices, head_indices) else 1.0
+    state = state.with_transforms({spec.head_group: PermutationTransform(head_indices)})
+    objective.notify_group_updated(graph, spec.head_group)
+    ambiguity = {}
+    if record_ambiguity:
+        margin = assignment_objective_margin(-cost)
+        if margin is not None:
+            ambiguity[spec.head_group] = {"assignment_objective_margin": margin}
 
     intra_groups = [
         group_id
@@ -344,6 +399,12 @@ def update_attention_module(
         if scheduled_groups is None or group_id in scheduled_groups
     ]
     for group_id in intra_groups:
+        if record_ambiguity:
+            group_value = group_assignment_ambiguity(
+                graph, objective, reference_data, target_data, state, group_id
+            )
+            if group_value is not None:
+                ambiguity[group_id] = group_value
         state, group_delta = update_group_transform(
             graph, objective, reference_data, target_data, state, group_id
         )
@@ -355,6 +416,8 @@ def update_attention_module(
         "delta": delta,
         "intra_groups": list(intra_groups),
     }
+    if ambiguity:
+        aux["ambiguity"] = ambiguity
     return state, aux
 
 
@@ -495,10 +558,22 @@ def _gqa_circuit_precisions(graph, objective, reference_data, spec):
 def _weighted_gqa_pairwise(ref, target, precision) -> np.ndarray:
     """Directed ``(G,R,G,R)`` distances under ref-query-head precisions."""
 
-    residual = ref[:, :, None, None, :, :] - target[None, None, :, :, :, :]
-    return np.sum(
-        precision[:, :, None, None, :, :] * np.square(residual), axis=(-2, -1)
-    )
+    ref_shape = ref.shape[:2]
+    target_shape = target.shape[:2]
+    ref_flat = ref.reshape(-1, np.prod(ref.shape[-2:], dtype=int))
+    target_flat = target.reshape(-1, np.prod(target.shape[-2:], dtype=int))
+    precision_flat = precision.reshape(ref_flat.shape)
+    ref_term = np.sum(precision_flat * np.square(ref_flat), axis=1)[:, None]
+    target_term = precision_flat @ np.square(target_flat).T
+    cross = (precision_flat * ref_flat) @ target_flat.T
+    distances = np.maximum(ref_term + target_term - 2.0 * cross, 0.0)
+    scale = np.maximum(ref_term + target_term, 1.0)
+    for ref_index, target_index in np.argwhere(distances <= 1e-6 * scale):
+        residual = ref_flat[ref_index] - target_flat[target_index]
+        distances[ref_index, target_index] = np.sum(
+            precision_flat[ref_index] * np.square(residual)
+        )
+    return distances.reshape(*ref_shape, *target_shape)
 
 
 def gqa_head_cost_matrix(
@@ -514,7 +589,19 @@ def gqa_head_cost_matrix(
     because circuit costs are invariant to the unresolved intra transform_family.
     """
 
-    ref_qk, ref_ov = _gqa_circuits(graph, spec, reference_data)
+    cache = _reference_attention_cache(objective)
+    cache_key = ("gqa", id(graph), id(reference_data), spec)
+    prepared = cache.get(cache_key)
+    if prepared is None:
+        ref_qk, ref_ov = _gqa_circuits(graph, spec, reference_data)
+        precisions = (
+            _gqa_circuit_precisions(graph, objective, reference_data, spec)
+            if isinstance(objective, DiagonalFisherObjective)
+            else None
+        )
+        prepared = (ref_qk, ref_ov, precisions)
+        cache[cache_key] = prepared
+    ref_qk, ref_ov, precisions = prepared
     target_qk, target_ov = _gqa_circuits(
         graph,
         spec,
@@ -524,14 +611,16 @@ def gqa_head_cost_matrix(
     )
 
     def _pairwise(ref, target) -> np.ndarray:
-        # (G, R, d, d) x (G, R, d, d) -> (G, R, G, R) squared distances.
-        residual = ref[:, :, None, None, :, :] - target[None, None, :, :, :, :]
-        return np.sum(np.square(residual), axis=(-2, -1))
+        shape = ref.shape[:2]
+        other_shape = target.shape[:2]
+        distances = _pairwise_squared(
+            ref.reshape(np.prod(shape), *ref.shape[-2:]),
+            target.reshape(np.prod(other_shape), *target.shape[-2:]),
+        )
+        return distances.reshape(*shape, *other_shape)
 
     if isinstance(objective, DiagonalFisherObjective):
-        qk_precision, ov_precision = _gqa_circuit_precisions(
-            graph, objective, reference_data, spec
-        )
+        qk_precision, ov_precision = precisions
         head_cost = _weighted_gqa_pairwise(
             ref_qk, target_qk, qk_precision
         ) + _weighted_gqa_pairwise(ref_ov, target_ov, ov_precision)
@@ -557,6 +646,7 @@ def update_gqa_attention_module(
     spec: GQAModuleSpec,
     *,
     scheduled_groups: set[str] | None = None,
+    record_ambiguity: bool = False,
 ) -> tuple[TransformState, dict[str, Any]]:
     """One structured coordinate update for a grouped-query attention module.
 
@@ -568,20 +658,27 @@ def update_gqa_attention_module(
     are ordinary scheduled groups solved by the rotation projection.
     """
 
-    from .solvers import update_group_transform
+    from .solvers import (
+        assignment_objective_margin,
+        group_assignment_ambiguity,
+        update_group_transform,
+    )
 
     cost, _ = gqa_head_cost_matrix(
         graph, objective, reference_data, target_data, state, spec
     )
     row_ind, col_ind = linear_sum_assignment(cost)
-    kv_matrix = np.zeros_like(cost)
-    kv_matrix[row_ind, col_ind] = 1.0
-
-    previous = as_permutation_matrix(
-        state.matrices[spec.kv_group], size=spec.num_kv_groups, dtype=np.float64
-    )
-    delta = float(np.max(np.abs(kv_matrix - previous)))
-    state = state.with_matrices({spec.kv_group: kv_matrix})
+    kv_indices = np.empty(spec.num_kv_groups, dtype=np.int32)
+    kv_indices[row_ind] = col_ind
+    previous = state.transforms[spec.kv_group]
+    delta = 0.0 if np.array_equal(previous.indices, kv_indices) else 1.0
+    state = state.with_transforms({spec.kv_group: PermutationTransform(kv_indices)})
+    objective.notify_group_updated(graph, spec.kv_group)
+    ambiguity = {}
+    if record_ambiguity:
+        margin = assignment_objective_margin(-cost)
+        if margin is not None:
+            ambiguity[spec.kv_group] = {"assignment_objective_margin": margin}
 
     intra_groups = [
         group_id
@@ -589,6 +686,12 @@ def update_gqa_attention_module(
         if scheduled_groups is None or group_id in scheduled_groups
     ]
     for group_id in intra_groups:
+        if record_ambiguity:
+            group_value = group_assignment_ambiguity(
+                graph, objective, reference_data, target_data, state, group_id
+            )
+            if group_value is not None:
+                ambiguity[group_id] = group_value
         state, group_delta = update_group_transform(
             graph, objective, reference_data, target_data, state, group_id
         )
@@ -600,6 +703,8 @@ def update_gqa_attention_module(
         "delta": delta,
         "intra_groups": list(intra_groups),
     }
+    if ambiguity:
+        aux["ambiguity"] = ambiguity
     return state, aux
 
 

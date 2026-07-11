@@ -31,7 +31,7 @@ _CENTER_SOFTMAX_HEAD_STATIC_KEYS = frozenset({"plan", "head"})
 _MATCH_STATIC_KEYS = frozenset(
     {"objective", "solvers", "barycenter_passes", "transform_families"}
 )
-_MATCH_PER_SAMPLE_KEYS = frozenset({"reference"})
+_MATCH_PER_SAMPLE_KEYS = frozenset({"reference", "objective_final", "steps"})
 
 
 def _artifact_metadata(payload: Mapping[str, Any]) -> np.ndarray:
@@ -78,12 +78,33 @@ def write_transforms_artifact(
             "Transform-family metadata must contain exactly the persisted groups."
         )
     payload = {
-        str(group_id): np.asarray(matrix) for group_id, matrix in transforms.items()
+        str(group_id): np.asarray(transform)
+        for group_id, transform in transforms.items()
     }
+    representations = {}
+    for group_id, family in families.items():
+        if family == "permutation":
+            representation = "indices"
+        elif family == "signed_permutation":
+            representation = "signed_indices"
+        elif family == "rotation_pairs":
+            representation = "matrix"
+        elif family == "orthogonal":
+            representation = (
+                "signed_indices"
+                if np.issubdtype(payload[group_id].dtype, np.integer)
+                else "matrix"
+            )
+        else:
+            raise ValueError(
+                f"Unknown transform family {family!r} for group {group_id!r}."
+            )
+        representations[group_id] = representation
     payload[_METADATA_KEY] = _artifact_metadata(
         {
             "artifact_type": "transforms",
             "transform_families": families,
+            "representations": representations,
         }
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -400,6 +421,13 @@ class RunArtifactStore:
                         if key in _CANONICALIZE_STATIC_KEYS
                     },
                 )
+                per_sample = {
+                    key: value
+                    for key, value in stage_data.items()
+                    if key not in _CANONICALIZE_STATIC_KEYS
+                }
+                if per_sample:
+                    filtered_payload[stage] = per_sample
             elif stage == "center_softmax_head" and isinstance(stage_data, dict):
                 self._static_config.setdefault(
                     "center_softmax_head",
@@ -442,12 +470,19 @@ class RunArtifactStore:
         if path.exists():
             try:
                 existing = json.loads(path.read_text())
-            except Exception:
-                existing = {}
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Existing diagnostic artifact is malformed: {path}"
+                ) from exc
         existing.update(
             {key: value for key, value in filtered_payload.items() if value is not None}
         )
         write_diagnostics_artifact(path, existing)
+
+    def register_static_config(self, stage: str, payload: Mapping[str, Any]) -> None:
+        """Register reconstructible stage metadata for summary finalization."""
+
+        self._static_config[str(stage)] = dict(payload)
 
     def finalize(
         self,
@@ -474,8 +509,10 @@ class RunArtifactStore:
             if path.exists():
                 try:
                     sample_diagnostics.append(json.loads(path.read_text()))
-                except Exception:
-                    sample_diagnostics.append({})
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Diagnostic artifact is malformed: {path}"
+                    ) from exc
             else:
                 sample_diagnostics.append({})
         (self.output_dir / "sample_diagnostics.json").write_text(

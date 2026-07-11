@@ -83,9 +83,7 @@ def test_apply_scales_on_intra_groups_preserves_transformer_function():
     graph, params, tokens = _case(seed=0)
     scales = _intra_scales(graph, seed=1)
 
-    scaled = graph.apply_scales(
-        params, ScaleState.from_scales(graph, scales, backend="jax")
-    )
+    scaled = graph.apply_scales(params, ScaleState.from_scales(graph, scales))
 
     np.testing.assert_allclose(
         np.asarray(layernorm_mha_transformer_apply(scaled, tokens)),
@@ -121,9 +119,7 @@ def test_balancing_canonicalizer_collapses_scale_orbit():
 
     graph, params, _ = _case(seed=3)
     scales = _intra_scales(graph, seed=4)
-    scaled = graph.apply_scales(
-        params, ScaleState.from_scales(graph, scales, backend="jax")
-    )
+    scaled = graph.apply_scales(params, ScaleState.from_scales(graph, scales))
 
     canonical_a, _, _ = ScaleCanonicalizer().canonicalize(
         graph, params, activation="gelu"

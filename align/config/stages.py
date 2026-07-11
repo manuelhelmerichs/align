@@ -6,6 +6,7 @@ JAX platform, so nothing here may import the matching/canonicalization runtime.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,7 +24,7 @@ _SOLVER_FIELDS = frozenset(
         "sinkhorn_iterations",
         "init_scale",
         "record_loss_history",
-        "harden",
+        "record_ambiguity",
         "groups",
         "components",
     }
@@ -72,7 +73,7 @@ class SolverStep:
     sinkhorn_iterations: int = 50
     init_scale: float = 1e-2
     record_loss_history: bool = False
-    harden: bool = True
+    record_ambiguity: bool = False
     groups: tuple[str, ...] | None = None
     components: tuple[str, ...] | None = None
 
@@ -81,6 +82,30 @@ class SolverStep:
             raise ValueError(
                 "A match solver step may set 'groups' or 'components', not both."
             )
+        for name, value in (
+            ("max_sweeps", self.max_sweeps),
+            ("max_steps", self.max_steps),
+            ("sinkhorn_iterations", self.sinkhorn_iterations),
+        ):
+            if isinstance(value, bool) or int(value) != value or int(value) <= 0:
+                raise ValueError(f"match.solvers.{name} must be a positive integer.")
+        for name, value, positive in (
+            ("tolerance", self.tolerance, False),
+            ("tau", self.tau, True),
+            ("learning_rate", self.learning_rate, True),
+            ("init_scale", self.init_scale, False),
+        ):
+            value = float(value)
+            if not math.isfinite(value) or (value <= 0.0 if positive else value < 0.0):
+                qualifier = "positive" if positive else "non-negative"
+                raise ValueError(
+                    f"match.solvers.{name} must be finite and {qualifier}."
+                )
+        for name, values in (("groups", self.groups), ("components", self.components)):
+            if values is not None and (not values or len(set(values)) != len(values)):
+                raise ValueError(
+                    f"match.solvers.{name} must be a non-empty list of unique names."
+                )
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> SolverStep:
@@ -104,7 +129,10 @@ class SolverStep:
                 "match.solvers.record_loss_history",
                 payload.get("record_loss_history", False),
             ),
-            harden=_require_bool("match.solvers.harden", payload.get("harden", True)),
+            record_ambiguity=_require_bool(
+                "match.solvers.record_ambiguity",
+                payload.get("record_ambiguity", False),
+            ),
             groups=tuple(str(group) for group in groups)
             if groups is not None
             else None,
@@ -126,9 +154,11 @@ class SolverStep:
                     "sinkhorn_iterations": self.sinkhorn_iterations,
                     "init_scale": self.init_scale,
                     "record_loss_history": self.record_loss_history,
-                    "harden": self.harden,
+                    "record_ambiguity": self.record_ambiguity,
                 }
             )
+        elif self.record_ambiguity:
+            payload["record_ambiguity"] = True
         if self.groups is not None:
             payload["groups"] = list(self.groups)
         if self.components is not None:

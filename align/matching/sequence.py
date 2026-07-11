@@ -22,7 +22,12 @@ from .solvers import (
     SolverStep,
     _scheduled_groups,
 )
-from .state import TransformState
+from .state import (
+    MatrixTransform,
+    PermutationTransform,
+    SignedPermutationTransform,
+    TransformState,
+)
 
 
 def _check_permute_only_folded(graph, *data_mappings) -> None:
@@ -63,6 +68,11 @@ class SolverSequence:
         for step in self.steps:
             if step.solver not in {"lap", "procrustes", "sinkhorn"}:
                 raise ValueError(f"Unknown matching solver {step.solver!r}.")
+        self._sinkhorn_solvers = {
+            index: SinkhornSolver(self.objective, step)
+            for index, step in enumerate(self.steps)
+            if step.solver == "sinkhorn"
+        }
 
     @classmethod
     def from_steps(cls, objective, steps) -> SolverSequence:
@@ -84,6 +94,49 @@ class SolverSequence:
     def backend(self) -> str:
         return "jax" if self.prefers_gpu else "numpy"
 
+    def validate_graph(self, graph) -> None:
+        """Validate objective/solver/group compatibility before any execution."""
+
+        if getattr(self.objective, "name", None) == "relative_fisher":
+            invalid = [step.solver for step in self.steps if step.solver != "sinkhorn"]
+            if invalid:
+                raise ValueError(
+                    "relative_fisher is Sinkhorn-only; incompatible solver steps: "
+                    + ", ".join(invalid)
+                )
+        for index, step in enumerate(self.steps):
+            groups = _scheduled_groups(graph, step)
+            if step.solver == "sinkhorn":
+                unsupported = [
+                    group_id
+                    for group_id in groups
+                    if graph.groups[group_id].transform_family != "permutation"
+                ]
+                if unsupported:
+                    detail = ", ".join(
+                        f"{group_id} ({graph.groups[group_id].transform_family})"
+                        for group_id in unsupported
+                    )
+                    raise ValueError(
+                        f"Solver step {index} uses sinkhorn on unsupported transform "
+                        f"families: {detail}. Sinkhorn currently represents only "
+                        "plain permutations; schedule lap/procrustes for the other "
+                        "families or restrict this step's groups/components."
+                    )
+            if step.solver == "procrustes":
+                ineligible = [
+                    group_id
+                    for group_id in groups
+                    if graph.groups[group_id].transform_family != "orthogonal"
+                ]
+                if (
+                    step.groups is not None or step.components is not None
+                ) and ineligible:
+                    raise ValueError(
+                        f"Solver step {index} uses procrustes on non-orthogonal groups: "
+                        + ", ".join(ineligible)
+                    )
+
     def solve(
         self,
         graph,
@@ -92,7 +145,9 @@ class SolverSequence:
         *,
         rng_key=None,
         initial_state: TransformState | None = None,
+        rng_keys=None,
     ) -> tuple[TransformState, dict[str, Any]]:
+        self.validate_graph(graph)
         state = initial_state or TransformState.identity(
             graph, backend="jax" if self.prefers_gpu else "numpy"
         )
@@ -111,12 +166,22 @@ class SolverSequence:
                 step_key = None
                 if rng_key is not None:
                     step_key = jax.random.fold_in(rng_key, index)
-                state, aux = SinkhornSolver(self.objective, step).solve(
+                per_record_step_keys = (
+                    jax.vmap(
+                        lambda key, step_index=index: jax.random.fold_in(
+                            key, step_index
+                        )
+                    )(rng_keys)
+                    if rng_keys is not None
+                    else None
+                )
+                state, aux = self._sinkhorn_solvers[index].solve(
                     graph,
                     reference_data,
                     target_data,
                     state,
                     rng_key=step_key,
+                    rng_keys=per_record_step_keys,
                 )
                 state = _unbatch_state(state, sample_index=0)
             else:  # pragma: no cover - guarded in __init__
@@ -130,6 +195,7 @@ class SolverSequence:
             "steps": aux_steps,
             "objective_final": float(np.ravel(np.asarray(values))[0]),
         }
+        state.validate(graph, hard=True)
         return state, aux_payload
 
     def solve_batch(
@@ -139,10 +205,12 @@ class SolverSequence:
         target_params_batch,
         *,
         rng_key=None,
+        rng_keys=None,
         backend: str | None = None,
     ) -> tuple[list[TransformState], list[dict[str, Any]]]:
         if not target_params_batch:
             return [], []
+        self.validate_graph(graph)
         if not self.supports_batching:
             results: list[TransformState] = []
             aux_payload: list[dict[str, Any]] = []
@@ -153,6 +221,8 @@ class SolverSequence:
                 sample_key = (
                     jax.random.fold_in(rng_key, idx) if rng_key is not None else None
                 )
+                if rng_keys is not None:
+                    sample_key = rng_keys[idx]
                 state, aux = self.solve(
                     graph,
                     reference_data,
@@ -169,12 +239,24 @@ class SolverSequence:
         _check_permute_only_folded(graph, reference_data, target_data)
         state = TransformState.identity(graph, backend="jax")
         aux_steps: list[dict[str, Any]] = []
-        for index, step in enumerate(self.steps):
+        for index, _step in enumerate(self.steps):
             step_key = (
                 jax.random.fold_in(rng_key, index) if rng_key is not None else None
             )
-            state, aux = SinkhornSolver(self.objective, step).solve(
-                graph, reference_data, target_data, state, rng_key=step_key
+            per_record_step_keys = (
+                jax.vmap(
+                    lambda key, step_index=index: jax.random.fold_in(key, step_index)
+                )(rng_keys)
+                if rng_keys is not None
+                else None
+            )
+            state, aux = self._sinkhorn_solvers[index].solve(
+                graph,
+                reference_data,
+                target_data,
+                state,
+                rng_key=step_key,
+                rng_keys=per_record_step_keys,
             )
             aux_steps.append({"index": index, **aux})
 
@@ -192,6 +274,12 @@ class SolverSequence:
                     value = sample_aux.get(key)
                     if isinstance(value, list) and len(value) == batch_size:
                         sample_aux[key] = value[sample_idx]
+                ambiguity = sample_aux.get("ambiguity")
+                if isinstance(ambiguity, dict):
+                    sample_aux["ambiguity"] = {
+                        group_id: group_values[sample_idx]
+                        for group_id, group_values in ambiguity.items()
+                    }
                 sample_steps.append(sample_aux)
             aux_batch.append(
                 {
@@ -206,6 +294,15 @@ class SolverSequence:
         return states, aux_batch
 
     def _run_lap_step(self, graph, reference_data, target_data, state, step):
+        self.objective.begin_lap_execution(graph, target_data)
+        try:
+            return self._run_lap_step_cached(
+                graph, reference_data, target_data, state, step
+            )
+        finally:
+            self.objective.end_lap_execution()
+
+    def _run_lap_step_cached(self, graph, reference_data, target_data, state, step):
         groups = _scheduled_groups(graph, step)
         scheduled = set(groups)
         module_by_head = {
@@ -231,9 +328,10 @@ class SolverSequence:
             for group_id in (*spec.query_head_groups, *spec.vo_groups)
             if group_id in scheduled
         }
-        solver = LAPGroupSolver(self.objective)
+        solver = LAPGroupSolver(self.objective, record_ambiguity=step.record_ambiguity)
         sweeps = 0
         max_delta = 0.0
+        ambiguity: dict[str, Any] = {}
         for _ in range(step.max_sweeps):
             sweeps += 1
             sweep_delta = 0.0
@@ -249,6 +347,7 @@ class SolverSequence:
                         state,
                         module_by_head[group_id],
                         scheduled_groups=scheduled,
+                        record_ambiguity=step.record_ambiguity,
                     )
                 elif group_id in gqa_by_kv:
                     state, update_aux = update_gqa_attention_module(
@@ -259,16 +358,26 @@ class SolverSequence:
                         state,
                         gqa_by_kv[group_id],
                         scheduled_groups=scheduled,
+                        record_ambiguity=step.record_ambiguity,
                     )
                 else:
                     state, update_aux = solver.update(
                         graph, reference_data, target_data, state, group_id
                     )
                 sweep_delta = max(sweep_delta, float(update_aux["delta"]))
+                ambiguity.update(update_aux.get("ambiguity", {}))
             max_delta = sweep_delta
             if sweep_delta <= step.tolerance:
                 break
-        return state, {"solver": "lap", "sweeps": sweeps, "max_delta": max_delta}
+        aux = {
+            "solver": "lap",
+            "sweeps": sweeps,
+            "max_delta": max_delta,
+            "converged": max_delta <= step.tolerance,
+        }
+        if ambiguity:
+            aux["ambiguity"] = ambiguity
+        return state, aux
 
     def _run_procrustes_step(self, graph, reference_data, target_data, state, step):
         scheduled = _scheduled_groups(graph, step)
@@ -312,13 +421,29 @@ class SolverSequence:
 
 
 def _unbatch_state(state: TransformState, *, sample_index: int) -> TransformState:
-    matrices = {}
-    for group_id, matrix in state.matrices.items():
-        arr = np.asarray(matrix)
-        matrices[group_id] = arr[sample_index] if arr.ndim == 3 else arr
+    transforms = {}
+    for group_id, transform in state.transforms.items():
+        if isinstance(transform, PermutationTransform):
+            indices = np.asarray(transform.indices)
+            transforms[group_id] = PermutationTransform(
+                indices[sample_index] if indices.ndim == 2 else indices
+            )
+        elif isinstance(transform, SignedPermutationTransform):
+            indices = np.asarray(transform.indices)
+            signs = np.asarray(transform.signs)
+            transforms[group_id] = SignedPermutationTransform(
+                indices[sample_index] if indices.ndim == 2 else indices,
+                signs[sample_index] if signs.ndim == 2 else signs,
+            )
+        else:
+            matrix = np.asarray(transform.matrix)
+            transforms[group_id] = MatrixTransform(
+                matrix[sample_index] if matrix.ndim == 3 else matrix,
+                family=transform.family,
+            )
     return TransformState(
         group_order=state.group_order,
-        matrices=matrices,
+        transforms=transforms,
         logits=None,
         metadata=dict(state.metadata),
     )

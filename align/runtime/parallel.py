@@ -1,6 +1,8 @@
 """Parallel worker helpers for align execution."""
 
+import logging
 import multiprocessing as mp
+import os
 import shutil
 import time
 from collections import deque
@@ -12,8 +14,23 @@ from typing import Any
 from .._jax_platforms import is_gpu_platform
 from .resources import WORKER_HEARTBEAT_INTERVAL
 
+_LOG = logging.getLogger(__name__)
+
 
 def worker_process_main(job: dict[str, object], command_queue, progress_queue) -> None:
+    device_id = job.get("device_id")
+    if device_id is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
+        os.environ["JAX_VISIBLE_DEVICES"] = "0"
+    worker_threads = str(int(job.get("worker_threads") or 1))
+    for variable in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        os.environ[variable] = worker_threads
     from .worker import run_worker
 
     run_worker(job, command_queue, progress_queue)
@@ -50,10 +67,12 @@ class WorkerPool:
         parallelism: int,
         device_ids: list[int] | None,
         strategy_prefers_gpu: bool,
+        allow_device_sharing: bool = False,
     ) -> None:
         self.parallelism = max(1, int(parallelism))
         self.device_ids = list(device_ids) if device_ids else None
         self.strategy_prefers_gpu = bool(strategy_prefers_gpu)
+        self.allow_device_sharing = bool(allow_device_sharing)
 
         self._ctx = mp.get_context("spawn")
         self._progress_queue = None
@@ -81,6 +100,16 @@ class WorkerPool:
 
         if not base:
             base = [None]
+        elif (
+            self.strategy_prefers_gpu
+            and count > len(base)
+            and not self.allow_device_sharing
+        ):
+            raise ValueError(
+                f"Requested {count} accelerator workers for {len(base)} visible "
+                "device(s). Set runtime.allow_device_sharing=true only if the "
+                "resulting compilation, memory, and contention risk is intentional."
+            )
 
         plan: list[WorkerConfig] = []
         for idx in range(count):
@@ -210,7 +239,8 @@ class WorkerPool:
                 for device in jax.devices()
                 if is_gpu_platform(device.platform)
             ]
-        except Exception:  # pragma: no cover - backend specific
+        except Exception as exc:  # pragma: no cover - backend specific
+            _LOG.warning("GPU device discovery failed: %s", exc)
             return []
 
 

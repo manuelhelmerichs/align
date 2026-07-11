@@ -12,12 +12,11 @@ from ..symmetry import (
     GQARoPECircuitConstraint,
     MHACircuitConstraint,
     apply_matrix_to_axis,
-    binding_axis_interval,
+    binding_axis_intervals,
 )
 from ..symmetry.tensor_ops import (
     binding_indexer,
     binding_selector,
-    binding_sort_key,
     binding_transform_matrix,
 )
 
@@ -26,6 +25,29 @@ class Objective(ABC):
     """Complete graph objective used by alignment schedulers."""
 
     name: str
+
+    def begin_lap_execution(self, graph, target_data) -> None:
+        """Create a sweep-local cache of target tensors with other groups applied."""
+
+        self._lap_execution_cache = _LAPExecutionCache(graph, target_data)
+
+    def end_lap_execution(self) -> None:
+        self._lap_execution_cache = None
+
+    def notify_group_updated(self, graph, group_id: str) -> None:
+        cache = getattr(self, "_lap_execution_cache", None)
+        if cache is not None:
+            cache.invalidate_group(group_id, graph.tensors_for_group(group_id))
+
+    def apply_other_groups_hard(
+        self, graph, tensor_id: str, tensor, state, skip_groups
+    ):
+        cache = getattr(self, "_lap_execution_cache", None)
+        if cache is None:
+            return _apply_other_groups_hard(
+                graph, tensor_id, tensor, state, skip_groups
+            )
+        return cache.get(tensor_id, state, skip_groups)
 
     @abstractmethod
     def value(self, graph, reference_data, target_data, state):
@@ -62,6 +84,39 @@ class Objective(ABC):
 
 
 OBJECTIVES: dict[str, type[Objective]] = {}
+
+
+class _LAPExecutionCache:
+    """Incremental cache invalidated through graph adjacency after group updates."""
+
+    def __init__(self, graph, target_data) -> None:
+        self.graph = graph
+        self.target_data = target_data
+        self.values: dict[tuple[str, frozenset[str]], np.ndarray] = {}
+
+    def get(self, tensor_id: str, state, skip_groups) -> np.ndarray:
+        key = (tensor_id, frozenset(skip_groups))
+        cached = self.values.get(key)
+        if cached is None:
+            cached = _apply_other_groups_hard(
+                self.graph,
+                tensor_id,
+                self.target_data[tensor_id],
+                state,
+                key[1],
+            )
+            self.values[key] = cached
+        return cached
+
+    def invalidate_group(self, group_id: str, tensor_ids) -> None:
+        """Drop only cached views that actually include the changed group."""
+
+        touched = set(tensor_ids)
+        self.values = {
+            key: value
+            for key, value in self.values.items()
+            if key[0] not in touched or group_id in key[1]
+        }
 
 
 def register_objective(name: str):
@@ -127,11 +182,7 @@ def _apply_matrix_axis(tensor, matrix, *, axis: int, tensor_is_batched: bool):
 
 
 def _sorted_bindings(graph, tensor_id: str):
-    shape = graph.tensors[tensor_id].shape
-    return sorted(
-        graph.bindings_for_tensor(tensor_id),
-        key=lambda binding: binding_sort_key(shape, binding),
-    )
+    return graph.sorted_bindings_for_tensor(tensor_id)
 
 
 def _apply_state_to_tensor(graph, tensor_id: str, tensor, state):
@@ -140,7 +191,7 @@ def _apply_state_to_tensor(graph, tensor_id: str, tensor, state):
     for binding in _sorted_bindings(graph, tensor_id):
         tensor_is_batched = _is_batched_tensor(graph, tensor_id, updated)
         matrix = binding_transform_matrix(
-            state.matrices[binding.group],
+            state.matrix(binding.group),
             transform_family=graph.groups[binding.group].transform_family,
             scope=binding.transform_scope,
         )
@@ -150,12 +201,17 @@ def _apply_state_to_tensor(graph, tensor_id: str, tensor, state):
         if matrix_arr.ndim == 3 and not tensor_is_batched:
             updated = jnp.broadcast_to(updated, (matrix_arr.shape[0], *updated.shape))
             tensor_is_batched = True
-        spec_axis, start, stop = binding_axis_interval(shape, binding)
         selector = binding_selector(shape, binding)
         offset = 1 if tensor_is_batched else 0
-        axis = spec_axis + offset
+        intervals = binding_axis_intervals(shape, binding)
+        axis = intervals[0][0] + offset
         axis_size = int(updated.shape[axis])
-        if not selector and start == 0 and stop == axis_size:
+        if (
+            len(intervals) == 1
+            and not selector
+            and intervals[0][1] == 0
+            and intervals[0][2] == axis_size
+        ):
             updated = _apply_matrix_axis(
                 updated,
                 matrix,
@@ -163,17 +219,18 @@ def _apply_state_to_tensor(graph, tensor_id: str, tensor, state):
                 tensor_is_batched=tensor_is_batched,
             )
             continue
-        indexer = binding_indexer(
-            updated.ndim, spec_axis, start, stop, selector, offset=offset
-        )
-        segment = updated[indexer]
-        transformed = _apply_matrix_axis(
-            segment,
-            matrix,
-            axis=axis,
-            tensor_is_batched=tensor_is_batched,
-        )
-        updated = updated.at[indexer].set(transformed)
+        for spec_axis, start, stop in intervals:
+            indexer = binding_indexer(
+                updated.ndim, spec_axis, start, stop, selector, offset=offset
+            )
+            segment = updated[indexer]
+            transformed = _apply_matrix_axis(
+                segment,
+                matrix,
+                axis=axis,
+                tensor_is_batched=tensor_is_batched,
+            )
+            updated = updated.at[indexer].set(transformed)
     return updated
 
 
@@ -188,22 +245,29 @@ def _apply_other_groups_hard(
         if binding.group in skip_groups:
             continue
         matrix = binding_transform_matrix(
-            np.asarray(state.matrices[binding.group]),
+            np.asarray(state.matrix(binding.group)),
             transform_family=graph.groups[binding.group].transform_family,
             scope=binding.transform_scope,
         )
         if matrix is None:
             continue
-        axis, start, stop = binding_axis_interval(shape, binding)
         selector = binding_selector(shape, binding)
-        if not selector and start == 0 and stop == int(updated.shape[axis]):
+        intervals = binding_axis_intervals(shape, binding)
+        axis = intervals[0][0]
+        if (
+            len(intervals) == 1
+            and not selector
+            and intervals[0][1] == 0
+            and intervals[0][2] == int(updated.shape[axis])
+        ):
             updated = apply_matrix_to_axis(updated, matrix, axis=axis)
             continue
-        indexer = binding_indexer(updated.ndim, axis, start, stop, selector)
-        segment = updated[indexer]
-        transformed = apply_matrix_to_axis(segment, matrix, axis=axis)
-        updated = np.array(updated, copy=True)
-        updated[indexer] = transformed
+        for axis, start, stop in intervals:
+            indexer = binding_indexer(updated.ndim, axis, start, stop, selector)
+            segment = updated[indexer]
+            transformed = apply_matrix_to_axis(segment, matrix, axis=axis)
+            updated = np.array(updated, copy=True)
+            updated[indexer] = transformed
     return updated
 
 
@@ -282,11 +346,11 @@ class EuclideanObjective(Objective):
         group = graph.groups[group_id]
         signed = np.zeros((group.size, group.size), dtype=np.float64)
         invariant = np.zeros((group.size, group.size), dtype=np.float64)
-        for tensor_id in graph.tensors:
+        for tensor_id in graph.tensors_for_group(group_id):
             bindings = [
                 binding
-                for binding in graph.bindings_for_tensor(tensor_id)
-                if binding.group == group_id
+                for binding in graph.bindings_for_group(group_id)
+                if binding.tensor_id == tensor_id
             ]
             if not bindings:
                 continue
@@ -296,21 +360,23 @@ class EuclideanObjective(Objective):
             # the linearizability check above.
             shape = graph.tensors[tensor_id].shape
             ref = np.asarray(reference_data[tensor_id])
-            target = _apply_other_groups_hard(
+            target = self.apply_other_groups_hard(
                 graph, tensor_id, target_data[tensor_id], state, {group_id}
             )
             for binding in bindings:
-                axis, start, stop = binding_axis_interval(shape, binding)
                 selector = binding_selector(shape, binding)
-                indexer = binding_indexer(ref.ndim, axis, start, stop, selector)
-                ref_mat = np.moveaxis(ref[indexer], axis, 0).reshape(group.size, -1)
-                target_mat = np.moveaxis(target[indexer], axis, 0).reshape(
-                    group.size, -1
-                )
-                bucket = (
-                    invariant if binding.transform_scope == "permute_only" else signed
-                )
-                bucket += ref_mat @ target_mat.T
+                for axis, start, stop in binding_axis_intervals(shape, binding):
+                    indexer = binding_indexer(ref.ndim, axis, start, stop, selector)
+                    ref_mat = np.moveaxis(ref[indexer], axis, 0).reshape(group.size, -1)
+                    target_mat = np.moveaxis(target[indexer], axis, 0).reshape(
+                        group.size, -1
+                    )
+                    bucket = (
+                        invariant
+                        if binding.transform_scope == "permute_only"
+                        else signed
+                    )
+                    bucket += ref_mat @ target_mat.T
         return signed, invariant
 
 
@@ -394,11 +460,11 @@ class DiagonalFisherObjective(Objective):
         group = graph.groups[group_id]
         signed = np.zeros((group.size, group.size), dtype=np.float64)
         invariant = np.zeros((group.size, group.size), dtype=np.float64)
-        for tensor_id in graph.tensors:
+        for tensor_id in graph.tensors_for_group(group_id):
             bindings = [
                 binding
-                for binding in graph.bindings_for_tensor(tensor_id)
-                if binding.group == group_id
+                for binding in graph.bindings_for_group(group_id)
+                if binding.tensor_id == tensor_id
             ]
             if not bindings:
                 continue
@@ -407,28 +473,28 @@ class DiagonalFisherObjective(Objective):
             shape = graph.tensors[tensor_id].shape
             ref = np.asarray(reference_data[tensor_id])
             weight = self._weight(graph, tensor_id)
-            target = _apply_other_groups_hard(
+            target = self.apply_other_groups_hard(
                 graph, tensor_id, target_data[tensor_id], state, {group_id}
             )
             for binding in bindings:
-                axis, start, stop = binding_axis_interval(shape, binding)
                 selector = binding_selector(shape, binding)
-                indexer = binding_indexer(ref.ndim, axis, start, stop, selector)
-                ref_mat = np.moveaxis(ref[indexer], axis, 0).reshape(group.size, -1)
-                weight_mat = np.moveaxis(weight[indexer], axis, 0).reshape(
-                    group.size, -1
-                )
-                target_mat = np.moveaxis(target[indexer], axis, 0).reshape(
-                    group.size, -1
-                )
-                cross = (weight_mat * ref_mat) @ target_mat.T
-                bucket = (
-                    invariant if binding.transform_scope == "permute_only" else signed
-                )
-                bucket += cross
-                # The weighted target self-energy depends on the assignment
-                # but not on channel signs, so it is sign-invariant.
-                invariant -= 0.5 * weight_mat @ np.square(target_mat).T
+                for axis, start, stop in binding_axis_intervals(shape, binding):
+                    indexer = binding_indexer(ref.ndim, axis, start, stop, selector)
+                    ref_mat = np.moveaxis(ref[indexer], axis, 0).reshape(group.size, -1)
+                    weight_mat = np.moveaxis(weight[indexer], axis, 0).reshape(
+                        group.size, -1
+                    )
+                    target_mat = np.moveaxis(target[indexer], axis, 0).reshape(
+                        group.size, -1
+                    )
+                    cross = (weight_mat * ref_mat) @ target_mat.T
+                    bucket = (
+                        invariant
+                        if binding.transform_scope == "permute_only"
+                        else signed
+                    )
+                    bucket += cross
+                    invariant -= 0.5 * weight_mat @ np.square(target_mat).T
         return signed, invariant
 
 

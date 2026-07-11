@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 
 from ..architectures import get_recipe
 from ..config.stages import CanonicalizeConfig, CenterSoftmaxHeadConfig, MatchConfig
@@ -101,6 +102,69 @@ def prepare_stage_executors(
                 manifest.reference_record, reference_current
             )
     return list(stages)
+
+
+def build_stage_executors(
+    *,
+    stage_order: Sequence[str],
+    manifest: SampleManifest,
+    reference_sample: WeightSample,
+    family: str,
+    recipe_kwargs: Mapping[str, Any],
+    canonicalize_config: CanonicalizeConfig | None = None,
+    center_softmax_head_config: CenterSoftmaxHeadConfig | None = None,
+    match_config: MatchConfig | None = None,
+    match_reference: WeightSample | None = None,
+    match_reference_index: int | None = None,
+    seed: int | None = None,
+    rng_offset: int = 0,
+    batch_size: int = 1,
+) -> list[tuple[str, StageExecutor]]:
+    """Construct and prepare the exact declared stage sequence for any runtime."""
+
+    configs = {
+        "canonicalize": canonicalize_config,
+        "center_softmax_head": center_softmax_head_config,
+        "match": match_config,
+    }
+    unknown = [name for name in stage_order if name not in configs]
+    missing = [name for name in stage_order if configs.get(name) is None]
+    extra = [
+        name
+        for name, config in configs.items()
+        if config is not None and name not in stage_order
+    ]
+    if unknown or missing or extra:
+        raise ValueError(
+            "Prepared stage configuration mismatch: "
+            f"unknown={unknown}, missing={missing}, extra={extra}."
+        )
+
+    executors: dict[str, StageExecutor] = {}
+    if canonicalize_config is not None:
+        executors["canonicalize"] = CanonicalizeExecutor(
+            canonicalize_config, family=family, recipe_kwargs=recipe_kwargs
+        )
+    if center_softmax_head_config is not None:
+        executors["center_softmax_head"] = CenterSoftmaxHeadExecutor(
+            center_softmax_head_config, family=family, recipe_kwargs=recipe_kwargs
+        )
+    if match_config is not None:
+        executors["match"] = MatchExecutor(
+            match_config,
+            reference_index=match_reference_index,
+            seed=seed,
+            rng_offset=rng_offset,
+            batch_size=batch_size,
+            family=family,
+            recipe_kwargs=recipe_kwargs,
+        )
+    return prepare_stage_executors(
+        [(name, executors[name]) for name in stage_order],
+        manifest,
+        reference_sample,
+        match_reference=match_reference,
+    )
 
 
 class CanonicalizeExecutor(StageExecutor):
@@ -260,6 +324,7 @@ class MatchExecutor(StageExecutor):
             objective_kwargs=self.config.objective.kwargs,
             schedule=self.config.solvers,
         )
+        self.solver_sequence.validate_graph(self.graph)
         backend = self.solver_sequence.backend
         self.reference_backend = backend
         self.reference_data = self.graph.materialize(
@@ -360,7 +425,12 @@ class MatchExecutor(StageExecutor):
             target_records = [record_list[idx] for idx in target_positions]
             target_samples = [sample_batch[idx] for idx in target_positions]
             target_params = [sample.params for sample in target_samples]
-            rng_key = self._rng_for_record(target_records[0])
+            rng_keys = [self._rng_for_record(record) for record in target_records]
+            batched_rng_keys = (
+                jnp.stack(rng_keys)
+                if rng_keys and all(key is not None for key in rng_keys)
+                else None
+            )
             batch_results = match_batch(
                 self.graph,
                 self.reference_sample.params,
@@ -368,7 +438,7 @@ class MatchExecutor(StageExecutor):
                 solver_sequence=self.solver_sequence,
                 reference_data=self.reference_data,
                 reference_backend=self.reference_backend,
-                rng_key=rng_key,
+                rng_keys=batched_rng_keys,
             )
             for pos, result in zip(target_positions, batch_results, strict=True):
                 aligned_params, transforms, aux = result
@@ -398,4 +468,5 @@ __all__ = [
     "CenterSoftmaxHeadExecutor",
     "MatchExecutor",
     "prepare_stage_executors",
+    "build_stage_executors",
 ]

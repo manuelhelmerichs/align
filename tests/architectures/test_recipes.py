@@ -20,6 +20,7 @@ def test_builtin_recipe_registry_is_targeted_and_side_effect_free():
         """
         import sys
         from align.architectures import available_recipes, get_recipe
+        from align.architectures.recipe import recipe_options
 
         assert "align.architectures.mlp" not in sys.modules
         assert "align.architectures.residual_convnet" not in sys.modules
@@ -34,6 +35,14 @@ def test_builtin_recipe_registry_is_targeted_and_side_effect_free():
         assert "align.architectures.mlp" not in sys.modules
         assert "align.architectures.residual_convnet" not in sys.modules
         assert "align.architectures.layernorm_mha_transformer" not in sys.modules
+        assert "jax" not in sys.modules
+
+        assert recipe_options("rmsnorm_gqa_rope_transformer") == {
+            "parameter_root",
+            "stream_transform_family",
+        }
+        assert "align.architectures.rmsnorm_gqa_rope_transformer" not in sys.modules
+        assert "jax" not in sys.modules
 
         recipe = get_recipe("mlp")
         assert type(recipe).__name__ == "MLPRecipe"

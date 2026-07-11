@@ -53,10 +53,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-import jax.numpy as jnp
 import numpy as np
 
-from ..symmetry import SymmetryGraph, binding_axis_interval
+from ..symmetry import SymmetryGraph, binding_axis_intervals
 from ..symmetry.tensor_ops import _descend, binding_selector
 
 
@@ -67,13 +66,13 @@ def has_convnet_component(graph: SymmetryGraph) -> bool:
 
 
 def _multiply_axis_interval(
-    tensor: jnp.ndarray,
-    factors: jnp.ndarray,
+    tensor: np.ndarray,
+    factors: np.ndarray,
     *,
     axis: int,
     start: int,
     stop: int,
-) -> jnp.ndarray:
+) -> np.ndarray:
     broadcast = [1] * tensor.ndim
     broadcast[axis] = int(factors.shape[0])
     factors = factors.reshape(broadcast)
@@ -82,7 +81,9 @@ def _multiply_axis_interval(
     indexer = tuple(
         slice(start, stop) if dim == axis else slice(None) for dim in range(tensor.ndim)
     )
-    return tensor.at[indexer].multiply(factors)
+    result = np.array(tensor, copy=True)
+    result[indexer] *= factors
+    return result
 
 
 def convnet_producer_scales(
@@ -90,7 +91,7 @@ def convnet_producer_scales(
     params: Mapping[str, Any],
     *,
     epsilon: float = 1e-8,
-) -> dict[str, jnp.ndarray]:
+) -> dict[str, np.ndarray]:
     """Canonical per-group scales from joint producer energies.
 
     Walks groups in graph order, folding already-canonicalized upstream scales
@@ -99,7 +100,7 @@ def convnet_producer_scales(
     at or below ``epsilon``) keep scale 1.
     """
 
-    scales: dict[str, jnp.ndarray] = {}
+    scales: dict[str, np.ndarray] = {}
     for group_id in graph.group_order:
         group = graph.groups[group_id]
         producers = [
@@ -113,7 +114,7 @@ def convnet_producer_scales(
                 f"producers for group {group_id!r}; the graph marks every "
                 "producer as scale-exempt."
             )
-        energy = jnp.zeros((int(group.size),), dtype=jnp.float32)
+        energy = None
         for binding in producers:
             spec = graph.tensors[binding.tensor_id]
             if binding_selector(spec.shape, binding):
@@ -121,7 +122,9 @@ def convnet_producer_scales(
                     "Conv-stack scale canonicalization does not support "
                     f"selector-restricted producer bindings ({binding.tensor_id})."
                 )
-            tensor = jnp.asarray(_descend(params, spec.path))
+            tensor = np.asarray(_descend(params, spec.path))
+            if energy is None:
+                energy = np.zeros((int(group.size),), dtype=tensor.dtype)
             for other in graph.bindings_for_tensor(binding.tensor_id):
                 if other.role != "in" or other.scale_power == 0.0:
                     continue
@@ -134,27 +137,33 @@ def convnet_producer_scales(
                         "use strategy='balanced' or disable the canonicalize "
                         "stage."
                     )
-                o_axis, o_start, o_stop = binding_axis_interval(spec.shape, other)
-                tensor = _multiply_axis_interval(
-                    tensor,
-                    scales[other.group] ** other.scale_power,
-                    axis=o_axis,
-                    start=o_start,
-                    stop=o_stop,
+                for o_axis, o_start, o_stop in binding_axis_intervals(
+                    spec.shape, other
+                ):
+                    tensor = _multiply_axis_interval(
+                        tensor,
+                        scales[other.group] ** other.scale_power,
+                        axis=o_axis,
+                        start=o_start,
+                        stop=o_stop,
+                    )
+            for axis, start, stop in binding_axis_intervals(spec.shape, binding):
+                segment = tensor
+                if not (start == 0 and stop == int(spec.shape[axis])):
+                    indexer = tuple(
+                        slice(start, stop) if dim == axis else slice(None)
+                        for dim in range(tensor.ndim)
+                    )
+                    segment = tensor[indexer]
+                moved = np.moveaxis(segment, axis, -1)
+                energy = energy + np.sum(
+                    np.square(moved.reshape(-1, moved.shape[-1])), axis=0
                 )
-            axis, start, stop = binding_axis_interval(spec.shape, binding)
-            if not (start == 0 and stop == int(spec.shape[axis])):
-                indexer = tuple(
-                    slice(start, stop) if dim == axis else slice(None)
-                    for dim in range(tensor.ndim)
-                )
-                tensor = tensor[indexer]
-            moved = jnp.moveaxis(tensor, axis, -1)
-            energy = energy + jnp.sum(
-                jnp.square(moved.reshape(-1, moved.shape[-1])), axis=0
-            )
-        norms = jnp.sqrt(energy + epsilon)
-        scales[group_id] = jnp.where(energy <= epsilon, 1.0, norms)
+        assert energy is not None
+        norms = np.sqrt(energy + epsilon)
+        scales[group_id] = np.where(energy <= epsilon, 1.0, norms).astype(
+            energy.dtype, copy=False
+        )
     return scales
 
 
@@ -196,13 +205,16 @@ def _scale_slice(
 
 def _balance_plan(
     graph: SymmetryGraph, params: Mapping[str, Any]
-) -> tuple[dict[str, np.ndarray], dict[str, list[_BalanceBinding]]]:
+) -> tuple[
+    dict[str, np.ndarray], dict[str, list[_BalanceBinding]], dict[str, np.dtype]
+]:
     """Materialize scale-carrying tensors and per-group power-1 bindings."""
 
     arrays: dict[str, np.ndarray] = {}
     group_bindings: dict[str, list[_BalanceBinding]] = {
         group_id: [] for group_id in graph.group_order
     }
+    group_dtypes: dict[str, np.dtype] = {}
     for tensor_id, spec in graph.tensors.items():
         bindings = [
             binding
@@ -226,11 +238,14 @@ def _balance_plan(
                     "Balanced conv-stack canonicalization does not support "
                     f"selector-restricted bindings ({tensor_id})."
                 )
-            axis, start, stop = binding_axis_interval(spec.shape, binding)
-            group_bindings[binding.group].append(
-                _BalanceBinding(tensor_id, axis, start, stop, binding.role)
+            group_dtypes.setdefault(
+                binding.group, np.asarray(_descend(params, spec.path)).dtype
             )
-    return arrays, group_bindings
+            for axis, start, stop in binding_axis_intervals(spec.shape, binding):
+                group_bindings[binding.group].append(
+                    _BalanceBinding(tensor_id, axis, start, stop, binding.role)
+                )
+    return arrays, group_bindings, group_dtypes
 
 
 def convnet_balanced_scales(
@@ -240,7 +255,7 @@ def convnet_balanced_scales(
     epsilon: float = 1e-8,
     max_iter: int = 1000,
     tol: float = 1e-9,
-) -> dict[str, jnp.ndarray]:
+) -> dict[str, np.ndarray]:
     """Minimum-norm per-group scales: balance dividing and multiplying energies.
 
     Gauss-Seidel sweeps over groups in graph order; per channel the update is
@@ -255,7 +270,7 @@ def convnet_balanced_scales(
     energy at or below ``epsilon``) keep scale 1.
     """
 
-    arrays, group_bindings = _balance_plan(graph, params)
+    arrays, group_bindings, group_dtypes = _balance_plan(graph, params)
 
     self_loop_tensors: dict[str, set[str]] = {}
     masks: dict[str, np.ndarray] = {}
@@ -346,7 +361,7 @@ def convnet_balanced_scales(
         )
 
     return {
-        group_id: jnp.asarray(total, dtype=jnp.float32)
+        group_id: np.asarray(total, dtype=group_dtypes[group_id])
         for group_id, total in totals.items()
     }
 

@@ -394,6 +394,9 @@ def _run_align(
     summary = json.loads((output_dir / "summary.json").read_text())
     assert summary["stages"] == list(pipeline)
     assert (output_dir / "sample_diagnostics.json").exists()
+    diagnostics = json.loads((output_dir / "sample_diagnostics.json").read_text())
+    assert all("objective_final" in item["match"] for item in diagnostics)
+    assert all(item["match"]["steps"] for item in diagnostics)
     return output_dir, manifest
 
 
@@ -453,10 +456,11 @@ def test_align_runner_end_to_end_preserves_predictions(
         assert metadata["transform_families"] == {
             group_id: group.transform_family for group_id, group in graph.groups.items()
         }
-        for matrix in transforms.values():
-            matrix = np.asarray(matrix, dtype=np.float64)
-            np.testing.assert_allclose(matrix.sum(axis=0), 1.0)
-            np.testing.assert_allclose(matrix.sum(axis=1), 1.0)
+        for indices in transforms.values():
+            indices = np.asarray(indices, dtype=np.int64)
+            np.testing.assert_array_equal(
+                np.sort(indices), np.arange(indices.size, dtype=np.int64)
+            )
 
     # Aligned predictions match pre-align predictions for every sample.
     for record in manifest.records:

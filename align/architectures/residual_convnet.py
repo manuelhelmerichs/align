@@ -15,6 +15,7 @@ from ..symmetry.tensor_ops import _canonical_axis, _descend, _maybe_descend
 from .graph_builder import SymmetryGraphBuilder
 from .recipe import ArchitectureRecipe, register_recipe
 from .rules import SymmetryRule
+from .schemas import RESIDUAL_CONVNET_OPTIONS
 
 
 def _natural_key(value: str) -> list[int | str]:
@@ -607,6 +608,7 @@ class ResidualConvNetRecipe(ArchitectureRecipe):
     name: str = "residual_convnet"
     parameter_root: str = "core"
     batch_stats_root: str | None = "batch_stats"
+    config_options: ClassVar[frozenset[str]] = RESIDUAL_CONVNET_OPTIONS
     residual_topology: Mapping[str, Any] | Sequence[Any] | str | None = None
     residual_connections: Sequence[tuple[str, str]] = dataclasses.field(
         default_factory=list

@@ -50,6 +50,9 @@ from .solvers import (
     update_group_transform,
 )
 from .state import (
+    MatrixTransform,
+    PermutationTransform,
+    SignedPermutationTransform,
     TransformState,
     as_permutation_matrix,
     sinkhorn_operator,
@@ -60,10 +63,13 @@ __all__ = [
     "DiagonalFisherObjective",
     "EuclideanObjective",
     "LAPGroupSolver",
+    "MatrixTransform",
     "Objective",
     "RelativeFisherObjective",
     "TransformState",
     "ProcrustesGroupSolver",
+    "PermutationTransform",
+    "SignedPermutationTransform",
     "SinkhornSolver",
     "SolverStep",
     "SolverSequence",

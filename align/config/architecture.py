@@ -11,25 +11,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..architectures.recipe import available_recipes, recipe_options
 from ._utils import _validate_fields
-
-# Discovery options each recipe family accepts (besides ``family`` itself).
-_FAMILY_OPTIONS: dict[str, frozenset[str]] = {
-    "mlp": frozenset({"parameter_root"}),
-    "convnet": frozenset({"parameter_root"}),
-    "residual_convnet": frozenset(
-        {
-            "parameter_root",
-            "batch_stats_root",
-            "residual_topology",
-            "residual_connections",
-        }
-    ),
-    "layernorm_mha_transformer": frozenset({"parameter_root"}),
-    "rmsnorm_gqa_rope_transformer": frozenset(
-        {"parameter_root", "stream_transform_family"}
-    ),
-}
 
 
 @dataclass
@@ -40,10 +23,10 @@ class ArchitectureConfig:
     options: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.family not in _FAMILY_OPTIONS:
+        if self.family not in available_recipes():
             raise ValueError(
                 f"Unknown architecture family '{self.family}'. Available: "
-                f"{', '.join(sorted(_FAMILY_OPTIONS))}"
+                f"{', '.join(available_recipes())}"
             )
         self.options = dict(self.options)
 
@@ -52,15 +35,15 @@ class ArchitectureConfig:
         if not isinstance(payload, Mapping):
             raise ValueError("architecture section must be a mapping.")
         family = str(payload.get("family", "mlp"))
-        if family not in _FAMILY_OPTIONS:
+        if family not in available_recipes():
             raise ValueError(
                 f"Unknown architecture family '{family}'. Available: "
-                f"{', '.join(sorted(_FAMILY_OPTIONS))}"
+                f"{', '.join(available_recipes())}"
             )
         _validate_fields(
             f"architecture (family={family})",
             payload,
-            _FAMILY_OPTIONS[family] | {"family"},
+            recipe_options(family) | {"family"},
         )
         options = {key: value for key, value in payload.items() if key != "family"}
         return cls(family=family, options=options)

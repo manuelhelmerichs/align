@@ -148,8 +148,26 @@ class TestSolverStep(unittest.TestCase):
             SolverStep.from_mapping(
                 {"solver": "sinkhorn", "record_loss_history": "false"}
             )
-        with self.assertRaisesRegex(ValueError, "harden.*bool"):
-            SolverStep.from_mapping({"solver": "sinkhorn", "harden": "true"})
+        with self.assertRaisesRegex(ValueError, "Unknown.*harden"):
+            SolverStep.from_mapping({"solver": "sinkhorn", "harden": True})
+
+    def test_rejects_invalid_numeric_ranges(self) -> None:
+        invalid = (
+            {"solver": "lap", "max_sweeps": 0},
+            {"solver": "sinkhorn", "max_steps": -1},
+            {"solver": "sinkhorn", "sinkhorn_iterations": 0},
+            {"solver": "sinkhorn", "tau": 0.0},
+            {"solver": "sinkhorn", "learning_rate": float("nan")},
+            {"solver": "lap", "tolerance": -1.0},
+        )
+        for payload in invalid:
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                SolverStep.from_mapping(payload)
+
+    def test_ambiguity_option_round_trips(self) -> None:
+        step = SolverStep.from_mapping({"solver": "sinkhorn", "record_ambiguity": True})
+        self.assertTrue(step.record_ambiguity)
+        self.assertTrue(step.to_dict()["record_ambiguity"])
 
     def test_groups_round_trip(self) -> None:
         step = SolverStep.from_mapping(
@@ -359,6 +377,23 @@ paths:
             SelectionConfig.from_mapping({"reference_chain": 0, "unexpected": 1})
         with self.assertRaisesRegex(ValueError, "Unknown runtime config option"):
             RuntimeConfig.from_mapping({"resume": False, "unexpected": 1})
+
+
+class TestRuntimeConfig(unittest.TestCase):
+    def test_rejects_invalid_parallel_numeric_settings(self) -> None:
+        for payload in (
+            {"parallelism": 0},
+            {"per_device_batch": -1},
+            {"max_worker_retries": -1},
+            {"worker_threads": 0},
+            {"device_ids": [0, 0]},
+        ):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                RuntimeConfig.from_mapping(payload)
+
+    def test_force_flags_are_mutually_exclusive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            RuntimeConfig(force_cpu=True, force_gpu=True)
 
 
 if __name__ == "__main__":  # pragma: no cover

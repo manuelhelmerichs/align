@@ -58,6 +58,9 @@ def test_balanced_is_default_and_preserves_function():
     canonicalized, _, aux = ScaleCanonicalizer().canonicalize(graph, params)
 
     assert aux["strategy"] == "balanced"
+    assert aux["convergence"]["converged"] is True
+    assert aux["convergence"]["iterations"] >= 1
+    assert aux["convergence"]["residual"] < 1e-9
     x = jax.random.normal(jax.random.PRNGKey(1), (16, 3))
     np.testing.assert_allclose(
         np.asarray(mlp_apply(canonicalized, x)),
@@ -126,7 +129,7 @@ def test_balanced_reported_scales_reproduce_the_action():
 
     action_scales = scales
     via_action = graph.apply_scales(
-        params, ScaleState.from_scales(graph, action_scales, backend="jax")
+        params, ScaleState.from_scales(graph, action_scales)
     )
     assert _tree_max_abs_diff(canonicalized, via_action) < 1e-6
 

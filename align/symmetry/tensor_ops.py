@@ -74,6 +74,35 @@ def binding_axis_interval(shape: Sequence[int], binding: Any) -> tuple[int, int,
     return axis, start, stop
 
 
+def binding_axis_intervals(
+    shape: Sequence[int], binding: Any
+) -> tuple[tuple[int, int, int], ...]:
+    """Expand one possibly repeated binding into concrete axis intervals."""
+
+    axis, start, stop = binding_axis_interval(shape, binding)
+    repeat = int(getattr(binding, "repeat", 1))
+    if repeat <= 0:
+        raise ValueError(
+            f"Axis binding for tensor {binding.tensor_id!r} has non-positive repeat."
+        )
+    width = stop - start
+    stride_value = getattr(binding, "stride", None)
+    stride = width if stride_value is None else int(stride_value)
+    if stride <= 0:
+        raise ValueError(
+            f"Axis binding for tensor {binding.tensor_id!r} has non-positive stride."
+        )
+    intervals = tuple(
+        (axis, start + index * stride, stop + index * stride) for index in range(repeat)
+    )
+    if intervals[-1][2] > int(shape[axis]):
+        raise ValueError(
+            f"Repeated axis binding for tensor {binding.tensor_id!r} extends past "
+            f"axis size {shape[axis]}."
+        )
+    return intervals
+
+
 def binding_selector(shape: Sequence[int], binding: Any) -> tuple[tuple[int, int], ...]:
     """Return canonical ``((axis, index), ...)`` selector coordinates.
 
@@ -194,6 +223,40 @@ def apply_matrix_to_axis(tensor: Any, matrix: Any, *, axis: int):
     return xp.moveaxis(out.reshape(moved.shape), 0, axis)
 
 
+def apply_group_transform_to_axis(
+    tensor: Any,
+    transform: Any,
+    *,
+    axis: int,
+    transform_family: str,
+    scope: str,
+):
+    """Apply one compact typed hard transform without densifying permutations."""
+
+    if scope not in ("linear", "permute_only"):
+        raise ValueError(f"Unknown binding transform scope {scope!r}.")
+
+    if hasattr(transform, "indices"):
+        indices = transform.indices
+        result = apply_perm_to_axis(tensor, indices, axis=axis)
+        if scope == "permute_only" or not hasattr(transform, "signs"):
+            return result
+        xp = _array_backend(result)
+        signs = xp.asarray(transform.signs, dtype=result.dtype)
+        shape = [1] * result.ndim
+        shape[axis] = signs.shape[-1]
+        return result * signs.reshape(shape)
+
+    if transform_family == "orthogonal" and scope == "permute_only":
+        return tensor
+    if scope == "permute_only":
+        raise ValueError(
+            f"permute_only bindings are undefined for {transform_family!r} groups."
+        )
+    matrix = transform.matrix if hasattr(transform, "matrix") else transform
+    return apply_matrix_to_axis(tensor, matrix, axis=axis)
+
+
 def binding_transform_matrix(
     matrix: Any, *, transform_family: str, scope: str
 ) -> Any | None:
@@ -229,9 +292,11 @@ def binding_transform_matrix(
 
 __all__ = [
     "apply_matrix_to_axis",
+    "apply_group_transform_to_axis",
     "apply_perm_to_axis",
     "axis_slice",
     "binding_axis_interval",
+    "binding_axis_intervals",
     "binding_indexer",
     "binding_selector",
     "binding_sort_key",

@@ -556,7 +556,7 @@ class TestAttentionUpdates:
         target_data = graph.materialize(target, backend="numpy")
         state, _ = solver_sequence.solve(graph, reference_data, target_data)
         np.testing.assert_array_equal(
-            np.asarray(state.matrices["stream"]), np.eye(D_MODEL, dtype=np.float32)
+            np.asarray(state.matrix("stream")), np.eye(D_MODEL, dtype=np.float32)
         )
         aligned = graph.apply_transforms(target, state)
         np.testing.assert_allclose(

@@ -74,9 +74,7 @@ def test_apply_scales_preserves_frn_function_exactly():
     graph, params, inputs = _frn_case(seed=0)
     scales = _positive_scales(graph, seed=1)
 
-    scaled = graph.apply_scales(
-        params, ScaleState.from_scales(graph, scales, backend="jax")
-    )
+    scaled = graph.apply_scales(params, ScaleState.from_scales(graph, scales))
 
     np.testing.assert_allclose(
         np.asarray(frn_residual_conv_apply(scaled, inputs)),
@@ -95,9 +93,7 @@ def test_apply_scales_exempts_pre_norm_tensors():
     scales = _positive_scales(graph, seed=3)
     tied_group, branch_group = graph.metadata["group_order"]
 
-    scaled = graph.apply_scales(
-        params, ScaleState.from_scales(graph, scales, backend="jax")
-    )
+    scaled = graph.apply_scales(params, ScaleState.from_scales(graph, scales))
 
     core_before = params["core"]
     core_after = scaled["core"]
@@ -225,7 +221,7 @@ def test_frn_balanced_equalizes_energies_and_minimizes_norm():
             for gid, group in graph.groups.items()
         }
         jittered = graph.apply_scales(
-            canonicalized, ScaleState.from_scales(graph, scales, backend="jax")
+            canonicalized, ScaleState.from_scales(graph, scales)
         )
         assert _tree_sq_norm(graph, jittered) > canonical_norm
 
@@ -233,9 +229,7 @@ def test_frn_balanced_equalizes_energies_and_minimizes_norm():
 def test_frn_canonicalizer_collapses_affine_scale_orbit():
     graph, params, _ = _frn_case(seed=5)
     scales = _positive_scales(graph, seed=6)
-    scaled = graph.apply_scales(
-        params, ScaleState.from_scales(graph, scales, backend="jax")
-    )
+    scaled = graph.apply_scales(params, ScaleState.from_scales(graph, scales))
 
     canonical_a, _, _ = ScaleCanonicalizer().canonicalize(
         graph, params, activation="tlu"
@@ -317,9 +311,7 @@ def test_bare_conv_residual_cycle_balances_exactly():
     assert _tree_max_abs_diff(canonicalized, twice) < 1e-5
 
     scales = _positive_scales(graph, seed=12)
-    scaled = graph.apply_scales(
-        params, ScaleState.from_scales(graph, scales, backend="jax")
-    )
+    scaled = graph.apply_scales(params, ScaleState.from_scales(graph, scales))
     canonical_b, _, _ = ScaleCanonicalizer().canonicalize(graph, scaled)
     assert _tree_max_abs_diff(canonicalized, canonical_b) < 1e-4
 
@@ -386,9 +378,7 @@ def test_bare_conv_self_loop_group_balances_exactly():
         np.testing.assert_allclose(div, mult, rtol=1e-4, err_msg=group_id)
 
     scales = _positive_scales(graph, seed=16)
-    scaled = graph.apply_scales(
-        params, ScaleState.from_scales(graph, scales, backend="jax")
-    )
+    scaled = graph.apply_scales(params, ScaleState.from_scales(graph, scales))
     canonical_b, _, _ = ScaleCanonicalizer().canonicalize(graph, scaled)
     assert _tree_max_abs_diff(canonicalized, canonical_b) < 1e-4
 

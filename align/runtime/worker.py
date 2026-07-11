@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import queue
 import shutil
 import threading
@@ -298,14 +297,8 @@ def _build_stage_executors(
     reference_sample: WeightSample,
     match_reference: WeightSample | None = None,
 ):
-    from .stages import (
-        CanonicalizeExecutor,
-        CenterSoftmaxHeadExecutor,
-        MatchExecutor,
-        prepare_stage_executors,
-    )
+    from .stages import build_stage_executors
 
-    stages: list[tuple[str, Any]] = []
     canonicalize_cfg = job.get("canonicalize_config")
     center_softmax_head_cfg = job.get("center_softmax_head_config")
     match_cfg = job.get("match_config")
@@ -313,68 +306,28 @@ def _build_stage_executors(
     family = job.get("family", "mlp")
     recipe_kwargs = job.get("recipe_kwargs") or {}
 
-    if canonicalize_cfg:
-        stages.append(
-            (
-                "canonicalize",
-                CanonicalizeExecutor(
-                    canonicalize_cfg,
-                    family=family,
-                    recipe_kwargs=recipe_kwargs,
-                ),
-            )
-        )
-    if center_softmax_head_cfg:
-        stages.append(
-            (
-                "center_softmax_head",
-                CenterSoftmaxHeadExecutor(
-                    center_softmax_head_cfg,
-                    family=family,
-                    recipe_kwargs=recipe_kwargs,
-                ),
-            )
-        )
-    if match_cfg:
-        stages.append(
-            (
-                "match",
-                MatchExecutor(
-                    match_cfg,
-                    reference_index=(
-                        job["match_reference_index"]
-                        if "match_reference_index" in job
-                        else manifest.reference_index
-                    ),
-                    seed=job.get("seed"),
-                    rng_offset=int(job.get("rng_offset") or 0),
-                    batch_size=int(job.get("per_device_batch") or 1),
-                    family=family,
-                    recipe_kwargs=recipe_kwargs,
-                ),
-            )
-        )
-
-    if stage_order:
-        name_to_exec = {name: exec for name, exec in stages}
-        stages = [
-            (name, name_to_exec[name]) for name in stage_order if name in name_to_exec
-        ]
-
-    return prepare_stage_executors(
-        stages,
-        manifest,
-        reference_sample,
+    return build_stage_executors(
+        stage_order=stage_order,
+        manifest=manifest,
+        reference_sample=reference_sample,
+        family=family,
+        recipe_kwargs=recipe_kwargs,
+        canonicalize_config=canonicalize_cfg,
+        center_softmax_head_config=center_softmax_head_cfg,
+        match_config=match_cfg,
         match_reference=match_reference,
+        match_reference_index=(
+            job["match_reference_index"]
+            if "match_reference_index" in job
+            else manifest.reference_index
+        ),
+        seed=job.get("seed"),
+        rng_offset=int(job.get("rng_offset") or 0),
+        batch_size=int(job.get("per_device_batch") or 1),
     )
 
 
 def run_worker(job: dict[str, Any], command_queue, progress_queue) -> None:
-    device_id = job.get("device_id")
-    if device_id is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
-        os.environ["JAX_VISIBLE_DEVICES"] = str(device_id)
-
     manifest = SampleManifest.load(Path(job["manifest_path"]))
 
     from .loaders import SampleLoader  # Imported after device visibility is set

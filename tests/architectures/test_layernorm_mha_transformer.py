@@ -363,6 +363,23 @@ class TestTransformerOrbitRecovery:
     )
     def test_orbit_case_recovers_exactly(self, schedule):
         case = make_layernorm_mha_transformer_orbit_case(seed=1)
+        schedule = [
+            {
+                **step,
+                **(
+                    {
+                        "groups": [
+                            group_id
+                            for group_id, group in case.graph.groups.items()
+                            if group.transform_family == "permutation"
+                        ]
+                    }
+                    if step["solver"] == "sinkhorn"
+                    else {}
+                ),
+            }
+            for step in schedule
+        ]
         result = run_alignment_benchmark(case, schedule=schedule)
         assert result.metrics.function_drift_max < 1e-4
         assert result.metrics.distance_after == pytest.approx(0.0, abs=1e-5)

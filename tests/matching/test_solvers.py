@@ -18,6 +18,7 @@ from align.matching import (
     available_solvers,
     get_objective,
 )
+from align.symmetry import AxisBinding, SymmetryGraph, SymmetryGroup, TensorSpec
 
 
 def _perm_matrix(indices) -> np.ndarray:
@@ -69,8 +70,8 @@ class TestLAPSchedule:
         recipe = MLPRecipe(parameter_root="params.fcn")
         graph = recipe.build_graph(_params())
         state = TransformState.identity(graph, backend="numpy")
-        assert set(state.matrices) == {"mlp/h0"}
-        np.testing.assert_allclose(state.matrices["mlp/h0"], np.eye(2))
+        assert set(state.transforms) == {"mlp/h0"}
+        np.testing.assert_allclose(state.matrix("mlp/h0"), np.eye(2))
 
     def test_lap_recovers_permutation(self):
         recipe = MLPRecipe(parameter_root="params.fcn")
@@ -91,7 +92,7 @@ class TestLAPSchedule:
             graph.materialize(target, backend="numpy"),
         )
         assert aux["steps"][0]["sweeps"] >= 1
-        np.testing.assert_allclose(state.matrices["mlp/h0"], swap.T, atol=1e-6)
+        np.testing.assert_allclose(state.matrix("mlp/h0"), swap.T, atol=1e-6)
 
     def test_repeated_group_lap_is_rejected(self):
         params = {
@@ -155,9 +156,9 @@ class TestLAPSchedule:
                     graph,
                     reference_data,
                     target_data,
-                    TransformState(
-                        group_order=graph.group_order,
-                        matrices={
+                    TransformState.from_transforms(
+                        graph,
+                        {
                             "mlp/h0": _perm_matrix(p0),
                             "mlp/h1": _perm_matrix(p1),
                         },
@@ -178,10 +179,10 @@ class TestLAPSchedule:
         np.testing.assert_allclose(solved_value, brute_force_best, atol=1e-6)
         # The recovered permutations invert the forward action.
         np.testing.assert_allclose(
-            np.asarray(state.matrices["mlp/h0"]), np.asarray(forward["mlp/h0"]).T
+            np.asarray(state.matrix("mlp/h0")), np.asarray(forward["mlp/h0"]).T
         )
         np.testing.assert_allclose(
-            np.asarray(state.matrices["mlp/h1"]), np.asarray(forward["mlp/h1"]).T
+            np.asarray(state.matrix("mlp/h1")), np.asarray(forward["mlp/h1"]).T
         )
 
     def test_lap_schedule_converges_before_exhausting_sweep_budget(self):
@@ -237,7 +238,64 @@ class TestSinkhornSchedule:
             rng_key=jax.random.PRNGKey(0),
         )
 
-        assert set(state.matrices) == {"mlp/h0"}
+        assert set(state.transforms) == {"mlp/h0"}
         assert "loss_final" in aux["steps"][0]
         assert "loss_initial" in aux["steps"][0]
         assert aux["steps"][0]["steps"] >= 1
+
+    def test_sinkhorn_rejects_signed_groups_before_execution(self):
+        graph = SymmetryGraph(
+            groups={
+                "g": SymmetryGroup(
+                    id="g", size=2, transform_family="signed_permutation"
+                )
+            },
+            tensors={"w": TensorSpec(id="w", path=("w",), shape=(2,))},
+            axis_bindings=(AxisBinding(tensor_id="w", axis=0, group="g"),),
+        )
+        sequence = SolverSequence(
+            EuclideanObjective(), [SolverStep(solver="sinkhorn", max_steps=1)]
+        )
+        with pytest.raises(ValueError, match="represents only plain permutations"):
+            sequence.validate_graph(graph)
+
+    def test_sinkhorn_records_compact_ambiguity(self):
+        graph = MLPRecipe(parameter_root="params.fcn").build_graph(_params())
+        sequence = SolverSequence(
+            EuclideanObjective(),
+            [
+                SolverStep(
+                    solver="sinkhorn",
+                    max_steps=2,
+                    record_ambiguity=True,
+                )
+            ],
+        )
+        _, aux = sequence.solve(
+            graph,
+            graph.materialize(_params(), backend="jax"),
+            graph.materialize(_params(), backend="jax"),
+            rng_key=jax.random.PRNGKey(0),
+        )
+        ambiguity = aux["steps"][0]["ambiguity"]["mlp/h0"][0]
+        assert set(ambiguity) == {
+            "row_entropy_mean",
+            "row_entropy_max",
+            "assignment_margin_mean",
+            "assignment_margin_min",
+        }
+
+
+def test_lap_records_assignment_margin():
+    graph = MLPRecipe(parameter_root="params.fcn").build_graph(_params())
+    sequence = SolverSequence(
+        EuclideanObjective(),
+        [SolverStep(solver="lap", max_sweeps=1, record_ambiguity=True)],
+    )
+    _, aux = sequence.solve(
+        graph,
+        graph.materialize(_params(), backend="numpy"),
+        graph.materialize(_params(), backend="numpy"),
+    )
+    margin = aux["steps"][0]["ambiguity"]["mlp/h0"]
+    assert margin["assignment_objective_margin"] >= 0.0

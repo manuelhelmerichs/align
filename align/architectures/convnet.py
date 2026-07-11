@@ -26,7 +26,7 @@ no scale symmetry.
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -34,6 +34,7 @@ from ..symmetry import SymmetryGraph
 from .graph_builder import SymmetryGraphBuilder
 from .recipe import ArchitectureRecipe, register_recipe
 from .rules import DenseChainRule
+from .schemas import CONVNET_OPTIONS
 
 
 def _natural_key(value: str) -> list[int | str]:
@@ -57,6 +58,7 @@ class ConvNetRecipe(ArchitectureRecipe):
 
     name: str = "convnet"
     parameter_root: str = "core"
+    config_options: ClassVar[frozenset[str]] = CONVNET_OPTIONS
 
     def _tokens_from_path(self, path: str) -> tuple[str, ...]:
         return tuple(part for part in path.split(".") if part)
@@ -148,15 +150,16 @@ class ConvNetRecipe(ArchitectureRecipe):
                 "channels."
             )
         spatial_positions = dense_in // channels
-        for position in range(spatial_positions):
-            builder.bind(
-                (*dense_paths[0], "kernel"),
-                0,
-                conv_groups[-1],
-                start=position * channels,
-                stop=(position + 1) * channels,
-                role="in",
-            )
+        builder.bind(
+            (*dense_paths[0], "kernel"),
+            0,
+            conv_groups[-1],
+            start=0,
+            stop=channels,
+            repeat=spatial_positions,
+            stride=channels,
+            role="in",
+        )
 
         builder.add_component(
             "features",

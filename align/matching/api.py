@@ -46,6 +46,7 @@ def match_sample(
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[SolverStep | Mapping[str, Any]] | None = None,
     rng_key: jax.Array | None = None,
+    rng_keys: Sequence[jax.Array] | jax.Array | None = None,
     reference_data: Mapping[str, Any] | None = None,
     reference_backend: str | None = None,
     is_reference: bool = False,
@@ -73,6 +74,7 @@ def match_sample(
         reference_data,
         target_data,
         rng_key=rng_key,
+        rng_keys=rng_keys,
     )
     aligned_params = graph.apply_transforms(params, state)
     return aligned_params, state.to_artifacts(), aux_info
@@ -88,6 +90,7 @@ def match_batch(
     objective_kwargs: Mapping[str, Any] | None = None,
     schedule: Sequence[SolverStep | Mapping[str, Any]] | None = None,
     rng_key: jax.Array | None = None,
+    rng_keys: Sequence[jax.Array] | jax.Array | None = None,
     reference_data: Mapping[str, Any] | None = None,
     reference_backend: str | None = None,
 ) -> list[tuple[ParamTree, Mapping[str, Any], dict[str, Any] | None]]:
@@ -111,6 +114,7 @@ def match_batch(
         reference_data,
         params_batch,
         rng_key=rng_key,
+        rng_keys=rng_keys,
         backend=backend,
     )
     results = []

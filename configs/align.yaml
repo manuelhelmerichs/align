@@ -60,6 +60,7 @@ match:
     #   tolerance: 1.0e-05
     #   init_scale: 0.01
     #   record_loss_history: false
+    #   record_ambiguity: false  # Entropy and assignment-margin diagnostics.
     # - solver: lap
     #   max_sweeps: 5
     #   tolerance: 0.0
@@ -74,6 +75,9 @@ runtime:
   force_gpu: false         # Optional override to insist on GPUs even if JAX can't auto-detect them.
   parallelism: null        # null == auto based on the schedule and visible hardware.
   device_ids: null         # Explicit CUDA device ids in multi-GPU boxes; omit to consume every visible GPU.
+  allow_device_sharing: false # Multiple workers per accelerator require this explicit unsafe override.
+  max_worker_retries: 2    # Retry only transient process/heartbeat failures per sample.
+  worker_threads: 1        # BLAS/OpenMP threads per worker process.
   per_device_batch: 1      # Use >1 for pure Sinkhorn schedules; LAP schedules process one sample at a time.
   verbosity: info          # Logging verbosity passed to the CLI (quiet/info/debug).
   validate_artifacts_on_resume: true  # Re-hash aligned sample/transform files before skipping them; false trusts checksums.

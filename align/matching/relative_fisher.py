@@ -44,6 +44,7 @@ def estimate_activation_gram_metrics(
     *,
     damping: float = 1.0,
     normalize: bool = True,
+    max_gram_bytes: int = 512 * 1024**2,
 ) -> dict[str, dict[str, Any]]:
     """Estimate fixed activation-Gram metrics at ``params``.
 
@@ -97,6 +98,14 @@ def estimate_activation_gram_metrics(
             )
         input_shape = tuple(tensor_spec.shape[axis] for axis in normalized_axes)
         input_size = int(np.prod(input_shape, dtype=np.int64)) if input_shape else 1
+        gram_bytes = input_size * input_size * np.dtype(np.float64).itemsize
+        if gram_bytes > int(max_gram_bytes):
+            raise MemoryError(
+                f"Activation Gram for tensor {tensor_id!r} would require "
+                f"{gram_bytes / 1024**2:.1f} MiB, exceeding the configured "
+                f"limit of {max_gram_bytes / 1024**2:.1f} MiB. Reduce the "
+                "declared input axes or use a structured/chunked metric."
+            )
         if not normalized_axes:
             if activations is not None:
                 arr = np.asarray(activations)

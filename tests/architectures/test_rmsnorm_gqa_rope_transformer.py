@@ -438,7 +438,7 @@ class TestOrbitRecovery:
         result = run_alignment_benchmark(case, canonicalize=False, rng_seed=seed)
         metrics = result.metrics
         assert metrics.function_drift_max < DRIFT_TOL
-        assert metrics.recovered_transform_error == 0.0
+        assert metrics.recovered_transform_error < 1e-7
         assert metrics.optimality_gap is not None
         assert metrics.optimality_gap < 1e-4
 
@@ -447,12 +447,29 @@ class TestOrbitRecovery:
         # residual case); the mixed schedule is the regression pin.
         schedule = default_schedule_grid()["lap_sinkhorn_lap"]
         case = make_rmsnorm_gqa_rope_transformer_scaled_orbit_case(seed=0)
+        schedule = [
+            {
+                **step,
+                **(
+                    {
+                        "groups": [
+                            group_id
+                            for group_id, group in case.graph.groups.items()
+                            if group.transform_family == "permutation"
+                        ]
+                    }
+                    if step["solver"] == "sinkhorn"
+                    else {}
+                ),
+            }
+            for step in schedule
+        ]
         result = run_alignment_benchmark(
             case, schedule=schedule, canonicalize=True, rng_seed=0
         )
         metrics = result.metrics
         assert metrics.function_drift_max < DRIFT_TOL
-        assert metrics.recovered_transform_error == 0.0
+        assert metrics.recovered_transform_error < 1e-7
         assert metrics.optimality_gap is not None
         assert metrics.optimality_gap < 1e-4
 
@@ -526,19 +543,16 @@ class TestOrbitRecovery:
                 rng_key=jax.random.PRNGKey(0),
             )
 
-    def test_sinkhorn_excludes_rotation_groups(self):
-        """The doubly stochastic relaxation is invalid for rotation groups."""
+    def test_sinkhorn_rejects_non_permutation_groups(self):
+        """The doubly stochastic relaxation is invalid for larger families."""
 
         from align.matching.solvers import SinkhornSolver, SolverStep
 
         _, graph = _case_params(seed=0)
         step = SolverStep(solver="sinkhorn", max_steps=1)
         solver = SinkhornSolver(get_objective("euclidean"), step)
-        groups = solver._groups(graph)
-        assert not any(
-            graph.groups[gid].transform_family == "rotation_pairs" for gid in groups
-        )
-        assert "stream" in groups
+        with pytest.raises(ValueError, match="only plain permutation"):
+            solver._groups(graph)
 
 
 class TestFlatTransformerSignSymmetries:

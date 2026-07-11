@@ -7,8 +7,7 @@ dense-specific helpers.
 
 from dataclasses import dataclass
 
-import jax
-import jax.numpy as jnp
+import numpy as np
 
 _VALID_DEGENERATE_HANDLING = frozenset(
     {"preserve", "zero_outgoing", "canonical_vector"}
@@ -24,22 +23,8 @@ class DenseLayer:
     - bias has shape (out_features,)
     """
 
-    kernel: jax.Array
-    bias: jax.Array
-
-
-def _denselayer_flatten(layer: DenseLayer):
-    return (layer.kernel, layer.bias), None
-
-
-def _denselayer_unflatten(_, data):
-    kernel, bias = data
-    return DenseLayer(kernel=kernel, bias=bias)
-
-
-jax.tree_util.register_pytree_node(
-    DenseLayer, _denselayer_flatten, _denselayer_unflatten
-)
+    kernel: np.ndarray
+    bias: np.ndarray
 
 
 def _validate_degenerate_channels(value: str) -> str:
@@ -57,25 +42,25 @@ def _require_bool(name: str, value: bool) -> bool:
 
 def compute_degenerate_mask(
     layer: DenseLayer, *, epsilon: float = 1e-8, include_bias_in_norm: bool = True
-) -> jnp.ndarray:
+) -> np.ndarray:
     """Return channels whose incoming weight-and-bias energy is degenerate."""
 
-    kernel_sq = jnp.sum(layer.kernel**2, axis=0)
+    kernel_sq = np.sum(layer.kernel**2, axis=0)
     bias_sq = layer.bias**2 if include_bias_in_norm else 0.0
     return (kernel_sq + bias_sq) <= epsilon
 
 
 def _canonicalize_degenerate(
-    kernel: jax.Array, bias: jax.Array, mask: jax.Array
-) -> tuple[jax.Array, jax.Array]:
+    kernel: np.ndarray, bias: np.ndarray, mask: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     """Replace masked columns with the first basis vector and zero bias."""
 
-    canonical = jnp.zeros_like(kernel)
+    canonical = np.zeros_like(kernel)
     if canonical.shape[0] > 0:
-        canonical = canonical.at[0].set(jnp.where(mask, 1.0, 0.0).astype(kernel.dtype))
+        canonical[0] = np.where(mask, 1.0, 0.0).astype(kernel.dtype)
     return (
-        jnp.where(mask[None, :], canonical, kernel),
-        jnp.where(mask, jnp.zeros_like(bias), bias),
+        np.where(mask[None, :], canonical, kernel),
+        np.where(mask, np.zeros_like(bias), bias),
     )
 
 
@@ -83,22 +68,22 @@ def compute_incoming_norms(
     layer: DenseLayer,
     epsilon: float = 1e-8,
     include_bias_in_norm: bool = True,
-) -> jnp.ndarray:
+) -> np.ndarray:
     """Compute the per-channel incoming weight-and-bias norm."""
 
     include_bias_in_norm = _require_bool("include_bias_in_norm", include_bias_in_norm)
-    kernel_sq = jnp.sum(layer.kernel**2, axis=0)
+    kernel_sq = np.sum(layer.kernel**2, axis=0)
     bias_sq = layer.bias**2 if include_bias_in_norm else 0.0
-    return jnp.sqrt(kernel_sq + bias_sq + epsilon)
+    return np.sqrt(kernel_sq + bias_sq + epsilon)
 
 
 def _outgoing_scales(
-    norms: jnp.ndarray, degenerate_mask: jnp.ndarray, *, degenerate_channels: str
-) -> jnp.ndarray:
+    norms: np.ndarray, degenerate_mask: np.ndarray, *, degenerate_channels: str
+) -> np.ndarray:
     degenerate_channels = _validate_degenerate_channels(degenerate_channels)
     if degenerate_channels in ("zero_outgoing", "canonical_vector"):
-        return jnp.where(degenerate_mask, 0.0, norms)
-    return jnp.where(degenerate_mask, 1.0, norms)
+        return np.where(degenerate_mask, 0.0, norms)
+    return np.where(degenerate_mask, 1.0, norms)
 
 
 __all__ = ["DenseLayer", "compute_degenerate_mask", "compute_incoming_norms"]

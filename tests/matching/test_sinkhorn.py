@@ -51,6 +51,4 @@ def test_sinkhorn_operator_sharpens_toward_target_permutation():
 
     # The mass concentrates on the target assignment, and hardening recovers it.
     assert np.all(np.asarray(matrix)[np.arange(4), target] > 0.9)
-    np.testing.assert_allclose(
-        solve_lap_maximize(np.asarray(matrix)), _perm_matrix(target)
-    )
+    np.testing.assert_array_equal(solve_lap_maximize(np.asarray(matrix)), target)

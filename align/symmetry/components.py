@@ -16,7 +16,7 @@ import numpy as np
 
 from .constraints import MHACircuitConstraint
 from .graph import SymmetryGraph
-from .tensor_ops import _canonical_axis, binding_axis_interval
+from .tensor_ops import _canonical_axis, binding_axis_intervals
 
 
 def tensors_for_component(graph: SymmetryGraph, component_id: str) -> tuple[str, ...]:
@@ -229,24 +229,24 @@ def _binding_profile(
     for binding in graph.bindings_for_tensor(tensor_id):
         if binding.group not in group_index:
             continue
-        axis, start, stop = binding_axis_interval(tensor.shape, binding)
         selector = tuple(
             sorted(
                 (_canonical_axis(len(tensor.shape), sel_axis), sel_index)
                 for sel_axis, sel_index in getattr(binding, "selector", ())
             )
         )
-        entries.append(
-            (
-                axis,
-                start,
-                stop,
-                binding.role,
-                binding.scale_power,
-                group_index[binding.group],
-                selector,
+        for axis, start, stop in binding_axis_intervals(tensor.shape, binding):
+            entries.append(
+                (
+                    axis,
+                    start,
+                    stop,
+                    binding.role,
+                    binding.scale_power,
+                    group_index[binding.group],
+                    selector,
+                )
             )
-        )
     return (tuple(tensor.shape), tuple(sorted(entries)))
 
 

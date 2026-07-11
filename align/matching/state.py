@@ -1,4 +1,4 @@
-"""Transform state and permutation-projection utilities."""
+"""Compact typed transform state and permutation-projection utilities."""
 
 from __future__ import annotations
 
@@ -13,58 +13,191 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 
+def _array_namespace(value: Any):
+    return jnp if isinstance(value, jax.Array) else np
+
+
+def _validate_indices(indices: Any, size: int) -> Any:
+    """Validate one permutation index vector or a batch of vectors."""
+
+    arr = np.asarray(indices)
+    if arr.ndim not in (1, 2):
+        raise ValueError(
+            f"Permutation indices must be 1D or batched 2D, got shape {arr.shape}."
+        )
+    if arr.shape[-1] != size:
+        raise ValueError(
+            f"Permutation indices have length {arr.shape[-1]}, expected {size}."
+        )
+    int_arr = arr.astype(np.int64)
+    if not np.array_equal(arr, int_arr):
+        raise ValueError("Permutation indices must contain integer values.")
+    rows = int_arr[None, :] if int_arr.ndim == 1 else int_arr
+    expected = np.arange(size)
+    if any(not np.array_equal(np.sort(row), expected) for row in rows):
+        raise ValueError(
+            f"Permutation indices must be a rearrangement of 0..{size - 1}."
+        )
+    xp = _array_namespace(indices)
+    return xp.asarray(indices, dtype=xp.int32)
+
+
+@dataclass(frozen=True)
+class PermutationTransform:
+    """A permutation represented by gather indices ``new[i] = old[indices[i]]``."""
+
+    indices: Any
+
+
+@dataclass(frozen=True)
+class SignedPermutationTransform:
+    """A signed permutation represented by gather indices and output signs."""
+
+    indices: Any
+    signs: Any
+
+
+@dataclass(frozen=True)
+class MatrixTransform:
+    """A dense continuous transform for rotation-pair or orthogonal groups."""
+
+    matrix: Any
+    family: Literal["rotation_pairs", "orthogonal"]
+
+
+HardTransform = PermutationTransform | SignedPermutationTransform | MatrixTransform
+
+
 def solve_lap_maximize(cost: np.ndarray) -> np.ndarray:
-    """Solve a square linear assignment problem maximizing ``cost``."""
+    """Return gather indices for the square assignment maximizing ``cost``."""
 
     mat = np.ascontiguousarray(cost, dtype=np.float64)
     if mat.ndim != 2 or mat.shape[0] != mat.shape[1]:
         raise ValueError(f"LAP cost must be square, got shape {mat.shape}.")
     row_ind, col_ind = linear_sum_assignment(-mat)
-    perm = np.zeros_like(mat, dtype=np.float64)
-    perm[row_ind, col_ind] = 1.0
-    if np.issubdtype(cost.dtype, np.floating) and cost.dtype != np.float64:
-        return perm.astype(cost.dtype, copy=False)
-    return perm
+    indices = np.empty(mat.shape[0], dtype=np.int32)
+    indices[row_ind] = col_ind
+    return indices
 
 
-def _validate_indices(indices: np.ndarray, size: int) -> np.ndarray:
-    idx = np.asarray(indices)
-    if idx.ndim != 1:
-        raise ValueError(f"Permutation indices must be 1D, got shape {idx.shape}.")
-    if idx.shape[0] != size:
+def _matrix_to_permutation_indices(value: Any, *, size: int) -> np.ndarray:
+    matrix = np.asarray(value)
+    if matrix.shape[-2:] != (size, size) or matrix.ndim not in (2, 3):
         raise ValueError(
-            f"Permutation indices have length {idx.shape[0]}, expected {size}."
+            f"Permutation matrix has shape {matrix.shape}, expected (..., {size}, {size})."
         )
-    int_idx = idx.astype(np.int64)
-    if not np.allclose(idx, int_idx):
-        raise ValueError("Permutation indices must contain integer values.")
-    if sorted(int_idx.tolist()) != list(range(size)):
+    indices = np.argmax(matrix, axis=-1).astype(np.int32)
+    try:
+        _validate_indices(indices, size)
+    except ValueError as exc:
+        raise ValueError("Value is not a hard permutation matrix.") from exc
+    expected = np.eye(size, dtype=matrix.dtype)[indices]
+    if not np.allclose(matrix, expected, rtol=0.0, atol=1e-5):
+        raise ValueError("Value is not a hard permutation matrix.")
+    return indices
+
+
+def normalize_hard_transform(group: Any, value: Any) -> HardTransform:
+    """Normalize a public hard-transform value into its canonical typed form."""
+
+    size = int(group.size)
+    family = str(group.transform_family)
+    if isinstance(value, PermutationTransform):
+        if family != "permutation":
+            raise ValueError(f"Group {group.id!r} requires a {family} transform.")
+        return PermutationTransform(_validate_indices(value.indices, size))
+    if isinstance(value, SignedPermutationTransform):
+        if family not in ("signed_permutation", "orthogonal"):
+            raise ValueError(f"Group {group.id!r} does not accept signed permutations.")
+        indices = _validate_indices(value.indices, size)
+        signs = np.asarray(value.signs)
+        if signs.shape != np.asarray(indices).shape or not np.all(
+            np.isin(signs, (-1, 1))
+        ):
+            raise ValueError(
+                f"Signed permutation for group {group.id!r} needs ±1 signs matching "
+                f"indices shape {np.asarray(indices).shape}."
+            )
+        xp = _array_namespace(value.signs)
+        return SignedPermutationTransform(indices, xp.asarray(value.signs))
+    if isinstance(value, MatrixTransform):
+        if family != value.family:
+            raise ValueError(
+                f"Group {group.id!r} declares {family!r}, got {value.family!r}."
+            )
+        matrix = value.matrix
+    else:
+        arr = np.asarray(value)
+        if family == "permutation":
+            indices = (
+                _validate_indices(value, size)
+                if arr.ndim in (1, 2) and arr.shape[-1] == size and arr.ndim == 1
+                else _matrix_to_permutation_indices(value, size=size)
+            )
+            return PermutationTransform(indices)
+        if family in ("signed_permutation", "orthogonal") and arr.ndim in (2, 3):
+            try:
+                abs_indices = _matrix_to_permutation_indices(np.abs(arr), size=size)
+            except ValueError:
+                if family == "signed_permutation":
+                    raise
+            else:
+                signs = np.take_along_axis(
+                    arr, np.asarray(abs_indices)[..., :, None], axis=-1
+                )[..., 0]
+                transform = SignedPermutationTransform(
+                    _validate_indices(abs_indices, size), np.asarray(signs)
+                )
+                return normalize_hard_transform(group, transform)
+        matrix = value
+
+    arr = np.asarray(matrix)
+    if arr.ndim not in (2, 3) or arr.shape[-2:] != (size, size):
         raise ValueError(
-            f"Permutation indices must be a rearrangement of 0..{size - 1}."
+            f"Group {group.id!r} has transform shape {arr.shape}, expected "
+            f"(..., {size}, {size})."
         )
-    return int_idx
+    gram = arr @ np.swapaxes(arr, -1, -2)
+    if not np.allclose(gram, np.eye(size), rtol=0.0, atol=1e-4):
+        raise ValueError(f"Group {group.id!r} transform is not orthogonal.")
+    return MatrixTransform(matrix, family=family)
+
+
+def transform_matrix(transform: HardTransform, *, dtype: Any | None = None) -> Any:
+    """Materialize a typed transform as a matrix for objectives/relaxations."""
+
+    if isinstance(transform, MatrixTransform):
+        xp = _array_namespace(transform.matrix)
+        return xp.asarray(transform.matrix, dtype=dtype)
+    indices = transform.indices
+    xp = _array_namespace(indices)
+    idx = xp.asarray(indices, dtype=xp.int32)
+    size = int(idx.shape[-1])
+    matrix = xp.eye(size, dtype=dtype or xp.float32)[idx]
+    if isinstance(transform, SignedPermutationTransform):
+        signs = xp.asarray(transform.signs, dtype=matrix.dtype)
+        matrix = matrix * signs[..., :, None]
+    return matrix
 
 
 def as_permutation_matrix(
-    value: Any,
-    *,
-    size: int | None = None,
-    dtype=np.float64,
+    value: Any, *, size: int | None = None, dtype=np.float64
 ) -> np.ndarray:
-    """Return ``value`` as a permutation matrix, accepting indices or matrices."""
+    """Materialize permutation indices/typed transforms as a dense matrix."""
 
+    if isinstance(
+        value, (PermutationTransform, SignedPermutationTransform, MatrixTransform)
+    ):
+        return np.asarray(transform_matrix(value, dtype=dtype))
     arr = np.asarray(value)
     if arr.ndim == 1:
         matrix_size = int(size) if size is not None else int(arr.shape[0])
-        idx = _validate_indices(arr, matrix_size)
-        matrix = np.zeros((matrix_size, matrix_size), dtype=dtype)
-        matrix[np.arange(matrix_size), idx] = 1.0
-        return matrix
-    if arr.ndim in {2, 3}:
+        indices = _validate_indices(arr, matrix_size)
+        return np.eye(matrix_size, dtype=dtype)[np.asarray(indices)]
+    if arr.ndim in (2, 3):
         if size is not None and arr.shape[-2:] != (size, size):
             raise ValueError(
-                f"Permutation matrix has shape {arr.shape}, expected "
-                f"(..., {size}, {size})."
+                f"Permutation matrix has shape {arr.shape}, expected (..., {size}, {size})."
             )
         return arr.astype(dtype, copy=False)
     raise ValueError(
@@ -92,16 +225,12 @@ def sinkhorn_operator(
 
 @dataclass
 class TransformState:
-    """Solver state keyed by symmetry group id.
-
-    ``matrices`` holds one hard group transform per group (a permutation,
-    signed permutation, rotation-pair block, or orthogonal matrix); ``logits``
-    optionally carries the Sinkhorn relaxation's pre-projection parameters.
-    """
+    """Hard typed transforms plus optional Sinkhorn relaxation state."""
 
     group_order: tuple[str, ...]
-    matrices: dict[str, Any]
+    transforms: dict[str, HardTransform]
     logits: dict[str, jnp.ndarray] | None = None
+    relaxed_matrices: dict[str, Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -112,12 +241,22 @@ class TransformState:
         backend: Literal["jax", "numpy"] = "jax",
         dtype=np.float32,
     ) -> TransformState:
-        eye = jnp.eye if backend == "jax" else np.eye
-        matrices = {
-            group_id: eye(group.size, dtype=dtype)
-            for group_id, group in graph.groups.items()
-        }
-        return cls(group_order=graph.group_order, matrices=matrices)
+        xp = jnp if backend == "jax" else np
+        transforms: dict[str, HardTransform] = {}
+        for group_id, group in graph.groups.items():
+            indices = xp.arange(group.size, dtype=xp.int32)
+            if group.transform_family == "permutation":
+                transform: HardTransform = PermutationTransform(indices)
+            elif group.transform_family in ("signed_permutation", "orthogonal"):
+                transform = SignedPermutationTransform(
+                    indices, xp.ones(group.size, dtype=dtype)
+                )
+            else:
+                transform = MatrixTransform(
+                    xp.eye(group.size, dtype=dtype), family="rotation_pairs"
+                )
+            transforms[group_id] = transform
+        return cls(group_order=graph.group_order, transforms=transforms)
 
     @classmethod
     def from_transforms(
@@ -127,173 +266,158 @@ class TransformState:
         *,
         backend: Literal["jax", "numpy"] = "numpy",
     ) -> TransformState:
-        """Build a hard state, defaulting unspecified groups to identity."""
+        """Build a hard state, normalizing inputs to compact typed transforms."""
 
         state = cls.identity(graph, backend=backend)
-        return state.with_matrices(transforms)
-
-    def with_matrices(self, updates: Mapping[str, Any]) -> TransformState:
-        matrices = dict(self.matrices)
-        matrices.update(dict(updates))
-        return TransformState(
-            group_order=self.group_order,
-            matrices=matrices,
-            logits=self.logits,
-            metadata=dict(self.metadata),
-        )
-
-    def with_logits(self, logits: Mapping[str, jnp.ndarray]) -> TransformState:
-        return TransformState(
-            group_order=self.group_order,
-            matrices=dict(self.matrices),
-            logits=dict(logits),
-            metadata=dict(self.metadata),
-        )
-
-    def soft(self, tau: float = 0.1, n_iters: int = 50) -> dict[str, jnp.ndarray]:
-        """Project stored logits to doubly stochastic matrices.
-
-        Groups without logits (e.g. rotation-pair groups excluded from the
-        Sinkhorn relaxation) fall back to their current hard matrices.
-        """
-
-        logits = self.logits or {}
-        return {
-            gid: sinkhorn_operator(logits[gid], tau=tau, n_iters=n_iters)
-            if gid in logits
-            else jnp.asarray(
-                as_permutation_matrix(self.matrices[gid], dtype=np.float32)
-            )
-            for gid in self.group_order
+        unknown = sorted(set(transforms) - set(graph.groups))
+        if unknown:
+            raise ValueError("Unknown transform group(s): " + ", ".join(unknown))
+        updates = {
+            group_id: normalize_hard_transform(graph.groups[group_id], value)
+            for group_id, value in transforms.items()
         }
+        return state.with_transforms(updates)
 
-    def harden(
-        self, method: str = "hungarian", *, groups: tuple[str, ...] | None = None
+    def with_transforms(self, updates: Mapping[str, HardTransform]) -> TransformState:
+        transforms = dict(self.transforms)
+        transforms.update(dict(updates))
+        return TransformState(
+            group_order=self.group_order,
+            transforms=transforms,
+            logits=self.logits,
+            relaxed_matrices=self.relaxed_matrices,
+            metadata=dict(self.metadata),
+        )
+
+    def with_relaxation(
+        self, logits: Mapping[str, jnp.ndarray], matrices: Mapping[str, Any]
     ) -> TransformState:
-        """Convert current matrices or projected logits to hard permutations.
+        return TransformState(
+            group_order=self.group_order,
+            transforms=dict(self.transforms),
+            logits=dict(logits),
+            relaxed_matrices=dict(matrices),
+            metadata=dict(self.metadata),
+        )
 
-        ``groups`` restricts hardening to the listed groups; others keep
-        their current matrices untouched. Solvers that relax only the
-        permutation-capable groups must pass their group subset so
-        rotation/orthogonal matrices held by other groups are not projected
-        onto permutations.
-        """
+    def matrix(self, group_id: str, *, dtype: Any | None = None) -> Any:
+        if self.relaxed_matrices is not None and group_id in self.relaxed_matrices:
+            value = self.relaxed_matrices[group_id]
+            xp = _array_namespace(value)
+            return xp.asarray(value, dtype=dtype)
+        return transform_matrix(self.transforms[group_id], dtype=dtype)
 
-        if method.lower() != "hungarian":
-            raise ValueError(f"Unsupported hardening method {method!r}.")
-        source = self.soft() if self.logits is not None else self.matrices
-        selected = set(self.group_order if groups is None else groups)
-        hardened: dict[str, Any] = {}
-        for group_id in self.group_order:
-            if group_id not in selected:
-                hardened[group_id] = self.matrices[group_id]
-                continue
-            matrix = as_permutation_matrix(source[group_id])
+    def harden(self, *, groups: tuple[str, ...]) -> TransformState:
+        """Harden selected plain-permutation Sinkhorn groups with Hungarian LAP."""
+
+        selected = set(groups)
+        transforms = dict(self.transforms)
+        for group_id in groups:
+            matrix = np.asarray(self.matrix(group_id))
             if matrix.ndim == 2:
-                hardened[group_id] = solve_lap_maximize(matrix)
+                indices = solve_lap_maximize(matrix)
             elif matrix.ndim == 3:
-                hardened[group_id] = np.stack(
-                    [solve_lap_maximize(matrix[idx]) for idx in range(matrix.shape[0])],
-                    axis=0,
+                indices = np.stack(
+                    [solve_lap_maximize(item) for item in matrix], axis=0
                 )
             else:
                 raise ValueError(
                     f"Cannot harden group {group_id!r} with shape {matrix.shape}."
                 )
+            transforms[group_id] = PermutationTransform(indices)
+        if selected - set(self.group_order):
+            raise ValueError("Cannot harden unknown groups.")
         metadata = dict(self.metadata)
-        metadata["hardening_method"] = method.lower()
+        metadata["hardening_method"] = "hungarian"
         return TransformState(
             group_order=self.group_order,
-            matrices=hardened,
-            logits=None,
+            transforms=transforms,
             metadata=metadata,
         )
 
     def validate(self, graph, *, hard: bool = False) -> None:
-        """Validate shapes, group keys, and optionally hard-transform constraints.
-
-        With ``hard=True`` every matrix must be a hard member of its group's
-        declared transform family: a permutation, a signed permutation (its
-        entrywise absolute value is a permutation), or an orthogonal matrix
-        (rotation-pair and orthogonal groups).
-        """
-
         if set(self.group_order) != set(graph.groups):
             raise ValueError("State group_order must contain exactly the graph groups.")
-        if set(self.matrices) != set(graph.groups):
-            raise ValueError(
-                "State matrices mapping must contain exactly the graph groups."
-            )
+        if set(self.transforms) != set(graph.groups):
+            raise ValueError("State transforms must contain exactly the graph groups.")
         for group_id, group in graph.groups.items():
-            value = np.asarray(self.matrices[group_id])
-            if value.ndim == 1:
-                _validate_indices(value, group.size)
-                continue
-            if value.shape[-2:] != (group.size, group.size):
+            transform = self.transforms[group_id]
+            family = group.transform_family
+            if family == "permutation" and not isinstance(
+                transform, PermutationTransform
+            ):
+                raise ValueError(f"Group {group_id!r} requires permutation indices.")
+            if family == "signed_permutation" and not isinstance(
+                transform, SignedPermutationTransform
+            ):
+                raise ValueError(f"Group {group_id!r} requires signed indices/signs.")
+            if family == "rotation_pairs" and not (
+                isinstance(transform, MatrixTransform)
+                and transform.family == "rotation_pairs"
+            ):
+                raise ValueError(f"Group {group_id!r} requires a rotation matrix.")
+            if family == "orthogonal" and not isinstance(
+                transform, (SignedPermutationTransform, MatrixTransform)
+            ):
                 raise ValueError(
-                    f"Group {group_id!r} has matrix shape {value.shape}, "
-                    f"expected (..., {group.size}, {group.size})."
+                    f"Group {group_id!r} requires an orthogonal transform."
                 )
-            if not hard:
-                continue
-            transform_family = getattr(group, "transform_family", "permutation")
-            if transform_family in ("rotation_pairs", "orthogonal"):
-                gram = value @ np.swapaxes(value, -1, -2)
-                eye = np.eye(group.size, dtype=gram.dtype)
-                if float(np.max(np.abs(gram - eye))) > 1e-4:
-                    raise ValueError(f"Group {group_id!r} is not orthogonal.")
-                continue
-            matrix = (
-                np.abs(value) if transform_family == "signed_permutation" else value
+            normalize_hard_transform(group, transform)
+        if hard and (self.logits is not None or self.relaxed_matrices is not None):
+            raise ValueError(
+                "A relaxed TransformState cannot be applied as a hard alignment."
             )
-            row_error = np.max(np.abs(np.sum(matrix, axis=-1) - 1.0))
-            col_error = np.max(np.abs(np.sum(matrix, axis=-2) - 1.0))
-            binary_error = np.max(np.minimum(np.abs(matrix), np.abs(matrix - 1.0)))
-            if max(float(row_error), float(col_error), float(binary_error)) > 1e-5:
-                raise ValueError(
-                    f"Group {group_id!r} is not a hard {transform_family.replace('_', ' ')}."
-                )
-        if self.logits is not None:
-            unknown = sorted(set(self.logits) - set(graph.groups))
+        for mapping, label in (
+            (self.logits, "logits"),
+            (self.relaxed_matrices, "relaxed matrices"),
+        ):
+            if mapping is None:
+                continue
+            unknown = sorted(set(mapping) - set(graph.groups))
             if unknown:
-                raise ValueError(
-                    "State logits reference unknown group(s): " + ", ".join(unknown)
-                )
-            for group_id, logits in self.logits.items():
+                raise ValueError(f"State {label} reference unknown groups: {unknown}.")
+            for group_id, value in mapping.items():
                 size = graph.groups[group_id].size
-                if logits.shape[-2:] != (size, size):
+                if value.shape[-2:] != (size, size):
                     raise ValueError(
-                        f"Group {group_id!r} logits shape {logits.shape}, "
-                        f"expected (..., {size}, {size})."
+                        f"Group {group_id!r} {label} shape {value.shape}, expected "
+                        f"(..., {size}, {size})."
                     )
 
     def to_artifacts(self) -> dict[str, np.ndarray]:
-        """Serialize the final hard transforms keyed by group id.
+        """Serialize hard transforms in their compact declared representation."""
 
-        Plain permutation matrices are stored as compact ``uint8``; signed
-        permutations, rotations, and orthogonal matrices (which are not
-        binary) are stored as ``float32``. The distinction is content-based,
-        so artifacts stay self-describing and every transform family
-        round-trips exactly through
-        :func:`align.runtime.artifacts.write_transforms_artifact`.
-        """
-
+        if self.logits is not None or self.relaxed_matrices is not None:
+            raise ValueError(
+                "Relaxed transform states cannot be persisted as alignments."
+            )
         artifacts: dict[str, np.ndarray] = {}
         for group_id in self.group_order:
-            matrix = as_permutation_matrix(self.matrices[group_id])
-            binary_error = float(
-                np.max(np.minimum(np.abs(matrix), np.abs(matrix - 1.0)))
-            )
-            if binary_error <= 1e-5:
-                artifacts[group_id] = (matrix > 0.5).astype(np.uint8)
+            transform = self.transforms[group_id]
+            if isinstance(transform, PermutationTransform):
+                artifacts[group_id] = np.asarray(transform.indices, dtype=np.int32)
+            elif isinstance(transform, SignedPermutationTransform):
+                artifacts[group_id] = np.stack(
+                    [
+                        np.asarray(transform.indices, dtype=np.int32),
+                        np.asarray(transform.signs, dtype=np.int32),
+                    ],
+                    axis=0,
+                )
             else:
-                artifacts[group_id] = matrix.astype(np.float32)
+                artifacts[group_id] = np.asarray(transform.matrix, dtype=np.float32)
         return artifacts
 
 
 __all__ = [
+    "HardTransform",
+    "MatrixTransform",
+    "PermutationTransform",
+    "SignedPermutationTransform",
     "TransformState",
     "as_permutation_matrix",
+    "normalize_hard_transform",
     "sinkhorn_operator",
     "solve_lap_maximize",
+    "transform_matrix",
 ]

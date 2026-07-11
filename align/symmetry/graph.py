@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import copy
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal
 
 import jax.numpy as jnp
 import numpy as np
-from flax.core import frozen_dict
 
+from ..tree_utils import replace_paths
 from .constraints import (
     ConstraintRecord,
     GQARoPECircuitConstraint,
@@ -20,13 +20,12 @@ from .constraints import (
 )
 from .tensor_ops import (
     _descend,
-    _set_path,
-    apply_matrix_to_axis,
+    apply_group_transform_to_axis,
     binding_axis_interval,
+    binding_axis_intervals,
     binding_indexer,
     binding_selector,
     binding_sort_key,
-    binding_transform_matrix,
 )
 
 TRANSFORM_FAMILIES = (
@@ -108,6 +107,8 @@ class AxisBinding:
     group: str
     start: int | None = None
     stop: int | None = None
+    repeat: int = 1
+    stride: int | None = None
     role: Literal["out", "in"] = "out"
     scale_power: float = 1.0
     selector: tuple[tuple[int, int], ...] = ()
@@ -212,6 +213,18 @@ class SymmetryGraph:
     constraints: tuple[ConstraintRecord, ...] = ()
     components: dict[str, ComponentSpec] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    _bindings_by_tensor: Mapping[str, tuple[AxisBinding, ...]] = field(
+        init=False, repr=False
+    )
+    _bindings_by_group: Mapping[str, tuple[AxisBinding, ...]] = field(
+        init=False, repr=False
+    )
+    _sorted_bindings_by_tensor: Mapping[str, tuple[AxisBinding, ...]] = field(
+        init=False, repr=False
+    )
+    _tensors_by_group: Mapping[str, tuple[str, ...]] = field(init=False, repr=False)
+    _group_owner: Mapping[str, str] = field(init=False, repr=False)
+    _repeated_group_terms: Mapping[str, tuple[str, ...]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.groups = dict(self.groups)
@@ -220,6 +233,62 @@ class SymmetryGraph:
         self.constraints = tuple(self.constraints)
         self.components = dict(self.components)
         self.metadata = dict(self.metadata)
+        by_tensor: dict[str, list[AxisBinding]] = {
+            tensor_id: [] for tensor_id in self.tensors
+        }
+        by_group: dict[str, list[AxisBinding]] = {
+            group_id: [] for group_id in self.groups
+        }
+        for binding in self.axis_bindings:
+            by_tensor.setdefault(binding.tensor_id, []).append(binding)
+            by_group.setdefault(binding.group, []).append(binding)
+        self._bindings_by_tensor = MappingProxyType(
+            {key: tuple(value) for key, value in by_tensor.items()}
+        )
+        self._bindings_by_group = MappingProxyType(
+            {key: tuple(value) for key, value in by_group.items()}
+        )
+        self._sorted_bindings_by_tensor = MappingProxyType(
+            {
+                tensor_id: tuple(
+                    sorted(
+                        bindings,
+                        key=lambda binding: binding_sort_key(
+                            self.tensors[tensor_id].shape, binding
+                        ),
+                    )
+                )
+                for tensor_id, bindings in by_tensor.items()
+                if tensor_id in self.tensors
+            }
+        )
+        self._tensors_by_group = MappingProxyType(
+            {
+                group_id: tuple(
+                    dict.fromkeys(binding.tensor_id for binding in bindings)
+                )
+                for group_id, bindings in by_group.items()
+            }
+        )
+        self._group_owner = MappingProxyType(
+            {
+                group_id: component_id
+                for component_id, component in self.components.items()
+                for group_id in component.groups
+            }
+        )
+        repeated: dict[str, list[str]] = {}
+        for tensor_id, tensor in self.tensors.items():
+            axes_by_group: dict[str, set[int]] = {}
+            for binding in self._bindings_by_tensor.get(tensor_id, ()):
+                axis, _, _ = binding_axis_interval(tensor.shape, binding)
+                axes_by_group.setdefault(binding.group, set()).add(axis)
+            for group_id, axes in axes_by_group.items():
+                if len(axes) > 1:
+                    repeated.setdefault(group_id, []).append(tensor_id)
+        self._repeated_group_terms = MappingProxyType(
+            {group_id: tuple(tensors) for group_id, tensors in repeated.items()}
+        )
 
     @property
     def group_order(self) -> tuple[str, ...]:
@@ -238,34 +307,28 @@ class SymmetryGraph:
     def component_for_group(self, group_id: str) -> str | None:
         """Return the id of the component owning ``group_id``, if components exist."""
 
-        for component in self.components.values():
-            if group_id in component.groups:
-                return component.id
-        return None
+        return self._group_owner.get(group_id)
 
     def bindings_for_tensor(self, tensor_id: str) -> tuple[AxisBinding, ...]:
-        return tuple(
-            binding for binding in self.axis_bindings if binding.tensor_id == tensor_id
-        )
+        return self._bindings_by_tensor.get(tensor_id, ())
 
     def bindings_for_group(self, group_id: str) -> tuple[AxisBinding, ...]:
-        return tuple(
-            binding for binding in self.axis_bindings if binding.group == group_id
-        )
+        return self._bindings_by_group.get(group_id, ())
+
+    def sorted_bindings_for_tensor(self, tensor_id: str) -> tuple[AxisBinding, ...]:
+        """Return pre-sorted application bindings for ``tensor_id``."""
+
+        return self._sorted_bindings_by_tensor.get(tensor_id, ())
+
+    def tensors_for_group(self, group_id: str) -> tuple[str, ...]:
+        """Return tensor ids touched by ``group_id`` in stable binding order."""
+
+        return self._tensors_by_group.get(group_id, ())
 
     def repeated_group_terms(self) -> dict[str, tuple[str, ...]]:
         """Return tensor ids where a group binds more than once."""
 
-        repeated: dict[str, list[str]] = {}
-        for tensor_id, tensor in self.tensors.items():
-            axes_by_group: dict[str, set[int]] = {}
-            for binding in self.bindings_for_tensor(tensor_id):
-                axis, _, _ = binding_axis_interval(tensor.shape, binding)
-                axes_by_group.setdefault(binding.group, set()).add(axis)
-            for group_id, axes in axes_by_group.items():
-                if len(axes) > 1:
-                    repeated.setdefault(group_id, []).append(tensor_id)
-        return {group_id: tuple(tensors) for group_id, tensors in repeated.items()}
+        return dict(self._repeated_group_terms)
 
     def materialize(
         self,
@@ -366,7 +429,8 @@ class SymmetryGraph:
                     "non-negative float."
                 )
             tensor = self.tensors[binding.tensor_id]
-            axis, start, stop = binding_axis_interval(tensor.shape, binding)
+            intervals = binding_axis_intervals(tensor.shape, binding)
+            axis = intervals[0][0]
             selector = binding_selector(tensor.shape, binding)
             if any(sel_axis == axis for sel_axis, _ in selector):
                 raise ValueError(
@@ -378,38 +442,39 @@ class SymmetryGraph:
                     sel_axis for sel_axis, _ in selector
                 )
                 selector_bound_axes.setdefault(binding.tensor_id, set()).add(axis)
+            group = self.groups[binding.group]
             axis_key = (binding.tensor_id, axis)
-            for (
-                prev_start,
-                prev_stop,
-                previous_group,
-                prev_selector,
-            ) in bound_segments.get(axis_key, []):
-                if max(start, prev_start) >= min(stop, prev_stop):
-                    continue
-                prev_coords = dict(prev_selector)
-                disjoint = any(
-                    prev_coords.get(sel_axis, sel_index) != sel_index
-                    for sel_axis, sel_index in selector
+            for _, start, stop in intervals:
+                for (
+                    prev_start,
+                    prev_stop,
+                    previous_group,
+                    prev_selector,
+                ) in bound_segments.get(axis_key, []):
+                    if max(start, prev_start) >= min(stop, prev_stop):
+                        continue
+                    prev_coords = dict(prev_selector)
+                    disjoint = any(
+                        prev_coords.get(sel_axis, sel_index) != sel_index
+                        for sel_axis, sel_index in selector
+                    )
+                    if not disjoint:
+                        raise ValueError(
+                            f"Tensor {binding.tensor_id!r} axis {binding.axis} interval "
+                            f"[{start}, {stop}) overlaps an existing binding to group "
+                            f"{previous_group!r}; cannot also bind it to group "
+                            f"{binding.group!r}."
+                        )
+                bound_segments.setdefault(axis_key, []).append(
+                    (start, stop, binding.group, selector)
                 )
-                if not disjoint:
+                interval_size = stop - start
+                if interval_size != int(group.size):
                     raise ValueError(
                         f"Tensor {binding.tensor_id!r} axis {binding.axis} interval "
-                        f"[{start}, {stop}) overlaps an existing binding to group "
-                        f"{previous_group!r}; cannot also bind it to group "
-                        f"{binding.group!r}."
+                        f"[{start}, {stop}) has size {interval_size}, expected group "
+                        f"{binding.group!r} size {group.size}."
                     )
-            bound_segments.setdefault(axis_key, []).append(
-                (start, stop, binding.group, selector)
-            )
-            group = self.groups[binding.group]
-            interval_size = stop - start
-            if interval_size != int(group.size):
-                raise ValueError(
-                    f"Tensor {binding.tensor_id!r} axis {binding.axis} interval "
-                    f"[{start}, {stop}) has size {interval_size}, expected group "
-                    f"{binding.group!r} size {group.size}."
-                )
 
         for tensor_id, axes in selector_axes.items():
             tangled = axes & selector_bound_axes.get(tensor_id, set())
@@ -630,28 +695,32 @@ class SymmetryGraph:
         preserved.
         """
 
-        is_frozen = isinstance(params, frozen_dict.FrozenDict)
-        mutable = frozen_dict.unfreeze(params) if is_frozen else copy.deepcopy(params)
+        replacements: list[tuple[tuple[str, ...], Any]] = []
         for tensor_id, tensor in self.tensors.items():
-            bindings = self.bindings_for_tensor(tensor_id)
+            bindings = self.sorted_bindings_for_tensor(tensor_id)
             if not bindings:
                 continue
-            updated = _descend(mutable, tensor.path)
-            for binding in sorted(
-                bindings,
-                key=lambda item: binding_sort_key(tensor.shape, item),
-            ):
-                axis, start, stop = binding_axis_interval(tensor.shape, binding)
+            updated = _descend(params, tensor.path)
+            for binding in bindings:
                 selector = binding_selector(tensor.shape, binding)
-                if not selector and start == 0 and stop == int(tensor.shape[axis]):
-                    updated = transform(updated, axis, binding)
+                intervals = binding_axis_intervals(tensor.shape, binding)
+                if (
+                    len(intervals) == 1
+                    and not selector
+                    and intervals[0][1] == 0
+                    and intervals[0][2] == int(tensor.shape[intervals[0][0]])
+                ):
+                    updated = transform(updated, intervals[0][0], binding)
                     continue
-                indexer = binding_indexer(np.ndim(updated), axis, start, stop, selector)
-                segment = updated[indexer]
-                transformed = transform(segment, axis, binding)
-                updated = _set_axis_slice(updated, indexer, transformed)
-            _set_path(mutable, tensor.path, updated)
-        return frozen_dict.freeze(mutable) if is_frozen else mutable
+                for axis, start, stop in intervals:
+                    indexer = binding_indexer(
+                        np.ndim(updated), axis, start, stop, selector
+                    )
+                    segment = updated[indexer]
+                    transformed = transform(segment, axis, binding)
+                    updated = _set_axis_slice(updated, indexer, transformed)
+            replacements.append((tensor.path, updated))
+        return replace_paths(params, replacements)
 
     def apply_transforms(self, params: Mapping[str, Any], state) -> Mapping[str, Any]:
         """Apply a hard group-transform state to all bound tensor axes.
@@ -665,14 +734,13 @@ class SymmetryGraph:
         state.validate(self, hard=True)
 
         def _transform(segment, axis, binding):
-            matrix = binding_transform_matrix(
-                state.matrices[binding.group],
+            return apply_group_transform_to_axis(
+                segment,
+                state.transforms[binding.group],
+                axis=axis,
                 transform_family=self.groups[binding.group].transform_family,
                 scope=binding.transform_scope,
             )
-            if matrix is None:
-                return segment
-            return apply_matrix_to_axis(segment, matrix, axis=axis)
 
         return self._transform_bound_tensors(params, _transform)
 

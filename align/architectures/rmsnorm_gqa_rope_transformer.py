@@ -35,46 +35,25 @@ remaining parameter must be an RMSNorm, a dense chain member, or an
 embedding-style tensor with a trailing ``d_model`` axis.
 """
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
-
-import numpy as np
+from typing import Any, ClassVar
 
 from ..symmetry import RMSNormScaleConstraint, SymmetryGraph
-from ..symmetry.tensor_ops import _descend, _maybe_descend
 from .graph_builder import SymmetryGraphBuilder
 from .recipe import ArchitectureRecipe, register_recipe
 from .rules import (
     DenseChainRule,
     GQARoPEAttentionRule,
     ResidualStreamRule,
-    is_attention_module,
-    is_dense_module,
     is_layernorm_module,
     is_rmsnorm_module,
 )
-
-
-def _natural_key(value: str) -> list[int | str]:
-    parts = re.split(r"(\d+)", value)
-    return [int(part) if part.isdigit() else part for part in parts if part]
-
-
-def _path_key(path: tuple[str, ...]) -> list[list[int | str]]:
-    return [_natural_key(part) for part in path]
-
-
-def _shape(node: Any) -> tuple[int, ...]:
-    return tuple(int(dim) for dim in np.shape(node))
-
-
-@dataclass(frozen=True)
-class _DenseLayer:
-    path: tuple[str, ...]
-    din: int
-    dout: int
+from .schemas import RMSNORM_GQA_ROPE_TRANSFORMER_OPTIONS
+from .transformer_inventory import (
+    chain_dense_layers,
+    discover_transformer_inventory,
+)
 
 
 @register_recipe
@@ -91,6 +70,7 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
     name: str = "rmsnorm_gqa_rope_transformer"
     parameter_root: str = ""
     stream_transform_family: str = "signed_permutation"
+    config_options: ClassVar[frozenset[str]] = RMSNORM_GQA_ROPE_TRANSFORMER_OPTIONS
 
     def __post_init__(self) -> None:
         if self.stream_transform_family not in ("signed_permutation", "orthogonal"):
@@ -99,40 +79,6 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
                 "'signed_permutation' or 'orthogonal', got "
                 f"{self.stream_transform_family!r}."
             )
-
-    # -- discovery -------------------------------------------------------
-
-    def _root_path(self) -> tuple[str, ...]:
-        return tuple(part for part in self.parameter_root.split(".") if part)
-
-    def _find_attention_modules(
-        self, subtree: Mapping[str, Any]
-    ) -> list[tuple[str, ...]]:
-        found: list[tuple[str, ...]] = []
-
-        def _walk(node: Mapping[str, Any], prefix: tuple[str, ...]) -> None:
-            if is_attention_module(node):
-                found.append(prefix)
-                return
-            for name, value in node.items():
-                if isinstance(value, Mapping):
-                    _walk(value, prefix + (str(name),))
-
-        _walk(subtree, ())
-        return sorted(found, key=_path_key)
-
-    def _block_scope(
-        self, subtree: Mapping[str, Any], attention_path: tuple[str, ...]
-    ) -> tuple[str, ...]:
-        for depth in range(len(attention_path) - 1, 0, -1):
-            scope_path = attention_path[:depth]
-            scope = _descend(subtree, scope_path)
-            if any(is_rmsnorm_module(child) for child in scope.values()):
-                return scope_path
-        raise ValueError(
-            "Could not locate a transformer block scope (an ancestor with an "
-            f"RMSNorm) for attention module at {'/'.join(attention_path)}."
-        )
 
     def _require_rmsnorm(self, module: Any, path: tuple[str, ...]) -> None:
         if not is_rmsnorm_module(module):
@@ -143,215 +89,61 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
                 )
             raise ValueError(f"{'/'.join(path)} is not an RMSNorm module.")
 
-    def _collect_block_layers(
-        self,
-        scope: Mapping[str, Any],
-        scope_path: tuple[str, ...],
-        attention_path: tuple[str, ...],
-    ) -> tuple[list[tuple[str, ...]], list[_DenseLayer]]:
-        """Return (RMSNorm paths, dense FFN layers) inside one block scope."""
-
-        norms: list[tuple[str, ...]] = []
-        dense: list[_DenseLayer] = []
-        attention_rel = attention_path[len(scope_path) :]
-
-        def _walk(node: Mapping[str, Any], prefix: tuple[str, ...]) -> None:
-            for name, value in node.items():
-                if not isinstance(value, Mapping):
-                    continue
-                path = prefix + (str(name),)
-                if path == attention_rel:
-                    continue
-                if attention_rel[: len(path)] == path:
-                    _walk(value, path)
-                    continue
-                if is_layernorm_module(value):
-                    self._require_rmsnorm(value, scope_path + path)
-                    norms.append(scope_path + path)
-                elif is_dense_module(value):
-                    kernel_shape = _shape(value["kernel"])
-                    dense.append(
-                        _DenseLayer(
-                            path=scope_path + path,
-                            din=kernel_shape[0],
-                            dout=kernel_shape[1],
-                        )
-                    )
-                else:
-                    _walk(value, path)
-
-        _walk(scope, ())
-        norms.sort(key=_path_key)
-        dense.sort(key=lambda layer: _path_key(layer.path))
-        return norms, dense
-
-    def _collect_outside(
-        self,
-        subtree: Mapping[str, Any],
-        block_scopes: set[tuple[str, ...]],
-        d_model: int,
-    ) -> tuple[list[tuple[str, ...]], list[_DenseLayer], list[tuple[str, ...]]]:
-        """Return (RMSNorms, dense layers, embedding leaves) outside blocks."""
-
-        norms: list[tuple[str, ...]] = []
-        dense: list[_DenseLayer] = []
-        leaves: list[tuple[str, ...]] = []
-
-        def _walk(node: Mapping[str, Any], prefix: tuple[str, ...]) -> None:
-            for name, value in node.items():
-                path = prefix + (str(name),)
-                if path in block_scopes:
-                    continue
-                if isinstance(value, Mapping):
-                    if is_layernorm_module(value):
-                        self._require_rmsnorm(value, path)
-                        norms.append(path)
-                    elif is_dense_module(value):
-                        kernel_shape = _shape(value["kernel"])
-                        dense.append(
-                            _DenseLayer(
-                                path=path,
-                                din=kernel_shape[0],
-                                dout=kernel_shape[1],
-                            )
-                        )
-                    else:
-                        _walk(value, path)
-                    continue
-                shape = _shape(value)
-                if not shape:
-                    continue
-                if shape[-1] != d_model:
-                    raise ValueError(
-                        f"Tensor {'/'.join(path)} with shape {shape} is not "
-                        "part of a recognized transformer component and has no "
-                        f"trailing d_model axis ({d_model})."
-                    )
-                leaves.append(path)
-
-        _walk(subtree, ())
-        norms.sort(key=_path_key)
-        dense.sort(key=lambda layer: _path_key(layer.path))
-        leaves.sort(key=_path_key)
-        return norms, dense, leaves
-
-    @staticmethod
-    def _chain_dense_layers(
-        dense: list[_DenseLayer], d_model: int
-    ) -> list[list[_DenseLayer]]:
-        chains: list[list[_DenseLayer]] = []
-        for layer in dense:
-            if chains and layer.din == chains[-1][-1].dout:
-                chains[-1].append(layer)
-            elif layer.din == d_model:
-                chains.append([layer])
-            else:
-                raise ValueError(
-                    f"Dense layer {'/'.join(layer.path)} (in={layer.din}) fits "
-                    "neither the residual stream nor the preceding classifier "
-                    "chain."
-                )
-        return chains
-
     # -- composition -------------------------------------------------------
 
     def build_graph(self, params: Mapping[str, Any]) -> SymmetryGraph:
-        root_path = self._root_path()
-        subtree = _maybe_descend(params, root_path) if root_path else params
-        if not isinstance(subtree, Mapping):
-            raise ValueError(
-                f"parameter_root '{self.parameter_root}' not found in params."
-            )
-
-        attention_paths = self._find_attention_modules(subtree)
-        if not attention_paths:
-            raise ValueError(
-                "No attention modules (query/key/value/out) found; is this a "
-                "transformer parameter tree?"
-            )
-
-        d_model: int | None = None
-        for path in attention_paths:
-            q_shape = _shape(_descend(subtree, path)["query"]["kernel"])
-            if len(q_shape) != 4:
-                raise ValueError(
-                    f"Attention module {'/'.join(path)} query kernel must be "
-                    "(d_model, kv_groups, heads_per_group, head_dim), got "
-                    f"{q_shape}. Flat-head layouts belong to the "
-                    "'layernorm_mha_transformer' recipe."
-                )
-            if d_model is None:
-                d_model = q_shape[0]
-            elif q_shape[0] != d_model:
-                raise ValueError(
-                    f"Attention module {'/'.join(path)} uses d_model "
-                    f"{q_shape[0]}, expected {d_model}."
-                )
-        assert d_model is not None
-
-        block_scope_by_module = {
-            path: self._block_scope(subtree, path) for path in attention_paths
-        }
-        block_scopes = sorted(set(block_scope_by_module.values()), key=_path_key)
-        scope_modules: dict[tuple[str, ...], list[tuple[str, ...]]] = {
-            scope: [] for scope in block_scopes
-        }
-        for path in attention_paths:
-            scope_modules[block_scope_by_module[path]].append(path)
-        for scope, members in scope_modules.items():
-            if len(members) != 1:
-                raise ValueError(
-                    f"Transformer block {'/'.join(scope)} contains "
-                    f"{len(members)} attention modules; expected exactly one."
-                )
-
-        block_layers = {
-            scope: self._collect_block_layers(
-                _descend(subtree, scope), scope, scope_modules[scope][0]
-            )
-            for scope in block_scopes
-        }
-        outside_norms, outside_dense, embedding_leaves = self._collect_outside(
-            subtree, set(block_scopes), d_model
+        inventory = discover_transformer_inventory(
+            params,
+            parameter_root=self.parameter_root,
+            # LayerNorm is the structural superset (scale with optional bias);
+            # the validator below rejects biased norms with a family-specific
+            # message while still locating their surrounding block.
+            norm_predicate=is_layernorm_module,
+            validate_norm=self._require_rmsnorm,
+            norm_name="RMSNorm",
+            query_rank=4,
+            query_layout="(d_model, kv_groups, heads_per_group, head_dim)",
+            wrong_layout_hint=(
+                "Flat-head layouts belong to the 'layernorm_mha_transformer' recipe."
+            ),
         )
+        d_model = inventory.d_model
+        outside_norms = inventory.outside_norms
         if len(outside_norms) != 1:
             raise ValueError(
                 f"Expected exactly one final RMSNorm outside the blocks, found "
                 f"{len(outside_norms)}."
             )
-        outside_chains = self._chain_dense_layers(outside_dense, d_model)
+        outside_chains = chain_dense_layers(inventory.outside_dense, d_model)
         if not outside_chains:
             raise ValueError(
                 "Expected at least one stream-fed dense chain (the model head) "
                 "outside the blocks."
             )
 
-        def _full(path: tuple[str, ...]) -> tuple[str, ...]:
-            return (*root_path, *path)
-
-        norm_paths = [
-            norm for scope in block_scopes for norm in block_layers[scope][0]
-        ] + outside_norms
-
         builder = SymmetryGraphBuilder(params, architecture=self.name)
         ResidualStreamRule(
             d_model=d_model,
-            layernorm_paths=tuple(_full(path) for path in norm_paths),
-            feature_leaves=tuple(_full(path) for path in embedding_leaves),
+            layernorm_paths=tuple(
+                inventory.full_path(path) for path in inventory.norm_paths
+            ),
+            feature_leaves=tuple(
+                inventory.full_path(path) for path in inventory.feature_leaves
+            ),
             transform_family=self.stream_transform_family,
         ).add_to(builder)
 
         rms_constraints: list[tuple[tuple[str, ...], list[tuple[str, int]]]] = []
-        for scope in block_scopes:
-            block_name = "/".join(scope)
-            module_path = scope_modules[scope][0]
+        for block in inventory.blocks:
+            block_name = "/".join(block.scope)
+            module_path = block.attention.path
             GQARoPEAttentionRule(
                 component_id=f"{block_name}/attention",
-                module_path=_full(module_path),
+                module_path=inventory.full_path(module_path),
                 stream_group="stream",
             ).add_to(builder)
 
-            norms, ffn_layers = block_layers[scope]
+            norms, ffn_layers = block.norms, block.dense_layers
             if len(norms) != 2:
                 raise ValueError(
                     f"Transformer block {block_name} has {len(norms)} RMSNorms; "
@@ -367,7 +159,9 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
                 )
             DenseChainRule(
                 component_id=f"{block_name}/ffn",
-                layer_paths=tuple(_full(layer.path) for layer in ffn_layers),
+                layer_paths=tuple(
+                    inventory.full_path(layer.path) for layer in ffn_layers
+                ),
                 input_group="stream",
                 output_group="stream",
             ).add_to(builder)
@@ -375,22 +169,22 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
             # Convention: the first RMSNorm (natural order) feeds attention,
             # the second feeds the FFN — the standard pre-norm block layout.
             attention_consumers = [
-                ((*_full(module_path), name, "kernel"), 0)
+                ((*inventory.full_path(module_path), name, "kernel"), 0)
                 for name in ("query", "key", "value")
             ]
-            ffn_consumers = [((*_full(ffn_layers[0].path), "kernel"), 0)]
-            rms_constraints.append((_full(norms[0]), attention_consumers))
-            rms_constraints.append((_full(norms[1]), ffn_consumers))
+            ffn_consumers = [((*inventory.full_path(ffn_layers[0].path), "kernel"), 0)]
+            rms_constraints.append((inventory.full_path(norms[0]), attention_consumers))
+            rms_constraints.append((inventory.full_path(norms[1]), ffn_consumers))
 
         head_consumers: list[tuple[tuple[str, ...], int]] = []
         for index, chain in enumerate(outside_chains):
             DenseChainRule(
                 component_id=("classifier" if index == 0 else f"classifier_{index}"),
-                layer_paths=tuple(_full(layer.path) for layer in chain),
+                layer_paths=tuple(inventory.full_path(layer.path) for layer in chain),
                 input_group="stream",
             ).add_to(builder)
-            head_consumers.append(((*_full(chain[0].path), "kernel"), 0))
-        rms_constraints.append((_full(outside_norms[0]), head_consumers))
+            head_consumers.append(((*inventory.full_path(chain[0].path), "kernel"), 0))
+        rms_constraints.append((inventory.full_path(outside_norms[0]), head_consumers))
 
         for norm_path, consumers in rms_constraints:
             scale_id = builder.tensor((*norm_path, "scale"))
@@ -405,7 +199,9 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
         builder.metadata.update(
             {
                 "d_model": d_model,
-                "transformer_blocks": ["/".join(scope) for scope in block_scopes],
+                "transformer_blocks": [
+                    "/".join(block.scope) for block in inventory.blocks
+                ],
             }
         )
         return builder.finish()

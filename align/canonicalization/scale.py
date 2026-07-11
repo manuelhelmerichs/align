@@ -48,7 +48,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-import jax.numpy as jnp
 import numpy as np
 
 from ..symmetry import AxisBinding, SymmetryGraph, binding_axis_interval
@@ -239,11 +238,10 @@ def _dense_scale_plan(graph: SymmetryGraph) -> _DenseScalePlan:
 
 
 def _multiply_axis(tensor: Any, factors: Any, *, axis: int) -> Any:
-    xp = jnp if isinstance(tensor, jnp.ndarray) else np
-    factor = xp.asarray(factors)
-    broadcast_shape = [1] * xp.ndim(tensor)
+    factor = np.asarray(factors)
+    broadcast_shape = [1] * np.ndim(tensor)
     broadcast_shape[axis] = factor.shape[0]
-    return tensor * factor.reshape(broadcast_shape)
+    return np.asarray(tensor) * factor.reshape(broadcast_shape)
 
 
 def _has_degenerate(mask: Any) -> bool:
@@ -274,8 +272,8 @@ def _group_scales(
     degenerate_masks: dict[str, Any] = {}
 
     for site in plan.sites:
-        kernel = jnp.asarray(_descend(params, site.kernel_path))
-        bias = jnp.asarray(_descend(params, site.bias_path))
+        kernel = np.asarray(_descend(params, site.kernel_path))
+        bias = np.asarray(_descend(params, site.bias_path))
         if site.in_binding is not None:
             in_axis, _, _ = binding_axis_interval(kernel.shape, site.in_binding)
             kernel = _multiply_axis(
@@ -312,7 +310,7 @@ def _balanced_group_scales(
     include_bias_in_norm: bool,
     max_iter: int = 500,
     tol: float = 1e-9,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Derive per-group scales that equalize incoming and outgoing energies.
 
     Minimizing the total squared weight norm over the positive scale orbit is
@@ -338,14 +336,16 @@ def _balanced_group_scales(
 
     degenerate_masks: dict[str, Any] = {}
     for site, kernel, bias in zip(plan.sites, mats[:-1], biases, strict=True):
-        layer = DenseLayer(kernel=jnp.asarray(kernel), bias=jnp.asarray(bias))
+        layer = DenseLayer(kernel=np.asarray(kernel), bias=np.asarray(bias))
         degenerate_masks[site.group_id] = compute_degenerate_mask(
             layer, epsilon=epsilon, include_bias_in_norm=include_bias_in_norm
         )
 
     totals = [np.ones(kernel.shape[1], dtype=np.float64) for kernel in mats[:-1]]
     masks = [np.asarray(degenerate_masks[site.group_id]) for site in plan.sites]
+    iterations = 0
     for _ in range(max_iter):
+        iterations += 1
         delta = 0.0
         for index in range(len(plan.sites)):
             energy_out = np.sum(mats[index] ** 2, axis=0)
@@ -361,15 +361,27 @@ def _balanced_group_scales(
             delta = max(delta, float(np.max(np.abs(np.log(factors)))))
         if delta < tol:
             break
+    else:
+        raise ValueError(
+            "Balanced dense canonicalization did not converge within "
+            f"{max_iter} sweeps (last max |log factor| {delta:.3e})."
+        )
 
     action_scales = {
-        site.group_id: jnp.asarray(total, dtype=jnp.float32)
+        site.group_id: np.asarray(
+            total, dtype=np.asarray(_descend(params, site.kernel_path)).dtype
+        )
         for site, total in zip(plan.sites, totals, strict=True)
     }
     reported_scales = {
         site.group_id: action_scales[site.group_id] for site in plan.sites
     }
-    return action_scales, reported_scales, degenerate_masks
+    convergence = {
+        "converged": True,
+        "iterations": iterations,
+        "residual": delta,
+    }
+    return action_scales, reported_scales, degenerate_masks, convergence
 
 
 def _zero_degenerate_consumers(
@@ -378,7 +390,7 @@ def _zero_degenerate_consumers(
     degenerate_masks: Mapping[str, Any],
 ) -> ParamTree:
     active_masks = {
-        group_id: jnp.where(mask, 0.0, 1.0)
+        group_id: np.where(mask, 0.0, 1.0)
         for group_id, mask in degenerate_masks.items()
         if _has_degenerate(mask)
     }
@@ -404,9 +416,9 @@ def _canonicalize_degenerate_producers(
         mask = degenerate_masks[site.group_id]
         if not _has_degenerate(mask):
             continue
-        mask = jnp.asarray(mask, dtype=bool)
-        kernel = jnp.asarray(_descend(params, site.kernel_path))
-        bias = jnp.asarray(_descend(params, site.bias_path))
+        mask = np.asarray(mask, dtype=bool)
+        kernel = np.asarray(_descend(params, site.kernel_path))
+        bias = np.asarray(_descend(params, site.bias_path))
         kernel, bias = _canonicalize_degenerate(kernel, bias, mask)
         replacements.append((site.kernel_path, kernel))
         replacements.append((site.bias_path, bias))
@@ -502,12 +514,15 @@ class ScaleCanonicalizer:
             )
         dense_strategy = strategy or "balanced"
         plan = _dense_scale_plan(graph)
+        convergence = None
         if dense_strategy == "balanced":
-            action_scales, scales, degenerate_masks = _balanced_group_scales(
-                params,
-                plan,
-                epsilon=epsilon,
-                include_bias_in_norm=include_bias_in_norm,
+            action_scales, scales, degenerate_masks, convergence = (
+                _balanced_group_scales(
+                    params,
+                    plan,
+                    epsilon=epsilon,
+                    include_bias_in_norm=include_bias_in_norm,
+                )
             )
         else:
             action_scales, scales, degenerate_masks = _group_scales(
@@ -519,7 +534,7 @@ class ScaleCanonicalizer:
             )
         canonical_params = graph.apply_scales(
             params,
-            ScaleState.from_scales(graph, action_scales, backend="jax"),
+            ScaleState.from_scales(graph, action_scales),
         )
 
         if degenerate_channels in ("zero_outgoing", "canonical_vector"):
@@ -539,6 +554,8 @@ class ScaleCanonicalizer:
             "include_bias_in_norm": include_bias_in_norm,
             "activation": activation,
         }
+        if convergence is not None:
+            aux["convergence"] = convergence
         return canonical_params, scales, aux
 
     def _canonicalize_convnet(
@@ -587,7 +604,7 @@ class ScaleCanonicalizer:
             plan = "conv_producer_energy"
         canonical_params = graph.apply_scales(
             params,
-            ScaleState.from_scales(graph, scales, backend="jax"),
+            ScaleState.from_scales(graph, scales),
         )
         aux: dict[str, Any] = {
             "plan": plan,
@@ -633,7 +650,7 @@ class ScaleCanonicalizer:
         if circuit_scales:
             canonical = graph.apply_scales(
                 canonical,
-                ScaleState.from_scales(graph, circuit_scales, backend="jax"),
+                ScaleState.from_scales(graph, circuit_scales),
             )
 
         scales = {
@@ -688,7 +705,7 @@ class ScaleCanonicalizer:
         )
         canonical_params = graph.apply_scales(
             params,
-            ScaleState.from_scales(graph, scales, backend="jax"),
+            ScaleState.from_scales(graph, scales),
         )
         aux: dict[str, Any] = {
             "plan": "attention_balance",

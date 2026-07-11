@@ -144,7 +144,7 @@ def test_scale_canonicalizer_matches_explicit_scale_action_when_non_degenerate()
     action_scales = scales
     via_action = graph.apply_scales(
         params,
-        ScaleState.from_scales(graph, action_scales, backend="jax"),
+        ScaleState.from_scales(graph, action_scales),
     )
 
     assert _tree_max_abs_diff(canonicalized, via_action) < 1e-6

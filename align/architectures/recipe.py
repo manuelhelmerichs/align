@@ -13,7 +13,15 @@ alongside this module under ``align.architectures``.
 import importlib
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, ClassVar
+
+from .schemas import (
+    CONVNET_OPTIONS,
+    LAYERNORM_MHA_TRANSFORMER_OPTIONS,
+    MLP_OPTIONS,
+    RESIDUAL_CONVNET_OPTIONS,
+    RMSNORM_GQA_ROPE_TRANSFORMER_OPTIONS,
+)
 
 
 class ArchitectureRecipe(ABC):
@@ -25,6 +33,7 @@ class ArchitectureRecipe(ABC):
     """
 
     name: str
+    config_options: ClassVar[frozenset[str]] = frozenset()
 
     @abstractmethod
     def build_graph(self, params: Mapping[str, Any]):
@@ -32,20 +41,31 @@ class ArchitectureRecipe(ABC):
 
 
 _RECIPES: dict[str, type[ArchitectureRecipe]] = {}
-_BUILTIN_RECIPES: dict[str, tuple[str, str]] = {
-    "convnet": ("align.architectures.convnet", "ConvNetRecipe"),
-    "mlp": ("align.architectures.mlp", "MLPRecipe"),
+_BUILTIN_RECIPES: dict[str, tuple[str, str, frozenset[str]]] = {
+    "convnet": (
+        "align.architectures.convnet",
+        "ConvNetRecipe",
+        CONVNET_OPTIONS,
+    ),
+    "mlp": (
+        "align.architectures.mlp",
+        "MLPRecipe",
+        MLP_OPTIONS,
+    ),
     "rmsnorm_gqa_rope_transformer": (
         "align.architectures.rmsnorm_gqa_rope_transformer",
         "RMSNormGQARoPETransformerRecipe",
+        RMSNORM_GQA_ROPE_TRANSFORMER_OPTIONS,
     ),
     "residual_convnet": (
         "align.architectures.residual_convnet",
         "ResidualConvNetRecipe",
+        RESIDUAL_CONVNET_OPTIONS,
     ),
     "layernorm_mha_transformer": (
         "align.architectures.layernorm_mha_transformer",
         "LayerNormMHATransformerRecipe",
+        LAYERNORM_MHA_TRANSFORMER_OPTIONS,
     ),
 }
 
@@ -55,6 +75,12 @@ def register_recipe(cls: type[ArchitectureRecipe]) -> type[ArchitectureRecipe]:
 
     if not getattr(cls, "name", None):
         raise ValueError("Recipe classes must define a 'name' attribute.")
+    builtin = _BUILTIN_RECIPES.get(cls.name)
+    if builtin is not None and frozenset(cls.config_options) != builtin[2]:
+        raise ValueError(
+            f"Built-in recipe {cls.name!r} declares config options "
+            f"{sorted(cls.config_options)}, expected {sorted(builtin[2])}."
+        )
     _RECIPES[cls.name] = cls
     return cls
 
@@ -65,7 +91,7 @@ def _load_builtin_recipe(name: str) -> type[ArchitectureRecipe] | None:
     if module_spec is None:
         return None
 
-    module_name, class_name = module_spec
+    module_name, class_name, _ = module_spec
     module = importlib.import_module(module_name)
     recipe_cls = getattr(module, class_name)
     if not isinstance(recipe_cls, type) or not issubclass(
@@ -93,9 +119,24 @@ def available_recipes() -> list[str]:
     return sorted(set(_BUILTIN_RECIPES) | set(_RECIPES))
 
 
+def recipe_options(name: str) -> frozenset[str]:
+    """Return a registered schema without importing built-in recipe modules."""
+
+    builtin = _BUILTIN_RECIPES.get(name)
+    if builtin is not None:
+        return builtin[2]
+    recipe_cls = _RECIPES.get(name)
+    if recipe_cls is None:
+        raise ValueError(
+            f"Unknown architecture recipe '{name}'. Available: {available_recipes()}"
+        )
+    return frozenset(recipe_cls.config_options)
+
+
 __all__ = [
     "ArchitectureRecipe",
     "available_recipes",
     "get_recipe",
     "register_recipe",
+    "recipe_options",
 ]

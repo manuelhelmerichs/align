@@ -65,6 +65,9 @@ runtime:
   force_gpu: false
   parallelism: null
   device_ids: null
+  allow_device_sharing: false
+  max_worker_retries: 2
+  worker_threads: 1
   per_device_batch: 1
   verbosity: info
   validate_artifacts_on_resume: true

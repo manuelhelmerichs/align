@@ -38,9 +38,8 @@ def test_relative_fisher_value_matches_explicit_mahalanobis_distance():
     graph, ref, target = two_layer_graph(seed=3, hidden=4)
     metrics = _metrics(graph)
     objective = RelativeFisherObjective(tensor_metrics=metrics)
-    state = TransformState(
-        group_order=graph.group_order,
-        matrices={"mlp/h0": permutation_matrix([2, 0, 3, 1])},
+    state = TransformState.from_transforms(
+        graph, {"mlp/h0": permutation_matrix([2, 0, 3, 1])}
     )
     reference_data = graph.materialize(ref, backend="jax")
     target_data = graph.materialize(target, backend="jax")
@@ -65,9 +64,8 @@ def test_relative_fisher_batched_value_matches_single_values():
     graph, ref, target_a = two_layer_graph(seed=4, hidden=3)
     _, _, target_b = two_layer_graph(seed=5, hidden=3)
     objective = RelativeFisherObjective(tensor_metrics=_metrics(graph))
-    state = TransformState(
-        group_order=graph.group_order,
-        matrices={"mlp/h0": jnp.asarray(permutation_matrix([1, 2, 0]))},
+    state = TransformState.from_transforms(
+        graph, {"mlp/h0": jnp.asarray(permutation_matrix([1, 2, 0]))}
     )
     reference_data = graph.materialize(ref, backend="jax")
     targets = [
@@ -135,6 +133,19 @@ def test_activation_gram_estimation_matches_second_moment_and_normalization():
     np.testing.assert_allclose(
         first["gram"], np.asarray(inputs).T @ np.asarray(inputs) / len(inputs)
     )
+
+
+def test_activation_gram_estimation_rejects_oversized_dense_gram():
+    graph, ref, _ = two_layer_graph(seed=6, hidden=3)
+    inputs = jnp.ones((2, 3), dtype=jnp.float32)
+    with pytest.raises(MemoryError, match="Activation Gram"):
+        estimate_activation_gram_metrics(
+            graph,
+            ref,
+            mlp_activation_samples,
+            inputs,
+            max_gram_bytes=1,
+        )
 
 
 def test_activation_gram_npz_roundtrip(tmp_path):

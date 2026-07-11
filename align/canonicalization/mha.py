@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import jax.numpy as jnp
+import numpy as np
 
 from ..symmetry import MHACircuitConstraint, SymmetryGraph
 from ..symmetry.tensor_ops import _descend
@@ -47,7 +47,7 @@ def _bias_energy(
     graph: SymmetryGraph,
     params: Mapping[str, Any],
     kernel_tensor_id: str,
-) -> jnp.ndarray | None:
+) -> np.ndarray | None:
     """Squared per-``(head, dim)`` bias energy for a q/k/v kernel, if present."""
 
     kernel_path = graph.tensors[kernel_tensor_id].path
@@ -55,7 +55,7 @@ def _bias_energy(
     bias_id = "/".join(bias_path)
     if bias_id not in graph.tensors:
         return None
-    return jnp.square(jnp.asarray(_descend(params, bias_path)))
+    return np.square(np.asarray(_descend(params, bias_path)))
 
 
 def _projection_energy(
@@ -64,11 +64,11 @@ def _projection_energy(
     tensor_id: str,
     *,
     include_bias_in_norm: bool,
-) -> jnp.ndarray:
+) -> np.ndarray:
     """Squared per-``(head, dim)`` energy of one q/k/v kernel (+ bias)."""
 
-    kernel = jnp.asarray(_descend(params, graph.tensors[tensor_id].path))
-    energy = jnp.sum(jnp.square(kernel), axis=0)
+    kernel = np.asarray(_descend(params, graph.tensors[tensor_id].path))
+    energy = np.sum(np.square(kernel), axis=0)
     if include_bias_in_norm:
         bias_energy = _bias_energy(graph, params, tensor_id)
         if bias_energy is not None:
@@ -82,7 +82,7 @@ def attention_balancing_scales(
     *,
     epsilon: float = 1e-8,
     include_bias_in_norm: bool = True,
-) -> dict[str, jnp.ndarray]:
+) -> dict[str, np.ndarray]:
     """Compute per-group balancing scales for every attention component.
 
     For each head slot ``h`` and intra-head dimension ``i`` the qk factor is
@@ -93,7 +93,7 @@ def attention_balancing_scales(
     so scale-equivalent samples collapse to one representative.
     """
 
-    scales: dict[str, jnp.ndarray] = {}
+    scales: dict[str, np.ndarray] = {}
     for constraint in mha_circuit_constraints(graph):
         tensor_ids = {
             role: getattr(constraint, role) for role in ("query", "key", "value", "out")
@@ -116,10 +116,8 @@ def attention_balancing_scales(
             tensor_ids["value"],
             include_bias_in_norm=include_bias_in_norm,
         )
-        out_kernel = jnp.asarray(
-            _descend(params, graph.tensors[tensor_ids["out"]].path)
-        )
-        out_energy = jnp.sum(jnp.square(out_kernel), axis=-1)
+        out_kernel = np.asarray(_descend(params, graph.tensors[tensor_ids["out"]].path))
+        out_energy = np.sum(np.square(out_kernel), axis=-1)
 
         qk_factors = ((query_energy + epsilon) / (key_energy + epsilon)) ** 0.25
         vo_factors = ((value_energy + epsilon) / (out_energy + epsilon)) ** 0.25

@@ -31,12 +31,28 @@ def estimate_diag_fisher_tree(
     params: Mapping[str, Any],
     apply_fn: Callable[[Mapping[str, Any], jax.Array], jax.Array],
     inputs: jax.Array,
+    *,
+    memory_limit_bytes: int = 2 * 1024**3,
 ):
     """Return the raw diagonal Gauss-Newton Fisher as a params-shaped tree.
 
     Computed with an exact dense Jacobian over all outputs, which is intended
     for the small research-scale networks this project targets.
     """
+
+    output_shape = jax.eval_shape(lambda tree: apply_fn(tree, inputs), params)
+    output_size = int(np.prod(output_shape.shape, dtype=np.int64))
+    leaves = jax.tree_util.tree_leaves(params)
+    parameter_size = sum(int(np.prod(leaf.shape, dtype=np.int64)) for leaf in leaves)
+    itemsize = max(np.dtype(leaf.dtype).itemsize for leaf in leaves)
+    estimated_bytes = output_size * parameter_size * itemsize
+    if estimated_bytes > int(memory_limit_bytes):
+        raise MemoryError(
+            "Exact diagonal-Fisher Jacobian would require approximately "
+            f"{estimated_bytes / 1024**3:.2f} GiB, exceeding the configured "
+            f"limit of {memory_limit_bytes / 1024**3:.2f} GiB. Use a smaller "
+            "calibration batch/network or a chunked estimator."
+        )
 
     def _flat_outputs(tree):
         return jnp.ravel(apply_fn(tree, inputs))
@@ -55,6 +71,7 @@ def estimate_diag_fisher_weights(
     *,
     damping: float = 1.0,
     normalize: bool = True,
+    memory_limit_bytes: int = 2 * 1024**3,
 ) -> dict[str, np.ndarray]:
     """Per-tensor diagonal Fisher weights for ``graph`` tensors.
 
@@ -73,13 +90,16 @@ def estimate_diag_fisher_weights(
 
     if damping < 0.0:
         raise ValueError(f"damping must be non-negative, got {damping}.")
-    fisher_tree = estimate_diag_fisher_tree(params, apply_fn, inputs)
+    fisher_tree = estimate_diag_fisher_tree(
+        params, apply_fn, inputs, memory_limit_bytes=memory_limit_bytes
+    )
     weights = {
         tensor_id: np.asarray(_descend(fisher_tree, spec.path), dtype=np.float64)
         for tensor_id, spec in graph.tensors.items()
     }
-    flat = np.concatenate([np.ravel(value) for value in weights.values()])
-    mean_fisher = float(np.mean(flat))
+    total = sum(float(np.sum(value)) for value in weights.values())
+    count = sum(int(value.size) for value in weights.values())
+    mean_fisher = total / count
     if mean_fisher <= 0.0:
         raise ValueError(
             "Diagonal Fisher is identically zero; the calibration inputs do "
@@ -88,7 +108,7 @@ def estimate_diag_fisher_weights(
     floor = damping * mean_fisher
     weights = {tensor_id: value + floor for tensor_id, value in weights.items()}
     if normalize:
-        scale = float(np.mean(flat)) + floor
+        scale = mean_fisher + floor
         weights = {tensor_id: value / scale for tensor_id, value in weights.items()}
     return weights
 

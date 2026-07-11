@@ -3,12 +3,13 @@
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from ..symmetry import SymmetryGraph
 from .graph_builder import SymmetryGraphBuilder
 from .recipe import ArchitectureRecipe, register_recipe
 from .rules import DenseChainRule
+from .schemas import MLP_OPTIONS
 
 
 @register_recipe
@@ -23,6 +24,7 @@ class MLPRecipe(ArchitectureRecipe):
 
     name: str = "mlp"
     parameter_root: str = "params.fcn"
+    config_options: ClassVar[frozenset[str]] = MLP_OPTIONS
 
     def _tokens_from_path(self, path: str) -> tuple[str, ...]:
         return tuple(part for part in path.split(".") if part)

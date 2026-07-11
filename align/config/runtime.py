@@ -24,6 +24,9 @@ _RUNTIME_FIELDS = frozenset(
         "verbosity",
         "validate_artifacts_on_resume",
         "save_intermediate",
+        "allow_device_sharing",
+        "max_worker_retries",
+        "worker_threads",
     }
 )
 
@@ -55,6 +58,38 @@ class RuntimeConfig:
     verbosity: str = "info"
     validate_artifacts_on_resume: bool = True
     save_intermediate: bool = False
+    allow_device_sharing: bool = False
+    max_worker_retries: int = 2
+    worker_threads: int = 1
+
+    def __post_init__(self) -> None:
+        if self.force_cpu and self.force_gpu:
+            raise ValueError(
+                "runtime.force_cpu and runtime.force_gpu are mutually exclusive."
+            )
+        for name, value in (
+            ("parallelism", self.parallelism),
+            ("per_device_batch", self.per_device_batch),
+            ("worker_threads", self.worker_threads),
+        ):
+            if value is not None and (isinstance(value, bool) or int(value) <= 0):
+                raise ValueError(f"runtime.{name} must be a positive integer.")
+        if (
+            isinstance(self.max_worker_retries, bool)
+            or int(self.max_worker_retries) < 0
+        ):
+            raise ValueError(
+                "runtime.max_worker_retries must be a non-negative integer."
+            )
+        if self.device_ids is not None:
+            if any(
+                isinstance(value, bool) or int(value) < 0 for value in self.device_ids
+            ):
+                raise ValueError(
+                    "runtime.device_ids must contain non-negative integers."
+                )
+            if len(set(self.device_ids)) != len(self.device_ids):
+                raise ValueError("runtime.device_ids must not contain duplicates.")
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> RuntimeConfig:
@@ -92,6 +127,12 @@ class RuntimeConfig:
                 "runtime.save_intermediate",
                 payload.get("save_intermediate", False),
             ),
+            allow_device_sharing=_require_bool(
+                "runtime.allow_device_sharing",
+                payload.get("allow_device_sharing", False),
+            ),
+            max_worker_retries=int(payload.get("max_worker_retries", 2)),
+            worker_threads=int(payload.get("worker_threads", 1)),
         )
 
 

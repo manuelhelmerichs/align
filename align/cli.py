@@ -301,6 +301,10 @@ def _configure_platform_preferences(config: RunConfig) -> None:
     applied_preference = configure_jax_platforms(
         preference=preference, allow_preallocation=False
     )
+    if force_gpu and applied_preference == "cpu":
+        raise RuntimeError(
+            "--force-gpu was requested, but no GPU backend is available."
+        )
     import jax
 
     log = logging.getLogger("align")
@@ -313,6 +317,10 @@ def _configure_platform_preferences(config: RunConfig) -> None:
         if not gpus:
             raise RuntimeError("No GPU devices visible")
     except Exception as exc:
+        if force_gpu:
+            raise RuntimeError(
+                "--force-gpu was requested, but no usable GPU device is visible."
+            ) from exc
         log.warning("GPU backend unavailable (%s). Falling back to CPU.", exc)
         os.environ["JAX_PLATFORMS"] = "cpu"
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -417,12 +425,10 @@ def _digest_payload(config_payload: Mapping[str, Any]) -> dict[str, Any]:
         "selection": selection,
         "pipeline": config_payload.get("pipeline"),
     }
-    canonicalize = config_payload.get("canonicalize")
-    if canonicalize is not None:
-        payload["canonicalize"] = canonicalize
-    match = config_payload.get("match")
-    if match is not None:
-        payload["match"] = match
+    for stage in config_payload.get("pipeline") or ():
+        stage_config = config_payload.get(stage)
+        if stage_config is not None:
+            payload[str(stage)] = stage_config
     return payload
 
 

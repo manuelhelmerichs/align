@@ -83,8 +83,8 @@ def test_lap_matching_recovers_dense_permutation():
     )
 
     assert aux is not None
-    np.testing.assert_allclose(perms["mlp/h0"], swap.T, atol=1e-6)
-    np.testing.assert_allclose(perms["mlp/h1"], swap.T, atol=1e-6)
+    np.testing.assert_array_equal(perms["mlp/h0"], np.array([1, 0]))
+    np.testing.assert_array_equal(perms["mlp/h1"], np.array([1, 0]))
     for ref_leaf, aligned_leaf in zip(
         _flatten_tree(reference_params), _flatten_tree(aligned), strict=True
     ):
@@ -169,6 +169,47 @@ def test_matching_sinkhorn_batch_matches_single_call():
     assert isinstance(second_aux["steps"][0]["loss_final"], float)
 
 
+def test_sinkhorn_batch_rng_is_invariant_to_batch_order():
+    reference = _make_params_tree()
+    graph = MLPRecipe(parameter_root="params.fcn").build_graph(reference)
+    swap = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
+    target = graph.apply_transforms(
+        reference,
+        TransformState.from_transforms(graph, {"mlp/h0": swap, "mlp/h1": swap}),
+    )
+    sequence = build_solver_sequence(
+        schedule=[
+            SolverStep(
+                solver="sinkhorn",
+                max_steps=2,
+                tolerance=0.0,
+                init_scale=0.2,
+            )
+        ]
+    )
+    key_a = jax.random.PRNGKey(11)
+    key_b = jax.random.PRNGKey(29)
+    forward = match_batch(
+        graph,
+        reference,
+        [target, reference],
+        solver_sequence=sequence,
+        rng_keys=jnp.stack([key_a, key_b]),
+    )
+    reverse = match_batch(
+        graph,
+        reference,
+        [reference, target],
+        solver_sequence=sequence,
+        rng_keys=jnp.stack([key_b, key_a]),
+    )
+    for left, right in ((forward[0], reverse[1]), (forward[1], reverse[0])):
+        np.testing.assert_array_equal(left[1]["mlp/h0"], right[1]["mlp/h0"])
+        assert left[2]["steps"][0]["loss_initial"] == pytest.approx(
+            right[2]["steps"][0]["loss_initial"]
+        )
+
+
 def _resnet_params():
     return {
         "core": {
@@ -208,11 +249,11 @@ def test_sinkhorn_resnet_identity_perm():
         graph.materialize(params, backend="jax"),
         rng_key=jax.random.PRNGKey(0),
     )
-    assert set(state.matrices) == set(graph.groups)
+    assert set(state.transforms) == set(graph.groups)
     assert aux["steps"][0]["steps"] >= 1
-    for gid, perm in state.matrices.items():
+    for gid in state.transforms:
         np.testing.assert_allclose(
-            np.asarray(perm), np.eye(graph.groups[gid].size), atol=1e-3
+            np.asarray(state.matrix(gid)), np.eye(graph.groups[gid].size), atol=1e-3
         )
 
 
@@ -230,7 +271,7 @@ def test_reference_matching_returns_identity_artifacts():
     assert aligned is params
     assert aux == {"reference": True}
     for gid, group in graph.groups.items():
-        np.testing.assert_allclose(perms[gid], np.eye(group.size, dtype=np.uint8))
+        np.testing.assert_array_equal(perms[gid], np.arange(group.size, dtype=np.int32))
 
 
 def test_index_vector_state_applies_and_serializes_like_matrix():
@@ -240,13 +281,13 @@ def test_index_vector_state_applies_and_serializes_like_matrix():
     swap_indices = np.array([1, 0], dtype=np.int64)
     swap_matrix = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
 
-    index_state = TransformState(
-        group_order=graph.group_order,
-        matrices={"mlp/h0": swap_indices, "mlp/h1": np.arange(2, dtype=np.int64)},
+    index_state = TransformState.from_transforms(
+        graph,
+        {"mlp/h0": swap_indices, "mlp/h1": np.arange(2, dtype=np.int64)},
     )
-    matrix_state = TransformState(
-        group_order=graph.group_order,
-        matrices={"mlp/h0": swap_matrix, "mlp/h1": np.eye(2, dtype=np.float32)},
+    matrix_state = TransformState.from_transforms(
+        graph,
+        {"mlp/h0": swap_matrix, "mlp/h1": np.eye(2, dtype=np.float32)},
     )
 
     index_state.validate(graph, hard=True)
@@ -258,27 +299,26 @@ def test_index_vector_state_applies_and_serializes_like_matrix():
         np.testing.assert_allclose(lhs, rhs)
 
     artifacts = index_state.to_artifacts()
-    np.testing.assert_allclose(artifacts["mlp/h0"], swap_matrix.astype(np.uint8))
-    np.testing.assert_allclose(artifacts["mlp/h1"], np.eye(2, dtype=np.uint8))
+    np.testing.assert_array_equal(artifacts["mlp/h0"], swap_indices.astype(np.int32))
+    np.testing.assert_array_equal(artifacts["mlp/h1"], np.arange(2, dtype=np.int32))
 
 
-def test_harden_projects_logits_when_no_soft_matrices_are_stored():
+def test_harden_projects_relaxed_matrices():
     params = _make_params_tree()
     graph = MLPRecipe(parameter_root="params.fcn").build_graph(params)
-    state = TransformState.identity(graph).with_logits(
-        {
-            "mlp/h0": jnp.array([[0.0, 8.0], [8.0, 0.0]], dtype=jnp.float32),
-            "mlp/h1": jnp.array([[8.0, 0.0], [0.0, 8.0]], dtype=jnp.float32),
-        }
-    )
+    matrices = {
+        "mlp/h0": jnp.array([[0.0, 8.0], [8.0, 0.0]], dtype=jnp.float32),
+        "mlp/h1": jnp.array([[8.0, 0.0], [0.0, 8.0]], dtype=jnp.float32),
+    }
+    state = TransformState.identity(graph).with_relaxation(matrices, matrices)
 
-    hardened = state.harden()
+    hardened = state.harden(groups=graph.group_order)
 
     np.testing.assert_allclose(
-        hardened.matrices["mlp/h0"],
+        hardened.matrix("mlp/h0"),
         np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
     )
-    np.testing.assert_allclose(hardened.matrices["mlp/h1"], np.eye(2), atol=1e-6)
+    np.testing.assert_allclose(hardened.matrix("mlp/h1"), np.eye(2), atol=1e-6)
 
 
 def test_graph_validation_rejects_duplicate_tensor_axis_bindings():
@@ -361,9 +401,7 @@ def test_graph_apply_scales_uses_axis_roles():
         "mlp/h0": np.array([2.0, 4.0], dtype=np.float32),
         "mlp/h1": np.array([3.0, 5.0], dtype=np.float32),
     }
-    scaled = graph.apply_scales(
-        params, ScaleState.from_scales(graph, scales, backend="numpy")
-    )
+    scaled = graph.apply_scales(params, ScaleState.from_scales(graph, scales))
 
     np.testing.assert_allclose(
         np.asarray(scaled["params"]["fcn"]["layer0"]["kernel"]),
@@ -437,16 +475,15 @@ def test_harden_recovers_nearest_permutation_from_doubly_stochastic_matrix():
         tau=0.1,
         n_iters=100,
     )
-    state = TransformState(
-        group_order=graph.group_order,
-        matrices={"mlp/h0": jnp.eye(2, dtype=jnp.float32), "mlp/h1": soft},
+    state = TransformState.identity(graph).with_relaxation(
+        {"mlp/h1": soft}, {"mlp/h1": soft}
     )
 
-    hardened = state.harden()
+    hardened = state.harden(groups=("mlp/h1",))
 
-    assert np.allclose(np.sum(np.asarray(hardened.matrices["mlp/h1"]), axis=1), 1.0)
+    assert np.allclose(np.sum(np.asarray(hardened.matrix("mlp/h1")), axis=1), 1.0)
     np.testing.assert_allclose(
-        np.asarray(hardened.matrices["mlp/h1"]),
+        np.asarray(hardened.matrix("mlp/h1")),
         np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float64),
     )
     hardened.validate(graph, hard=True)
@@ -456,23 +493,19 @@ def test_state_validate_rejects_non_permutation_hard_matrix():
     params = _make_params_tree()
     graph = MLPRecipe(parameter_root="params.fcn").build_graph(params)
     not_a_permutation = np.array([[0.5, 0.5], [0.5, 0.5]], dtype=np.float32)
-    state = TransformState(
-        group_order=graph.group_order,
-        matrices={"mlp/h0": not_a_permutation, "mlp/h1": np.eye(2, dtype=np.float32)},
-    )
-
-    # Shape-only validation passes; the hard-permutation check rejects it.
-    state.validate(graph, hard=False)
     with pytest.raises(ValueError, match="not a hard permutation"):
-        state.validate(graph, hard=True)
+        TransformState.from_transforms(
+            graph,
+            {"mlp/h0": not_a_permutation, "mlp/h1": np.eye(2, dtype=np.float32)},
+        )
 
 
-def test_to_artifacts_emits_binary_uint8_permutations():
+def test_to_artifacts_emits_int32_permutation_indices():
     params = _make_params_tree()
     graph = MLPRecipe(parameter_root="params.fcn").build_graph(params)
-    state = TransformState(
-        group_order=graph.group_order,
-        matrices={
+    state = TransformState.from_transforms(
+        graph,
+        {
             "mlp/h0": np.array([1, 0], dtype=np.int64),
             "mlp/h1": np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32),
         },
@@ -482,11 +515,8 @@ def test_to_artifacts_emits_binary_uint8_permutations():
 
     for group_id in graph.group_order:
         artifact = artifacts[group_id]
-        assert artifact.dtype == np.uint8
-        assert set(np.unique(artifact)).issubset({0, 1})
-        # Each row and column is one-hot.
-        np.testing.assert_array_equal(artifact.sum(axis=0), np.ones(2, dtype=np.uint8))
-        np.testing.assert_array_equal(artifact.sum(axis=1), np.ones(2, dtype=np.uint8))
+        assert artifact.dtype == np.int32
+        np.testing.assert_array_equal(artifact, np.array([1, 0], dtype=np.int32))
 
 
 def test_transform_artifacts_round_trip_all_families(tmp_path):
@@ -511,13 +541,20 @@ def test_transform_artifacts_round_trip_all_families(tmp_path):
         "rotation_pairs": rotation,
         "orthogonal": orthogonal,
     }
-    state = TransformState(group_order=tuple(families), matrices=dict(families))
+    graph = SymmetryGraph(
+        groups={
+            key: SymmetryGroup(id=key, size=value.shape[0], transform_family=key)
+            for key, value in families.items()
+        },
+        tensors={},
+        metadata={"group_order": tuple(families)},
+    )
+    state = TransformState.from_transforms(graph, families)
     artifacts = state.to_artifacts()
 
-    # Plain permutations compress to uint8; every other family stays float32
-    # so its non-binary entries are preserved.
-    assert artifacts["permutation"].dtype == np.uint8
-    for key in ("signed_permutation", "rotation_pairs", "orthogonal"):
+    assert artifacts["permutation"].dtype == np.int32
+    assert artifacts["signed_permutation"].dtype == np.int32
+    for key in ("rotation_pairs", "orthogonal"):
         assert artifacts[key].dtype == np.float32
 
     path = write_transforms_artifact(
@@ -527,8 +564,27 @@ def test_transform_artifacts_round_trip_all_families(tmp_path):
     )
     loaded, metadata = read_transforms_artifact(path)
     assert metadata["transform_families"] == {key: key for key in families}
-    for key, matrix in families.items():
-        np.testing.assert_allclose(loaded[key], matrix, atol=1e-6)
+    assert metadata["representations"] == {
+        "permutation": "indices",
+        "signed_permutation": "signed_indices",
+        "rotation_pairs": "matrix",
+        "orthogonal": "matrix",
+    }
+    np.testing.assert_array_equal(loaded["permutation"], np.array([1, 0]))
+    np.testing.assert_array_equal(
+        loaded["signed_permutation"], np.array([[1, 0], [-1, 1]])
+    )
+    for key in ("rotation_pairs", "orthogonal"):
+        np.testing.assert_allclose(loaded[key], families[key], atol=1e-6)
+
+    identity_artifacts = TransformState.identity(graph, backend="numpy").to_artifacts()
+    identity_path = write_transforms_artifact(
+        tmp_path / "identity_transforms.npz",
+        identity_artifacts,
+        transform_families={key: key for key in families},
+    )
+    _, identity_metadata = read_transforms_artifact(identity_path)
+    assert identity_metadata["representations"]["orthogonal"] == "signed_indices"
 
 
 def test_transform_artifact_requires_metadata(tmp_path):

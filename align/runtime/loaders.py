@@ -1,21 +1,13 @@
 """Sample loading utilities."""
 
+from __future__ import annotations
+
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from ..sample_manifest import SampleManifest, SampleRecord
 from ..samples import WeightSample, create_sample_codec
-
-_PREFETCH_EXECUTOR: ThreadPoolExecutor | None = None
-_PREFETCH_WORKERS = 2
-
-
-def _get_prefetch_executor() -> ThreadPoolExecutor:
-    global _PREFETCH_EXECUTOR
-    if _PREFETCH_EXECUTOR is None:
-        _PREFETCH_EXECUTOR = ThreadPoolExecutor(max_workers=_PREFETCH_WORKERS)
-    return _PREFETCH_EXECUTOR
 
 
 class SampleLoader:
@@ -56,7 +48,8 @@ class PrefetchingLoader:
         self.base_loader = base_loader
         self.prefetch_count = max(1, prefetch_count)
         self._prefetch_futures: dict[int, Future[WeightSample]] = {}
-        self._executor = _get_prefetch_executor()
+        self._executor = ThreadPoolExecutor(max_workers=min(2, self.prefetch_count))
+        self._closed = False
 
     def prefetch(self, records: Sequence[SampleRecord]) -> None:
         """Start background loading for the given records.
@@ -79,13 +72,21 @@ class PrefetchingLoader:
         return self.base_loader.load(record)
 
     def clear(self) -> None:
-        """Clear all prefetch futures (waits for completion)."""
+        """Cancel unused work and release the owned executor."""
+
+        if self._closed:
+            return
         for future in self._prefetch_futures.values():
-            try:
-                future.result(timeout=1.0)
-            except Exception:
-                pass
+            future.cancel()
         self._prefetch_futures.clear()
+        self._executor.shutdown(wait=True, cancel_futures=True)
+        self._closed = True
+
+    def __enter__(self) -> PrefetchingLoader:
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.clear()
 
 
 __all__ = ["SampleLoader", "PrefetchingLoader"]

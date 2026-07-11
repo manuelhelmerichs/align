@@ -186,11 +186,15 @@ class StagePipeline:
                 on_record_start=on_record_start,
             )
             return
-
-        for record in records:
-            if on_record_start is not None:
-                on_record_start(record)
-            self.run(record, loader.load(record), sink)
+        with PrefetchingLoader(loader, prefetch_count=1) as prefetch_loader:
+            if records:
+                prefetch_loader.prefetch(records[:1])
+            for index, record in enumerate(records):
+                if index + 1 < len(records):
+                    prefetch_loader.prefetch(records[index + 1 : index + 2])
+                if on_record_start is not None:
+                    on_record_start(record)
+                self.run(record, prefetch_loader.get(record), sink)
 
     def _run_records_batched(
         self,
@@ -201,8 +205,9 @@ class StagePipeline:
         batch_size: int,
         on_record_start: Callable[[SampleRecord], None] | None,
     ) -> None:
-        prefetch_loader = PrefetchingLoader(loader, prefetch_count=batch_size)
-        try:
+        with PrefetchingLoader(loader, prefetch_count=batch_size) as prefetch_loader:
+            if records:
+                prefetch_loader.prefetch(records[:batch_size])
             for batch_start in range(0, len(records), batch_size):
                 batch_records = list(records[batch_start : batch_start + batch_size])
                 next_start = batch_start + batch_size
@@ -219,8 +224,6 @@ class StagePipeline:
 
                 for output in self.process_batch(batch_records, sample_batch):
                     sink.write(output)
-        finally:
-            prefetch_loader.clear()
 
 
 __all__ = ["SampleAlignmentResult", "PipelineSink", "StagePipeline"]

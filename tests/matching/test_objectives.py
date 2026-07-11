@@ -39,14 +39,8 @@ def test_euclidean_objective_prefers_correct_permutation():
     target_data = graph.materialize(target_params, backend="jax")
 
     objective = EuclideanObjective()
-    identity_state = TransformState(
-        group_order=graph.group_order,
-        matrices={"mlp/h0": jnp.eye(2, dtype=jnp.float32)},
-    )
-    swap_state = TransformState(
-        group_order=graph.group_order,
-        matrices={"mlp/h0": swap},
-    )
+    identity_state = TransformState.identity(graph)
+    swap_state = TransformState.from_transforms(graph, {"mlp/h0": swap})
     cost_identity = float(
         objective.value(graph, reference_data, target_data, identity_state)
     )
@@ -83,7 +77,7 @@ def test_euclidean_objective_matches_explicit_applied_distance():
         }
     }
     swap = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
-    state = TransformState(group_order=graph.group_order, matrices={"mlp/h0": swap})
+    state = TransformState.from_transforms(graph, {"mlp/h0": swap})
     objective_value = float(
         EuclideanObjective().value(
             graph,
@@ -130,8 +124,8 @@ def test_linearize_group_is_exact_affine_reduction_of_objective():
 
     affine_constants = []
     for perm in itertools.permutations(range(hidden)):
-        state = TransformState(
-            group_order=graph.group_order, matrices={"mlp/h0": permutation_matrix(perm)}
+        state = TransformState.from_transforms(
+            graph, {"mlp/h0": permutation_matrix(perm)}
         )
         value = float(objective.value(graph, reference_data, target_data, state))
         score = float(sum(cost[i, perm[i]] for i in range(hidden)))
@@ -161,16 +155,15 @@ def test_lap_linearization_selects_global_optimum_over_all_permutations():
                 graph,
                 reference_data,
                 target_data,
-                TransformState(
-                    group_order=graph.group_order,
-                    matrices={"mlp/h0": permutation_matrix(perm)},
+                TransformState.from_transforms(
+                    graph, {"mlp/h0": permutation_matrix(perm)}
                 ),
             )
         )
         for perm in itertools.permutations(range(hidden))
     }
     brute_force_best = min(values, key=values.get)
-    lap_solution = tuple(int(j) for j in np.argmax(solve_lap_maximize(cost), axis=1))
+    lap_solution = tuple(int(j) for j in solve_lap_maximize(cost))
 
     assert lap_solution == brute_force_best
 

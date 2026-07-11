@@ -57,7 +57,7 @@ def test_diagonal_fisher_value_matches_explicit_weighted_distance():
     weights = _random_weights(graph, seed=5)
     objective = DiagonalFisherObjective(tensor_weights=weights)
     perm = permutation_matrix([2, 0, 1])
-    state = TransformState(group_order=graph.group_order, matrices={"mlp/h0": perm})
+    state = TransformState.from_transforms(graph, {"mlp/h0": perm})
 
     reference_data = graph.materialize(ref, backend="jax")
     target_data = graph.materialize(target, backend="jax")
@@ -80,9 +80,8 @@ def test_diagonal_fisher_value_matches_explicit_weighted_distance():
 def test_diagonal_fisher_value_reduces_to_l2_with_unit_weights():
     graph, ref, target = two_layer_graph(seed=2, hidden=4)
     unit = {tid: np.ones(spec.shape) for tid, spec in graph.tensors.items()}
-    state = TransformState(
-        group_order=graph.group_order,
-        matrices={"mlp/h0": permutation_matrix([1, 3, 0, 2])},
+    state = TransformState.from_transforms(
+        graph, {"mlp/h0": permutation_matrix([1, 3, 0, 2])}
     )
     reference_data = graph.materialize(ref, backend="jax")
     target_data = graph.materialize(target, backend="jax")
@@ -118,8 +117,8 @@ def test_diagonal_fisher_linearization_is_exact_affine_reduction():
 
     affine_constants = []
     for perm in itertools.permutations(range(hidden)):
-        state = TransformState(
-            group_order=graph.group_order, matrices={"mlp/h0": permutation_matrix(perm)}
+        state = TransformState.from_transforms(
+            graph, {"mlp/h0": permutation_matrix(perm)}
         )
         value = float(objective.value(graph, reference_data, target_data, state))
         score = float(sum(cost[i, perm[i]] for i in range(hidden)))
@@ -147,16 +146,15 @@ def test_diagonal_fisher_lap_selects_global_optimum():
                 graph,
                 reference_data,
                 target_data,
-                TransformState(
-                    group_order=graph.group_order,
-                    matrices={"mlp/h0": permutation_matrix(perm)},
+                TransformState.from_transforms(
+                    graph, {"mlp/h0": permutation_matrix(perm)}
                 ),
             )
         )
         for perm in itertools.permutations(range(hidden))
     }
     brute_force_best = min(values, key=values.get)
-    lap_solution = tuple(int(j) for j in np.argmax(solve_lap_maximize(cost), axis=1))
+    lap_solution = tuple(int(j) for j in solve_lap_maximize(cost))
 
     assert lap_solution == brute_force_best
 
@@ -188,10 +186,8 @@ def test_fisher_weighting_flips_the_optimal_permutation():
     fisher_cost = DiagonalFisherObjective(tensor_weights=weights).linearize_group(
         graph, reference_data, target_data, identity, "g0"
     )
-    l2_perm = tuple(int(j) for j in np.argmax(solve_lap_maximize(l2_cost), axis=1))
-    fisher_perm = tuple(
-        int(j) for j in np.argmax(solve_lap_maximize(fisher_cost), axis=1)
-    )
+    l2_perm = tuple(int(j) for j in solve_lap_maximize(l2_cost))
+    fisher_perm = tuple(int(j) for j in solve_lap_maximize(fisher_cost))
 
     assert l2_perm == (0, 1)
     assert fisher_perm == (1, 0)
@@ -203,7 +199,7 @@ def test_diagonal_fisher_batched_value_matches_per_sample_values():
     weights = _random_weights(graph, seed=3)
     objective = DiagonalFisherObjective(tensor_weights=weights)
     perm = jnp.asarray(permutation_matrix([1, 2, 0]))
-    state = TransformState(group_order=graph.group_order, matrices={"mlp/h0": perm})
+    state = TransformState.from_transforms(graph, {"mlp/h0": perm})
 
     reference_data = graph.materialize(ref, backend="jax")
     data_a = graph.materialize(target_a, backend="jax")
@@ -255,6 +251,18 @@ def test_estimate_diag_fisher_matches_linear_model_analytics():
         np.sum(np.square(np.asarray(inputs)), axis=0)[:, None], 2, axis=1
     )
     np.testing.assert_allclose(np.asarray(fisher["w"]), expected, rtol=1e-5)
+
+
+def test_estimate_diag_fisher_fails_before_oversized_dense_jacobian():
+    params = {"w": jnp.ones((4, 4), dtype=jnp.float32)}
+    inputs = jnp.ones((4, 4), dtype=jnp.float32)
+    with pytest.raises(MemoryError, match="Jacobian would require"):
+        estimate_diag_fisher_tree(
+            params,
+            lambda p, x: x @ p["w"],
+            inputs,
+            memory_limit_bytes=1,
+        )
 
 
 def test_estimate_diag_fisher_weights_are_damped_and_normalized():

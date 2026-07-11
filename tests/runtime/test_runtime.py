@@ -1,14 +1,17 @@
 """Tests for runtime loaders, logging, resume behavior, and runners."""
 
+import json
 import logging
 import pickle
 import time
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from align.config import (
     CanonicalizeConfig,
@@ -318,6 +321,93 @@ def _build_parallel_runtime_state(tmp_path):
     return config, manifest, run_state, artifact_store
 
 
+def test_resume_with_no_pending_samples_repairs_finalization(tmp_path) -> None:
+    config, manifest, run_state, artifact_store = _build_parallel_runtime_state(
+        tmp_path
+    )
+    for record in manifest.records:
+        run_state.record_progress(record=record)
+    run_state.save()
+
+    runner = AlignmentRunner(
+        config=config,
+        manifest=manifest,
+        run_state=run_state,
+        artifact_store=artifact_store,
+        progress_logger=logging.getLogger("test_resume_finalize"),
+    )
+    runner.execute()
+
+    assert run_state.completed
+    assert (config.paths.output_dir / "summary.json").exists()
+    diagnostics = json.loads(
+        (config.paths.output_dir / "sample_diagnostics.json").read_text()
+    )
+    assert diagnostics == [{}, {}]
+
+
+def test_transient_worker_failure_respects_retry_budget(tmp_path) -> None:
+    config, manifest, run_state, artifact_store = _build_parallel_runtime_state(
+        tmp_path
+    )
+    config.runtime.max_worker_retries = 0
+    runner = AlignmentRunner(
+        config=config,
+        manifest=manifest,
+        run_state=run_state,
+        artifact_store=artifact_store,
+    )
+    runner._worker_retry_counts = {}
+    state = SimpleNamespace(
+        stopping=False,
+        worker_id=0,
+        assigned=[manifest.records[0].index],
+    )
+    with pytest.raises(RuntimeError, match="retry budget exhausted"):
+        runner._handle_worker_failure(
+            SimpleNamespace(states={}),
+            state,
+            deque(),
+            {},
+            tmp_path,
+            1,
+            "synthetic process death",
+            transient=True,
+        )
+
+
+def test_matching_solver_diagnostics_survive_aggregation(tmp_path) -> None:
+    _, manifest, _, artifact_store = _build_parallel_runtime_state(tmp_path)
+    record = manifest.records[0]
+    artifact_store.write_diagnostics(
+        record,
+        {
+            "match": {
+                "objective": "euclidean",
+                "solvers": [{"solver": "sinkhorn"}],
+                "objective_final": 1.25,
+                "steps": [
+                    {
+                        "solver": "sinkhorn",
+                        "steps": 3,
+                        "converged": True,
+                        "ambiguity": {"mlp/h0": {"assignment_margin_min": 0.4}},
+                    }
+                ],
+            }
+        },
+    )
+    artifact_store.finalize(elapsed_seconds=0.0)
+
+    aggregated = json.loads(
+        (artifact_store.output_dir / "sample_diagnostics.json").read_text()
+    )
+    match = aggregated[record.index]["match"]
+    assert match["objective_final"] == 1.25
+    assert match["steps"][0]["converged"] is True
+    assert match["steps"][0]["ambiguity"]["mlp/h0"]["assignment_margin_min"] == 0.4
+
+
 def test_worker_rebuilds_matching_against_refined_reference(tmp_path) -> None:
     config, manifest, _, _ = _build_runtime_state(tmp_path)
     initial = SampleLoader(manifest).load_reference()
@@ -409,7 +499,7 @@ def test_runner_requeues_on_checksum_mismatch(tmp_path) -> None:
     assert not run_state.is_processed(record.index)
 
 
-def test_align_runner_parallel_respawns_failed_worker_and_finishes(
+def test_align_runner_parallel_does_not_retry_deterministic_worker_error(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -489,8 +579,14 @@ def test_align_runner_parallel_respawns_failed_worker_and_finishes(
     class _FakeWorkerPool:
         respawn_count = 0
 
-        def __init__(self, parallelism, device_ids, strategy_prefers_gpu):
-            del parallelism, device_ids, strategy_prefers_gpu
+        def __init__(
+            self,
+            parallelism,
+            device_ids,
+            strategy_prefers_gpu,
+            allow_device_sharing=False,
+        ):
+            del parallelism, device_ids, strategy_prefers_gpu, allow_device_sharing
             self.states = {}
             self.messages = []
             self.attempts = {}
@@ -579,10 +675,8 @@ def test_align_runner_parallel_respawns_failed_worker_and_finishes(
         progress_logger=logging.getLogger("test_parallel_respawn"),
     )
 
-    runner.execute()
+    with pytest.raises(RuntimeError, match="will not be retried"):
+        runner.execute()
 
-    assert _FakeWorkerPool.respawn_count == 1
-    assert run_state.completed
-    assert run_state.processed_count() == manifest.total
-    assert (config.paths.output_dir / "aligned_samples" / "0" / "sample_0.npz").exists()
-    assert (config.paths.output_dir / "aligned_samples" / "0" / "sample_1.npz").exists()
+    assert _FakeWorkerPool.respawn_count == 0
+    assert not run_state.completed

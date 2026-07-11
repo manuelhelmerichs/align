@@ -38,6 +38,7 @@ from .tensor_ops import (
     apply_perm_to_axis,
     axis_slice,
     binding_axis_interval,
+    binding_axis_intervals,
     binding_transform_matrix,
 )
 
@@ -58,6 +59,7 @@ __all__ = [
     "binding_transform_matrix",
     "axis_slice",
     "binding_axis_interval",
+    "binding_axis_intervals",
     "component_signature",
     "describe_symmetry",
     "extract_component_graph",

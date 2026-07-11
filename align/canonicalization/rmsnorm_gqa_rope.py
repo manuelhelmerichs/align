@@ -42,7 +42,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import jax.numpy as jnp
+import numpy as np
 
 from ..symmetry import (
     GQARoPECircuitConstraint,
@@ -86,10 +86,10 @@ def has_rmsnorm_gqa_rope_transformer_plan(graph: SymmetryGraph) -> bool:
 
 
 def _multiply_axis(tensor: Any, factors: Any, *, axis: int) -> Any:
-    factors = jnp.asarray(factors)
-    broadcast = [1] * jnp.ndim(tensor)
+    factors = np.asarray(factors)
+    broadcast = [1] * np.ndim(tensor)
     broadcast[axis] = int(factors.shape[0])
-    return jnp.asarray(tensor) * factors.reshape(broadcast)
+    return np.asarray(tensor) * factors.reshape(broadcast)
 
 
 def rms_gamma_scales(
@@ -97,7 +97,7 @@ def rms_gamma_scales(
     params: Mapping[str, Any],
     *,
     epsilon: float = 1e-8,
-) -> dict[str, jnp.ndarray]:
+) -> dict[str, np.ndarray]:
     """Canonical per-channel scales keyed by RMSNorm scale tensor id.
 
     One-shot *signed* producer energy,
@@ -107,14 +107,14 @@ def rms_gamma_scales(
     ``eps``) keep scale 1, as in the conv plan.
     """
 
-    scales: dict[str, jnp.ndarray] = {}
+    scales: dict[str, np.ndarray] = {}
     for constraint in rmsnorm_scale_constraints(graph):
         scale_id = constraint.scale
-        gamma = jnp.asarray(_descend(params, graph.tensors[scale_id].path))
-        energy = jnp.square(gamma)
-        signs = jnp.where(gamma < 0.0, -1.0, 1.0)
-        scales[scale_id] = jnp.where(
-            energy <= epsilon, 1.0, signs * jnp.sqrt(energy + epsilon)
+        gamma = np.asarray(_descend(params, graph.tensors[scale_id].path))
+        energy = np.square(gamma)
+        signs = np.where(gamma < 0.0, -1.0, 1.0)
+        scales[scale_id] = np.where(
+            energy <= epsilon, 1.0, signs * np.sqrt(energy + epsilon)
         )
     return scales
 
@@ -136,21 +136,21 @@ def apply_rms_gamma_scales(
         scale_id = constraint.scale
         if scale_id not in scales:
             continue
-        factors = jnp.asarray(scales[scale_id])
+        factors = np.asarray(scales[scale_id])
         gamma_path = graph.tensors[scale_id].path
-        gamma = jnp.asarray(_descend(params, gamma_path))
+        gamma = np.asarray(_descend(params, gamma_path))
         replacements.append((gamma_path, gamma / factors))
         for tensor_id, axis in constraint.consumers:
             path = graph.tensors[str(tensor_id)].path
-            tensor = jnp.asarray(_descend(params, path))
+            tensor = np.asarray(_descend(params, path))
             replacements.append((path, _multiply_axis(tensor, factors, axis=int(axis))))
     return replace_paths(params, replacements) if replacements else params
 
 
-def _pair_tiled(factors: jnp.ndarray) -> jnp.ndarray:
+def _pair_tiled(factors: np.ndarray) -> np.ndarray:
     """Tile per-pair factors ``(..., dk/2)`` to the half-split axis ``(..., dk)``."""
 
-    return jnp.concatenate([factors, factors], axis=-1)
+    return np.concatenate([factors, factors], axis=-1)
 
 
 def qk_pair_scales(
@@ -158,7 +158,7 @@ def qk_pair_scales(
     params: Mapping[str, Any],
     *,
     epsilon: float = 1e-8,
-) -> dict[str, jnp.ndarray]:
+) -> dict[str, np.ndarray]:
     """Balancing pair-tiled scales ``(head_dim,)`` keyed by qk group id.
 
     Per pair, ``s = ((E_q + eps) / (E_k + eps))^{1/4}`` with the query energy
@@ -169,19 +169,19 @@ def qk_pair_scales(
     the rotary rotations, so the action is exact under RoPE.
     """
 
-    scales: dict[str, jnp.ndarray] = {}
+    scales: dict[str, np.ndarray] = {}
     for constraint in gqa_rope_circuit_constraints(graph):
         tensors = {
             role: getattr(constraint, role) for role in ("query", "key", "value", "out")
         }
         half = constraint.head_dim // 2
-        query = jnp.asarray(_descend(params, graph.tensors[tensors["query"]].path))
-        key = jnp.asarray(_descend(params, graph.tensors[tensors["key"]].path))
-        query_sq = jnp.square(query)
-        key_sq = jnp.square(key)
+        query = np.asarray(_descend(params, graph.tensors[tensors["query"]].path))
+        key = np.asarray(_descend(params, graph.tensors[tensors["key"]].path))
+        query_sq = np.square(query)
+        key_sq = np.square(key)
         # (d, G, R, dk) -> (G, dk/2); (d, G, dk) -> (G, dk/2)
-        query_energy = jnp.sum(query_sq[..., :half] + query_sq[..., half:], axis=(0, 2))
-        key_energy = jnp.sum(key_sq[..., :half] + key_sq[..., half:], axis=0)
+        query_energy = np.sum(query_sq[..., :half] + query_sq[..., half:], axis=(0, 2))
+        key_energy = np.sum(key_sq[..., :half] + key_sq[..., half:], axis=0)
         factors = ((query_energy + epsilon) / (key_energy + epsilon)) ** 0.25
         for slot, group_id in enumerate(constraint.qk_groups):
             scales[group_id] = _pair_tiled(factors[slot])
@@ -193,7 +193,7 @@ def gqa_vo_balancing_scales(
     params: Mapping[str, Any],
     *,
     epsilon: float = 1e-8,
-) -> dict[str, jnp.ndarray]:
+) -> dict[str, np.ndarray]:
     """Per-vo-group balancing scales, as in flat attention circuit balancing.
 
     For kv group ``g`` and intra-head dimension ``i`` the factor is
@@ -204,15 +204,15 @@ def gqa_vo_balancing_scales(
     role, out-kernel ``in`` role).
     """
 
-    scales: dict[str, jnp.ndarray] = {}
+    scales: dict[str, np.ndarray] = {}
     for constraint in gqa_rope_circuit_constraints(graph):
         tensors = {
             role: getattr(constraint, role) for role in ("query", "key", "value", "out")
         }
-        value = jnp.asarray(_descend(params, graph.tensors[tensors["value"]].path))
-        out = jnp.asarray(_descend(params, graph.tensors[tensors["out"]].path))
-        value_energy = jnp.sum(jnp.square(value), axis=0)  # (G, dk)
-        out_energy = jnp.sum(jnp.square(out), axis=(1, 3))  # (G, dk)
+        value = np.asarray(_descend(params, graph.tensors[tensors["value"]].path))
+        out = np.asarray(_descend(params, graph.tensors[tensors["out"]].path))
+        value_energy = np.sum(np.square(value), axis=0)  # (G, dk)
+        out_energy = np.sum(np.square(out), axis=(1, 3))  # (G, dk)
         factors = ((value_energy + epsilon) / (out_energy + epsilon)) ** 0.25
         for slot, group_id in enumerate(constraint.vo_groups):
             scales[group_id] = factors[slot]

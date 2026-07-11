@@ -26,7 +26,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import jax.numpy as jnp
 import numpy as np
 
 from ..symmetry import SymmetryGraph, binding_axis_interval
@@ -88,13 +87,13 @@ def center_softmax_head(
         raise ValueError(
             f"center_softmax_head: no 'kernel' under module path {'.'.join(head_path)}."
         )
-    kernel = jnp.asarray(module["kernel"])
+    kernel = np.asarray(module["kernel"])
     if kernel.ndim != 2:
         raise ValueError(
             f"center_softmax_head expects a 2-D head kernel, got shape "
             f"{tuple(kernel.shape)} at {'.'.join(head_path)}."
         )
-    column_mean = jnp.mean(kernel, axis=1, keepdims=True)
+    column_mean = np.mean(kernel, axis=1, keepdims=True)
     replacements: list[tuple[tuple[str, ...], Any]] = [
         ((*head_path, "kernel"), kernel - column_mean)
     ]
@@ -104,8 +103,8 @@ def center_softmax_head(
         "kernel_translation_norm": float(np.linalg.norm(np.asarray(column_mean))),
     }
     if "bias" in module:
-        bias = jnp.asarray(module["bias"])
-        bias_mean = jnp.mean(bias)
+        bias = np.asarray(module["bias"])
+        bias_mean = np.mean(bias)
         replacements.append(((*head_path, "bias"), bias - bias_mean))
         diagnostics["bias_translation"] = float(bias_mean)
     return replace_paths(params, replacements), diagnostics

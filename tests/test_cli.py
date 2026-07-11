@@ -15,6 +15,34 @@ from align.cli import main as align_main
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_config_digest_includes_every_active_stage_config():
+    from align.cli import _digest_payload
+
+    payload = {
+        "architecture": {"family": "mlp"},
+        "selection": {},
+        "pipeline": ["center_softmax_head", "match"],
+        "center_softmax_head": {"head": "core.Dense_0"},
+        "match": {"objective": {"type": "euclidean"}},
+        "resolved_paths": {},
+    }
+    digest_payload = _digest_payload(payload)
+    assert digest_payload["center_softmax_head"] == {"head": "core.Dense_0"}
+    assert digest_payload["match"] == payload["match"]
+
+
+def test_force_gpu_fails_when_no_gpu_backend_is_available(monkeypatch):
+    from align.cli import _configure_platform_preferences
+    from align.config import RunConfig
+
+    config = RunConfig.from_mapping(
+        {"pipeline": ["match"], "runtime": {"force_gpu": True}}
+    )
+    monkeypatch.setattr("align.cli.configure_jax_platforms", lambda **kwargs: "cpu")
+    with pytest.raises(RuntimeError, match="force-gpu"):
+        _configure_platform_preferences(config)
+
+
 def test_package_root_declares_full_lazy_api_without_importing_jax():
     import subprocess
 
@@ -397,7 +425,11 @@ runtime:
 
     # On the final pass the configured reference sample is a normal target:
     # the refined barycenter, not that sample, is the actual reference.
-    assert json.loads((output_dir / "sample_diagnostics.json").read_text())[0] == {}
+    sample_diagnostics = json.loads(
+        (output_dir / "sample_diagnostics.json").read_text()
+    )
+    assert "objective_final" in sample_diagnostics[0]["match"]
+    assert sample_diagnostics[0]["match"]["steps"]
     assert not (output_dir / "state" / "refinement").exists()
 
 

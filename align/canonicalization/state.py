@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 
@@ -27,17 +27,10 @@ class ScaleState:
         cls,
         graph,
         *,
-        backend: Literal["jax", "numpy"] = "numpy",
         dtype=np.float32,
     ) -> ScaleState:
-        if backend == "jax":
-            import jax.numpy as jnp
-
-            ones = jnp.ones
-        else:
-            ones = np.ones
         scales = {
-            group_id: ones(group.size, dtype=dtype)
+            group_id: np.ones(group.size, dtype=dtype)
             for group_id, group in graph.groups.items()
         }
         return cls(group_order=graph.group_order, scales=scales)
@@ -47,12 +40,10 @@ class ScaleState:
         cls,
         graph,
         scales: Mapping[str, Any],
-        *,
-        backend: Literal["jax", "numpy"] = "numpy",
     ) -> ScaleState:
         """Build a state, defaulting unspecified groups to an identity scale."""
 
-        state = cls.identity(graph, backend=backend)
+        state = cls.identity(graph)
         state.scales.update(dict(scales))
         return state
 

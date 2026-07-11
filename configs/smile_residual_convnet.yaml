@@ -39,6 +39,7 @@ match:
     - solver: sinkhorn
       tau: 0.1
       sinkhorn_iterations: 50
+      record_ambiguity: false
       learning_rate: 0.01
       max_steps: 200
       tolerance: 1.0e-05
@@ -60,6 +61,9 @@ runtime:
   force_gpu: false
   parallelism: null
   device_ids: null
+  allow_device_sharing: false
+  max_worker_retries: 2
+  worker_threads: 1
   per_device_batch: 128
   verbosity: info
   validate_artifacts_on_resume: true

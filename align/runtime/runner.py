@@ -31,11 +31,8 @@ from .resources import (
     available_cpu_count,
 )
 from .stages import (
-    CanonicalizeExecutor,
-    CenterSoftmaxHeadExecutor,
-    MatchExecutor,
     StageExecutor,
-    prepare_stage_executors,
+    build_stage_executors,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -131,15 +128,26 @@ class AlignmentRunner:
 
     def _compute_parallelism(self) -> int:
         requested = self.config.runtime.parallelism
-        if requested is not None:
-            return max(1, int(requested))
-
         match_cfg = self.config.match
         if match_cfg and any(step.solver == "sinkhorn" for step in match_cfg.solvers):
             gpu_count = len(self._visible_gpu_ids(self.config.runtime.device_ids))
             if gpu_count > 0:
+                if (
+                    requested is not None
+                    and requested > gpu_count
+                    and not self.config.runtime.allow_device_sharing
+                ):
+                    raise ValueError(
+                        f"runtime.parallelism={requested} would share {gpu_count} "
+                        "accelerator(s) across multiple workers. Set "
+                        "runtime.allow_device_sharing=true only if intentional."
+                    )
+                if requested is not None:
+                    return int(requested)
                 return gpu_count
-        return available_cpu_count()
+        if requested is not None:
+            return int(requested)
+        return min(4, available_cpu_count())
 
     def execute(self, *, dry_run: bool = False) -> None:
         pending = self._pending_records()
@@ -158,7 +166,7 @@ class AlignmentRunner:
             return
 
         if not pending:
-            self.progress_logger.info("All samples already processed. Nothing to do.")
+            self._finalize_completed_resume()
             return
 
         loader = SampleLoader(self.manifest)
@@ -262,6 +270,37 @@ class AlignmentRunner:
         if barycenter_passes > 1:
             shutil.rmtree(refinement_root, ignore_errors=True)
         self.progress_logger.info("Align complete in %.2fs", elapsed)
+
+    def _finalize_completed_resume(self) -> None:
+        """Repair final summaries/state after all sample commits already succeeded."""
+
+        loader = SampleLoader(self.manifest)
+        reference = loader.load_reference()
+        self._stage_executors = self._prepare_executors(reference)
+        if self.config.canonicalize is not None:
+            self.artifact_store.register_static_config(
+                "canonicalize", self.config.canonicalize.as_dict()
+            )
+        if self.config.center_softmax_head is not None:
+            self.artifact_store.register_static_config(
+                "center_softmax_head", self.config.center_softmax_head.as_dict()
+            )
+        if self.config.match is not None:
+            match_payload = self.config.match.as_dict()
+            match_executor = self._get_stage_executor("match")
+            if match_executor is not None and match_executor.graph is not None:
+                match_payload["transform_families"] = {
+                    group_id: group.transform_family
+                    for group_id, group in match_executor.graph.groups.items()
+                }
+            self.artifact_store.register_static_config("match", match_payload)
+        self.artifact_store.finalize(elapsed_seconds=self.run_state.elapsed_seconds)
+        self.run_state.mark_complete()
+        self.run_state.save()
+        self.progress_logger.info(
+            "All samples were already committed; summaries and completion state "
+            "have been finalized."
+        )
 
     def _pending_records(self) -> list[SampleRecord]:
         pending: list[SampleRecord] = []
@@ -367,42 +406,24 @@ class AlignmentRunner:
         match_reference: WeightSample | None = None,
         pass_index: int = 0,
     ) -> list[tuple[str, StageExecutor]]:
-        executors: dict[str, StageExecutor] = {}
         family = self.config.architecture.family
         recipe_kwargs = dict(self.config.architecture.recipe_kwargs)
-        if self.config.canonicalize is not None:
-            executors["canonicalize"] = CanonicalizeExecutor(
-                self.config.canonicalize,
-                family=family,
-                recipe_kwargs=recipe_kwargs,
-            )
-        if self.config.center_softmax_head is not None:
-            executors["center_softmax_head"] = CenterSoftmaxHeadExecutor(
-                self.config.center_softmax_head,
-                family=family,
-                recipe_kwargs=recipe_kwargs,
-            )
-        if self.config.match is not None:
-            executors["match"] = MatchExecutor(
-                self.config.match,
-                reference_index=(
-                    self.manifest.reference_index if pass_index == 0 else None
-                ),
-                seed=self.config.match.seed,
-                rng_offset=pass_index * self.manifest.total,
-                batch_size=self.per_device_batch,
-                family=family,
-                recipe_kwargs=recipe_kwargs,
-            )
-
-        stage_list = [
-            (name, executors[name]) for name in self.stage_order if name in executors
-        ]
-        return prepare_stage_executors(
-            stage_list,
-            self.manifest,
-            reference_sample,
+        return build_stage_executors(
+            stage_order=self.stage_order,
+            manifest=self.manifest,
+            reference_sample=reference_sample,
+            family=family,
+            recipe_kwargs=recipe_kwargs,
+            canonicalize_config=self.config.canonicalize,
+            center_softmax_head_config=self.config.center_softmax_head,
+            match_config=self.config.match,
             match_reference=match_reference,
+            match_reference_index=(
+                self.manifest.reference_index if pass_index == 0 else None
+            ),
+            seed=self.config.match.seed if self.config.match is not None else None,
+            rng_offset=pass_index * self.manifest.total,
+            batch_size=self.per_device_batch,
         )
 
     def _get_stage_executor(self, name: str) -> StageExecutor | None:
@@ -427,7 +448,8 @@ class AlignmentRunner:
                 for device in jax.devices()
                 if is_gpu_platform(device.platform)
             ]
-        except Exception:  # pragma: no cover - backend specific
+        except Exception as exc:  # pragma: no cover - backend specific
+            self.progress_logger.warning("GPU device discovery failed: %s", exc)
             return []
 
     def _run_local(
@@ -488,6 +510,7 @@ class AlignmentRunner:
             parallelism=self.parallelism,
             device_ids=self.config.runtime.device_ids,
             strategy_prefers_gpu=prefers_gpu,
+            allow_device_sharing=self.config.runtime.allow_device_sharing,
         )
 
         record_lookup = {record.index: record for record in pending}
@@ -496,6 +519,7 @@ class AlignmentRunner:
         worker_count = min(self.parallelism, total_samples)
         chunk_size = self._worker_chunk_size()
         job_template = self._worker_job_template()
+        self._worker_retry_counts: dict[int, int] = {}
 
         pool.start(
             worker_count=worker_count,
@@ -556,7 +580,9 @@ class AlignmentRunner:
                             self._maybe_log_progress(record.label)
                         completed += 1
                     elif msg_type == "error":
-                        reason = message.get("error", "worker reported error")
+                        reason = message.get("traceback") or message.get(
+                            "error", "worker reported error"
+                        )
                         self._handle_worker_failure(
                             pool,
                             state,
@@ -565,6 +591,7 @@ class AlignmentRunner:
                             scratch_root,
                             chunk_size,
                             reason,
+                            transient=False,
                         )
                     elif msg_type == "stopped":
                         state.stopping = True
@@ -618,9 +645,29 @@ class AlignmentRunner:
         scratch_root: Path,
         chunk_size: int,
         reason: str,
+        *,
+        transient: bool,
     ) -> None:
         if state.stopping:
             return
+        assigned = list(state.assigned)
+        labels = [self.manifest.records[index].label for index in assigned]
+        if not transient:
+            joined = ", ".join(labels) if labels else "unknown sample"
+            raise RuntimeError(
+                f"Worker {state.worker_id} failed deterministically while processing "
+                f"{joined}. The job will not be retried.\n{reason}"
+            )
+        retry_limit = int(self.config.runtime.max_worker_retries)
+        for sample_index in assigned:
+            attempts = self._worker_retry_counts.get(sample_index, 0) + 1
+            self._worker_retry_counts[sample_index] = attempts
+            if attempts > retry_limit:
+                label = self.manifest.records[sample_index].label
+                raise RuntimeError(
+                    f"Transient worker failure retry budget exhausted for {label} "
+                    f"after {attempts - 1} retries. Last failure: {reason}"
+                )
         self.progress_logger.warning(
             "Worker %d failed (%s). Respawning.", state.worker_id, reason
         )
@@ -668,6 +715,7 @@ class AlignmentRunner:
                     scratch_root,
                     chunk_size,
                     f"exitcode={state.process.exitcode}",
+                    transient=True,
                 )
                 continue
             timeout_seconds = WORKER_HEARTBEAT_TIMEOUT * max(1, len(state.assigned))
@@ -680,6 +728,7 @@ class AlignmentRunner:
                     scratch_root,
                     chunk_size,
                     "heartbeat timeout",
+                    transient=True,
                 )
 
     def _worker_chunk_size(self) -> int:
@@ -706,6 +755,7 @@ class AlignmentRunner:
             "family": self.config.architecture.family,
             "recipe_kwargs": dict(self.config.architecture.recipe_kwargs),
             "heartbeat_interval": WORKER_HEARTBEAT_INTERVAL,
+            "worker_threads": self.config.runtime.worker_threads,
         }
 
     def _apply_commit(
