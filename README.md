@@ -35,6 +35,23 @@ pickled JAX tree definition. See the [input artifact
 contract](https://github.com/manuelhelmerichs/align/wiki/Input-artifact-contract)
 for the exact layout.
 
+## Sampling posteriors
+
+The repository bundles a sampler for producing such experiments in
+[`sampling/`](sampling), a vendored port of
+[EmanuelSommer/SMILE](https://github.com/EmanuelSommer/SMILE) (MILE/SMILE
+Bayesian deep ensembles). It runs from the repository root and writes
+artifacts that `align` consumes directly:
+
+```bash
+uv run python -m sampling -c configs/sampling/uci_benchmarks/tabular_regr_mile.yaml -d 10
+```
+
+See [`sampling/README.md`](sampling/README.md) and the wiki's [sampling
+posteriors](https://github.com/manuelhelmerichs/align/wiki/Sampling-posteriors)
+page. Image and HuggingFace/BPE text experiments need
+`uv sync --extra dev --extra sampling`.
+
 ## Documentation
 
 The [project wiki](https://github.com/manuelhelmerichs/align/wiki) contains:
