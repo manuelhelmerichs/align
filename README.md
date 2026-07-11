@@ -62,5 +62,13 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
+The paper benchmarks are repository-only and are not included in the installed
+`align` package. Run their command-line harness from the repository root:
+
+```bash
+uv run python -m benchmarks --help
+uv run python -m benchmarks regression --fast
+```
+
 `align` is unpublished research software and its interfaces may change as the
 symmetry model evolves.
