@@ -6,7 +6,8 @@ Configuration is split across submodules for maintainability:
 - ``paths``: Filesystem path configuration (PathConfig)
 - ``architecture``: Recipe family + discovery options (ArchitectureConfig)
 - ``selection``: Sample selection/filtering (SelectionConfig)
-- ``stages``: Stage configs (CanonicalizeConfig, MatchConfig, ObjectiveConfig, SolverStep)
+- ``stages``: Stage configs (CanonicalizeConfig, CenterSoftmaxHeadConfig,
+  MatchConfig, ObjectiveConfig, SolverStep)
 - ``runtime``: Runtime execution options (RuntimeConfig)
 - ``loader``: YAML loading, merging, and validation
 """
@@ -23,7 +24,13 @@ from .loader import (
 from .paths import PathConfig
 from .runtime import RuntimeConfig
 from .selection import SelectionConfig
-from .stages import CanonicalizeConfig, MatchConfig, ObjectiveConfig, SolverStep
+from .stages import (
+    CanonicalizeConfig,
+    CenterSoftmaxHeadConfig,
+    MatchConfig,
+    ObjectiveConfig,
+    SolverStep,
+)
 
 __all__ = [
     "ArchitectureConfig",
@@ -32,6 +39,7 @@ __all__ = [
     "SelectionConfig",
     "ObjectiveConfig",
     "CanonicalizeConfig",
+    "CenterSoftmaxHeadConfig",
     "MatchConfig",
     "RuntimeConfig",
     "RunConfig",

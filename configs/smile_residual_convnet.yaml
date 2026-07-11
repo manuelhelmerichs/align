@@ -24,8 +24,10 @@ selection:
 
 canonicalize:
   # FRN/TLU (and BN/ReLU) stacks carry the exact post-normalization affine
-  # scale symmetry: gamma/beta/tau are canonicalized to unit joint energy per
-  # channel group, consumers absorb the factors.
+  # scale symmetry on gamma/beta/tau; consumers absorb the factors. The
+  # default balanced strategy equalizes producer and consumer energies per
+  # channel group (the minimum-norm orbit point, one-shot for norm-attached
+  # stacks); strategy: unit_norm folds the joint producer energy to 1 instead.
   activation: tlu
 
 match:

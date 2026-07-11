@@ -16,12 +16,12 @@ from .architecture import ArchitectureConfig
 from .paths import PathConfig, path_to_dict
 from .runtime import RuntimeConfig
 from .selection import SelectionConfig
-from .stages import CanonicalizeConfig, MatchConfig
+from .stages import CanonicalizeConfig, CenterSoftmaxHeadConfig, MatchConfig
 
 if TYPE_CHECKING:
     from ..sample_manifest import SampleManifest
 
-_STAGES = ("canonicalize", "match")
+_STAGES = ("canonicalize", "center_softmax_head", "match")
 _TOP_LEVEL_FIELDS = frozenset(
     {
         "paths",
@@ -29,6 +29,7 @@ _TOP_LEVEL_FIELDS = frozenset(
         "selection",
         "pipeline",
         "canonicalize",
+        "center_softmax_head",
         "match",
         "runtime",
     }
@@ -44,6 +45,7 @@ class RunConfig:
     selection: SelectionConfig = field(default_factory=SelectionConfig)
     pipeline: tuple[str, ...] = ("canonicalize", "match")
     canonicalize: CanonicalizeConfig | None = field(default_factory=CanonicalizeConfig)
+    center_softmax_head: CenterSoftmaxHeadConfig | None = None
     match: MatchConfig | None = field(default_factory=MatchConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
 
@@ -75,6 +77,17 @@ class RunConfig:
                 "the pipeline."
             )
 
+        center_softmax_head_cfg: CenterSoftmaxHeadConfig | None = None
+        if "center_softmax_head" in pipeline:
+            center_softmax_head_cfg = CenterSoftmaxHeadConfig.from_mapping(
+                payload.get("center_softmax_head", {})
+            )
+        elif "center_softmax_head" in payload:
+            raise ValueError(
+                "A 'center_softmax_head' section is present but "
+                "'center_softmax_head' is not in the pipeline."
+            )
+
         match_cfg: MatchConfig | None = None
         if "match" in pipeline:
             match_cfg = MatchConfig.from_mapping(payload.get("match", {}))
@@ -91,6 +104,7 @@ class RunConfig:
             selection=SelectionConfig.from_mapping(payload.get("selection", {})),
             pipeline=pipeline,
             canonicalize=canonicalize_cfg,
+            center_softmax_head=center_softmax_head_cfg,
             match=match_cfg,
             runtime=RuntimeConfig.from_mapping(payload.get("runtime", {})),
         )
@@ -110,6 +124,11 @@ class RunConfig:
         }
         payload["canonicalize"] = (
             self.canonicalize.as_dict() if self.canonicalize is not None else None
+        )
+        payload["center_softmax_head"] = (
+            self.center_softmax_head.as_dict()
+            if self.center_softmax_head is not None
+            else None
         )
         payload["match"] = self.match.as_dict() if self.match is not None else None
         return payload

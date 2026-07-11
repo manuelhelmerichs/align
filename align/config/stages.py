@@ -37,6 +37,7 @@ _CANONICALIZE_FIELDS = frozenset(
         "activation",
     }
 )
+_CENTER_SOFTMAX_HEAD_FIELDS = frozenset({"head"})
 _MATCH_FIELDS = frozenset({"objective", "seed", "barycenter_passes", "solvers"})
 _OBJECTIVE_FIELDS = frozenset(
     {"type", "weights_path", "tensor_weights", "metrics_path", "tensor_metrics"}
@@ -207,6 +208,40 @@ class CanonicalizeConfig:
 
 
 @dataclass
+class CenterSoftmaxHeadConfig:
+    """Configuration for the opt-in softmax-head translation stage.
+
+    Centers the classification head to zero-mean class columns — exactly
+    probability-preserving but *not* logit-preserving, which is why it is a
+    separate stage rather than part of ``canonicalize``. ``head`` names the
+    head module (dot-separated path containing ``kernel`` and optionally
+    ``bias``); leave it unset to auto-detect the unique structural head.
+    """
+
+    head: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.head is not None:
+            self.head = str(self.head)
+            if not self.head:
+                raise ValueError("center_softmax_head.head must be a non-empty path.")
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any]) -> CenterSoftmaxHeadConfig:
+        if not isinstance(payload, Mapping):
+            raise ValueError("center_softmax_head section must be a mapping.")
+        _validate_fields("center_softmax_head", payload, _CENTER_SOFTMAX_HEAD_FIELDS)
+        return cls(head=payload.get("head"))
+
+    @property
+    def head_path(self) -> tuple[str, ...] | None:
+        return tuple(self.head.split(".")) if self.head is not None else None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"head": self.head}
+
+
+@dataclass
 class ObjectiveConfig:
     """Discriminated match objective configuration."""
 
@@ -315,6 +350,7 @@ class MatchConfig:
 
 __all__ = [
     "CanonicalizeConfig",
+    "CenterSoftmaxHeadConfig",
     "MatchConfig",
     "ObjectiveConfig",
     "SolverStep",

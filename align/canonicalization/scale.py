@@ -20,6 +20,15 @@ Plans are dispatched on graph structure:
   per intra-head dimension. This symmetry is activation-independent; all
   other groups (stream, heads, GELU FFN hidden units) carry no per-channel
   scale symmetry and stay at identity.
+- **Conv-stack canonicalization** for graphs with a ``convnet`` component
+  (plain and residual conv nets). Two canonical forms are available via
+  ``strategy``: ``balanced`` (default) picks the minimum-norm orbit
+  representative by equalizing each channel's dividing-side (scale-carrying
+  producers: norm affine parameters or bare conv kernel/bias) and
+  multiplying-side (power-1 consumer bindings) energies — one-shot for
+  norm-attached graphs, a convergent convex fixed point for bare-conv chains
+  and residual cycles — while ``unit_norm`` folds the joint producer energy
+  to 1 per channel (see ``align.canonicalization.convnet``).
 - **Dense chain canonicalization** for linear ReLU-MLP graphs (each permutation
   group has a single ``out``-role producer kernel, kernels are 2-D, and the
   groups form a single chain feeding one output head). Residual ties and
@@ -46,7 +55,11 @@ from ..symmetry import AxisBinding, SymmetryGraph, binding_axis_interval
 from ..symmetry.tensor_ops import _descend
 from ._tree import replace_paths
 from .activations import is_positive_homogeneous, validate_activation
-from .convnet import convnet_producer_scales, has_convnet_component
+from .convnet import (
+    convnet_balanced_scales,
+    convnet_producer_scales,
+    has_convnet_component,
+)
 from .dense import (
     DenseLayer,
     _canonicalize_degenerate,
@@ -470,15 +483,10 @@ class ScaleCanonicalizer:
             )
 
         if has_convnet_component(graph):
-            if strategy == "balanced":
-                raise ValueError(
-                    "strategy='balanced' is not implemented for conv-stack "
-                    "canonicalization; the conv plan canonicalizes by unit joint "
-                    "producer energy. Use strategy='unit_norm' or omit the option."
-                )
             return self._canonicalize_convnet(
                 graph,
                 params,
+                strategy=strategy or "balanced",
                 epsilon=epsilon,
                 include_bias_in_norm=include_bias_in_norm,
                 degenerate_channels=degenerate_channels,
@@ -538,12 +546,19 @@ class ScaleCanonicalizer:
         graph: SymmetryGraph,
         params: ParamTree,
         *,
+        strategy: str,
         epsilon: float,
         include_bias_in_norm: bool,
         degenerate_channels: str,
         activation: str,
     ) -> tuple[ParamTree, dict[str, Any], dict[str, Any]]:
-        """Canonicalize joint producer energies (norm-affine or bare-conv)."""
+        """Canonicalize conv-stack scales (norm-affine or bare-conv producers).
+
+        ``balanced`` (default) picks the minimum-norm orbit representative by
+        equalizing each channel's dividing-side (producer) and
+        multiplying-side (consumer) energies; ``unit_norm`` folds the joint
+        producer energy to 1 per channel.
+        """
 
         if not is_positive_homogeneous(activation):
             raise ValueError(
@@ -559,19 +574,24 @@ class ScaleCanonicalizer:
         if not include_bias_in_norm:
             raise ValueError(
                 "include_bias_in_norm=false is not defined for conv-stack "
-                "canonicalization; the canonical scale is the joint energy of all "
-                "scale-carrying producers (norm affine parameters or conv "
+                "canonicalization; the canonical scale measures the joint energy "
+                "of all scale-carrying producers (norm affine parameters or conv "
                 "kernel plus bias)."
             )
 
-        scales = convnet_producer_scales(graph, params, epsilon=epsilon)
+        if strategy == "balanced":
+            scales = convnet_balanced_scales(graph, params, epsilon=epsilon)
+            plan = "conv_balanced"
+        else:
+            scales = convnet_producer_scales(graph, params, epsilon=epsilon)
+            plan = "conv_producer_energy"
         canonical_params = graph.apply_scales(
             params,
             ScaleState.from_scales(graph, scales, backend="jax"),
         )
         aux: dict[str, Any] = {
-            "plan": "conv_producer_energy",
-            "strategy": "unit_norm",
+            "plan": plan,
+            "strategy": strategy,
             "epsilon": epsilon,
             "degenerate_channels": degenerate_channels,
             "include_bias_in_norm": include_bias_in_norm,
