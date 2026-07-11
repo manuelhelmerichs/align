@@ -1,6 +1,6 @@
 """Plain ConvNet architecture recipe: conv stack -> flatten -> dense chain.
 
-Targets LeNet-style trees (e.g. the bayesmates ``lenetti`` family): a sequence
+Targets LeNet-style trees (including the bundled ``LeNetti`` family): a sequence
 of convolutions (optionally separated by parameter-free, channel-preserving
 ops such as pooling), a flatten, and a dense classifier chain. Discovery is
 structural: modules with 4-D kernels are convs, modules with 2-D kernels are

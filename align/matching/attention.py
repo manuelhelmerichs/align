@@ -76,7 +76,7 @@ def attention_module_specs(graph) -> tuple[AttentionModuleSpec, ...]:
 def _head_matrices(graph, spec, tensor_id: str, tensor) -> np.ndarray:
     """Return per-head matrices ``(H, other, dk)`` for one q/k/v/out tensor.
 
-    ``other`` collects the remaining axes (the stream axis for the bayesmates
+    ``other`` collects the remaining axes (the stream axis for the bundled
     layout); ``dk`` is the intra-head axis bound by the module's qk/vo groups.
     """
 

@@ -5,7 +5,6 @@
 - `align` is an unpublished research tool for post-processing posterior neural-network weight samples.
 - The main research context is Bayesian deep learning, weight-space generative modeling, and treating posterior or weight samples as a data modality.
 - The current user is the sole user. Optimize for correctness, clarity, and research velocity over preserving old interfaces.
-- The repository-only `sampling/` package is vendored from [EmanuelSommer/SMILE](https://github.com/EmanuelSommer/SMILE) and produces the posterior sample experiments `align` consumes; keep it close to upstream and mark deliberate deviations with `NOTE(align port)` comments (see `sampling/README.md`).
 
 ## Development stance
 

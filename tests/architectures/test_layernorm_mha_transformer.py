@@ -121,7 +121,7 @@ def make_vit_style_params(
 
 
 def vit_transformer_apply(params, images: jax.Array) -> jax.Array:
-    """Forward pass matching the bayesmates ViTCore semantics (true pre-LN)."""
+    """Forward pass matching the bundled ViTCore semantics (true pre-LN)."""
 
     core = params["core"]
     kernel = jnp.asarray(core["patch_embedding"]["kernel"])
@@ -168,8 +168,8 @@ def vit_transformer_apply(params, images: jax.Array) -> jax.Array:
 
 
 @pytest.fixture(scope="module")
-def bayesmates_gpt_params():
-    """Deterministic fixture matching the external BayesMates GPT layout."""
+def bundled_gpt_params():
+    """Deterministic fixture matching the bundled GPT layout."""
 
     return make_layernorm_mha_transformer_params(
         key=jax.random.PRNGKey(20),
@@ -183,8 +183,8 @@ def bayesmates_gpt_params():
 
 
 @pytest.fixture(scope="module")
-def bayesmates_vit_params():
-    """Deterministic fixture matching the external BayesMates ViT layout."""
+def bundled_vit_params():
+    """Deterministic fixture matching the bundled ViT layout."""
 
     return make_vit_style_params(
         key=jax.random.PRNGKey(21),
@@ -245,16 +245,16 @@ class TestTransformerStructure:
         assert "core/pos_embedding" in stream_tensors
         assert "core/patch_embedding/kernel" in stream_tensors
 
-    def test_bayesmates_gpt_layout(self, bayesmates_gpt_params):
-        graph = LayerNormMHATransformerRecipe().build_graph(bayesmates_gpt_params)
+    def test_bundled_gpt_layout(self, bundled_gpt_params):
+        graph = LayerNormMHATransformerRecipe().build_graph(bundled_gpt_params)
         assert graph.metadata["d_model"] == 16
         assert graph.groups["Block_0/attention/heads"].size == 2
         assert graph.groups["Block_0/ffn/h0"].size == 64
         assert "classifier" not in graph.components  # one layer has no junctions
 
-    def test_bayesmates_vit_layout(self, bayesmates_vit_params):
+    def test_bundled_vit_layout(self, bundled_vit_params):
         graph = LayerNormMHATransformerRecipe(parameter_root="core").build_graph(
-            bayesmates_vit_params
+            bundled_vit_params
         )
         assert graph.metadata["d_model"] == 16
         assert graph.groups["classifier/h0"].size == 16
@@ -308,14 +308,14 @@ class TestTransformerInvariance:
                 atol=1e-5,
             )
 
-    def test_bayesmates_gpt_layout_preserves_function(self, bayesmates_gpt_params):
-        graph = LayerNormMHATransformerRecipe().build_graph(bayesmates_gpt_params)
+    def test_bundled_gpt_layout_preserves_function(self, bundled_gpt_params):
+        graph = LayerNormMHATransformerRecipe().build_graph(bundled_gpt_params)
         tokens = jax.random.randint(jax.random.PRNGKey(6), (3, 8), 0, 23)
         baseline = np.asarray(
-            layernorm_mha_transformer_apply(bayesmates_gpt_params, tokens)
+            layernorm_mha_transformer_apply(bundled_gpt_params, tokens)
         )
         transformed = graph.apply_transforms(
-            bayesmates_gpt_params, _random_state(graph, seed=7)
+            bundled_gpt_params, _random_state(graph, seed=7)
         )
         np.testing.assert_allclose(
             np.asarray(layernorm_mha_transformer_apply(transformed, tokens)),
@@ -323,16 +323,16 @@ class TestTransformerInvariance:
             atol=1e-4,
         )
 
-    def test_bayesmates_vit_layout_preserves_function(self, bayesmates_vit_params):
+    def test_bundled_vit_layout_preserves_function(self, bundled_vit_params):
         graph = LayerNormMHATransformerRecipe(parameter_root="core").build_graph(
-            bayesmates_vit_params
+            bundled_vit_params
         )
         images = jax.random.normal(
             jax.random.PRNGKey(8), (2, 16, 16, 3), dtype=jnp.float32
         )
-        baseline = np.asarray(vit_transformer_apply(bayesmates_vit_params, images))
+        baseline = np.asarray(vit_transformer_apply(bundled_vit_params, images))
         transformed = graph.apply_transforms(
-            bayesmates_vit_params, _random_state(graph, seed=9)
+            bundled_vit_params, _random_state(graph, seed=9)
         )
         np.testing.assert_allclose(
             np.asarray(vit_transformer_apply(transformed, images)),

@@ -1,4 +1,4 @@
-# LayerNorm + MHA transformer example (Bayesmates GPT layout).
+# LayerNorm + MHA transformer example (bundled GPT layout).
 #
 # Inspect the weight-space symmetry first:
 #   uv run align configs/examples/layernorm_mha_transformer.yaml --describe-symmetry
@@ -10,7 +10,7 @@
 # circuit-cost update automatically.
 
 paths:
-  experiment_root: /Users/manuel/Projects/align/data/bayesmates_module_graph_samples/bayesmates_gpt_tiny
+  experiment_root: /Users/manuel/Projects/align/results/sampling/nanogpt/gpt_tiny
   samples_dir: null
   tree_path: null
   output_dir: null

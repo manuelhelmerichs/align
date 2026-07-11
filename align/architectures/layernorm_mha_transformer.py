@@ -1,6 +1,6 @@
 """Transformer architecture recipe (pre-LN blocks, flax attention layout).
 
-Targets the bayesmates GPT/ViT families: flax parameter trees whose attention
+Targets the bundled GPT/ViT families: Flax parameter trees whose attention
 modules store head-structured kernels (``query/key/value`` as ``(d, H, dk)``,
 ``out`` as ``(H, dk, d)``). Discovery locates the blocks; construction is
 delegated to symmetry rules:
@@ -73,7 +73,7 @@ class _DenseLayer:
 @register_recipe
 @dataclass
 class LayerNormMHATransformerRecipe(ArchitectureRecipe):
-    """Recipe for pre-LN transformer trees (bayesmates GPT/ViT layout)."""
+    """Recipe for pre-LN transformer trees in the bundled GPT/ViT layout."""
 
     name: str = "layernorm_mha_transformer"
     parameter_root: str = ""
