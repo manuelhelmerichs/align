@@ -32,7 +32,7 @@ match:
   # Geometry-aware alternative: diagonal Fisher-metric weight distance.
   # Weights are the diagonal Gauss-Newton Fisher at the reference sample,
   # precomputed with align.matching.fisher and stored as an npz keyed by
-  # tensor id (see docs/theory.md, "Fisher-metric objective"):
+  # tensor id (see wiki/Matching-objectives-and-solvers.md):
   # objective:
   #   type: diagonal_fisher
   #   weights_path: results/example_experiment/fisher_weights.npz
