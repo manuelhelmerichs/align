@@ -38,13 +38,15 @@ _CANONICALIZE_FIELDS = frozenset(
     }
 )
 _MATCH_FIELDS = frozenset({"objective", "seed", "barycenter_passes", "solvers"})
-_OBJECTIVE_FIELDS = frozenset({"type", "weights_path", "tensor_weights"})
+_OBJECTIVE_FIELDS = frozenset(
+    {"type", "weights_path", "tensor_weights", "metrics_path", "tensor_metrics"}
+)
 _VALID_STRATEGIES = frozenset({"balanced", "unit_norm"})
 _VALID_DEGENERATE_CHANNELS = frozenset(
     {"preserve", "zero_outgoing", "canonical_vector"}
 )
 _VALID_ACTIVATIONS = frozenset({"relu", "leaky_relu", "tlu", "gelu"})
-_VALID_OBJECTIVES = frozenset({"euclidean", "diagonal_fisher"})
+_VALID_OBJECTIVES = frozenset({"euclidean", "diagonal_fisher", "relative_fisher"})
 _VALID_SOLVERS = frozenset({"lap", "procrustes", "sinkhorn"})
 
 
@@ -211,6 +213,8 @@ class ObjectiveConfig:
     type: str = "euclidean"
     weights_path: str | None = None
     tensor_weights: Any = None
+    metrics_path: str | None = None
+    tensor_metrics: Any = None
 
     def __post_init__(self) -> None:
         self.type = _validate_choice(
@@ -228,6 +232,8 @@ class ObjectiveConfig:
             type=payload.get("type", "euclidean"),
             weights_path=payload.get("weights_path"),
             tensor_weights=payload.get("tensor_weights"),
+            metrics_path=payload.get("metrics_path"),
+            tensor_metrics=payload.get("tensor_metrics"),
         )
 
     @property
@@ -237,12 +243,18 @@ class ObjectiveConfig:
             kwargs["weights_path"] = self.weights_path
         if self.tensor_weights is not None:
             kwargs["tensor_weights"] = self.tensor_weights
+        if self.metrics_path is not None:
+            kwargs["metrics_path"] = self.metrics_path
+        if self.tensor_metrics is not None:
+            kwargs["tensor_metrics"] = self.tensor_metrics
         return kwargs
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"type": self.type}
         if self.weights_path is not None:
             payload["weights_path"] = self.weights_path
+        if self.metrics_path is not None:
+            payload["metrics_path"] = self.metrics_path
         return payload
 
 

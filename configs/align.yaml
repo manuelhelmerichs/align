@@ -36,6 +36,10 @@ match:
   # objective:
   #   type: diagonal_fisher
   #   weights_path: results/example_experiment/fisher_weights.npz
+  # Full activation-Gram relative-Fisher geometry is Sinkhorn-only:
+  # objective:
+  #   type: relative_fisher
+  #   metrics_path: results/example_experiment/activation_grams.npz
   seed: 0                  # RNG seed ensures deterministic initialisation for stochastic solvers.
   barycenter_passes: 2     # 2 makes the canonical frame reference-independent. Drop to 1 past matching breakdown.
   solvers:

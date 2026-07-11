@@ -193,6 +193,8 @@ def _posterior_record(
             "objective_final_mean": result.objective_final_mean,
             "wall_time_s": result.wall_time_s,
             "samples_per_s": result.samples_per_s,
+            "head_assignment_accuracy": result.head_assignment_accuracy,
+            "head_assignment_exact_rate": result.head_assignment_exact_rate,
         }
     )
     record.metrics = metrics
@@ -623,6 +625,8 @@ def run_objective_comparison(
     seeds: Sequence[int] = (0,),
     include_posterior: bool = True,
     posterior_case: PosteriorBenchmarkCase | None = None,
+    posterior_canonicalize: bool | None = None,
+    posterior_barycenter_passes: int = 2,
     include_performance: bool = True,
 ) -> list[BenchmarkRecord]:
     """Sweep objectives x schedules x cases for cost-function comparisons.
@@ -673,7 +677,12 @@ def run_objective_comparison(
                         schedule=schedule,
                         objective=objective,
                         objective_kwargs=objective_kwargs,
-                        canonicalize=posterior_case is None,
+                        canonicalize=(
+                            posterior_case is None
+                            if posterior_canonicalize is None
+                            else posterior_canonicalize
+                        ),
+                        barycenter_passes=posterior_barycenter_passes,
                     )
                 )
     return records

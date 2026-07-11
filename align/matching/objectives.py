@@ -432,6 +432,151 @@ class DiagonalFisherObjective(Objective):
         return signed, invariant
 
 
+@register_objective("relative_fisher")
+class RelativeFisherObjective(Objective):
+    """Activation-Gram metric on each tensor's incoming coordinates.
+
+    A tensor residual ``D`` with flattened incoming coordinate ``a`` is scored
+    as ``sum_r D[:, r].T @ G @ D[:, r]``.  Here ``G = E[a a.T]`` is fixed at
+    the reference and ``r`` indexes all remaining tensor axes.  The full Gram
+    makes soft input- and output-axis assignments interact quadratically, so
+    this objective intentionally supports Sinkhorn only and does not expose an
+    LAP linearization.
+    """
+
+    name = "relative_fisher"
+
+    def __init__(self, tensor_metrics=None, metrics_path=None) -> None:
+        if (tensor_metrics is None) == (metrics_path is None):
+            raise ValueError(
+                "relative_fisher requires exactly one of 'tensor_metrics' or "
+                "'metrics_path'."
+            )
+        if metrics_path is not None:
+            from .relative_fisher import load_activation_gram_metrics_npz
+
+            tensor_metrics = load_activation_gram_metrics_npz(metrics_path)
+        self.tensor_metrics = {
+            str(tensor_id): {
+                "input_axes": tuple(int(axis) for axis in metric["input_axes"]),
+                "gram": np.asarray(metric["gram"], dtype=np.float64),
+            }
+            for tensor_id, metric in dict(tensor_metrics).items()
+        }
+        self._validated_metrics = {}
+
+    def _metric(self, graph, tensor_id: str):
+        metric = self.tensor_metrics.get(tensor_id)
+        if metric is None:
+            raise ValueError(
+                f"relative_fisher has no metric for tensor {tensor_id!r}; metrics "
+                "must cover every graph tensor."
+            )
+        shape = tuple(graph.tensors[tensor_id].shape)
+        cache_key = (tensor_id, shape)
+        if cache_key in self._validated_metrics:
+            return self._validated_metrics[cache_key]
+        ndim = len(shape)
+        invalid = [
+            axis for axis in metric["input_axes"] if axis < -ndim or axis >= ndim
+        ]
+        if invalid:
+            raise ValueError(
+                f"relative_fisher input axes for tensor {tensor_id!r} are out of "
+                f"bounds for {ndim} dimensions: {invalid}."
+            )
+        axes = tuple(axis % ndim for axis in metric["input_axes"])
+        if len(set(axes)) != len(axes):
+            raise ValueError(
+                f"relative_fisher input axes for tensor {tensor_id!r} are not unique."
+            )
+        size = (
+            int(np.prod([shape[axis] for axis in axes], dtype=np.int64)) if axes else 1
+        )
+        gram = metric["gram"]
+        if gram.shape != (size, size):
+            raise ValueError(
+                f"relative_fisher Gram for tensor {tensor_id!r} has shape "
+                f"{gram.shape}, expected {(size, size)} for input axes {axes}."
+            )
+        if not np.all(np.isfinite(gram)):
+            raise ValueError(
+                f"relative_fisher Gram for tensor {tensor_id!r} must be finite."
+            )
+        if not np.allclose(gram, gram.T, rtol=1e-7, atol=1e-10):
+            raise ValueError(
+                f"relative_fisher Gram for tensor {tensor_id!r} must be symmetric."
+            )
+        minimum = float(np.min(np.linalg.eigvalsh(gram)))
+        tolerance = 1e-10 * max(1.0, float(np.max(np.abs(gram))))
+        if minimum < -tolerance:
+            raise ValueError(
+                f"relative_fisher Gram for tensor {tensor_id!r} must be positive "
+                f"semidefinite (minimum eigenvalue {minimum:.3g})."
+            )
+        self._validated_metrics[cache_key] = (axes, gram)
+        return axes, gram
+
+    @staticmethod
+    def _quadratic(diff, axes, gram, *, tensor_ndim: int):
+        batched = diff.ndim == tensor_ndim + 1
+        offset = 1 if batched else 0
+        metric_axes = tuple(axis + offset for axis in axes)
+        batch_axes = (0,) if batched else ()
+        other_axes = tuple(
+            axis for axis in range(offset, diff.ndim) if axis not in metric_axes
+        )
+        order = (*batch_axes, *metric_axes, *other_axes)
+        moved = jnp.transpose(diff, order) if order else diff
+        input_size = (
+            int(np.prod([diff.shape[axis] for axis in metric_axes])) if axes else 1
+        )
+        if batched:
+            flat = moved.reshape((moved.shape[0], input_size, -1))
+            return jnp.einsum("bir,ij,bjr->b", flat, gram, flat, optimize=True)
+        flat = moved.reshape((input_size, -1))
+        return jnp.einsum("ir,ij,jr->", flat, gram, flat, optimize=True)
+
+    def value(self, graph, reference_data, target_data, state):
+        unknown = sorted(set(self.tensor_metrics) - set(graph.tensors))
+        if unknown:
+            raise ValueError(
+                "relative_fisher has metrics for unknown graph tensor(s): "
+                + ", ".join(unknown)
+            )
+        loss = None
+        for tensor_id, tensor_spec in graph.tensors.items():
+            ref = jnp.asarray(reference_data[tensor_id])
+            target = jnp.asarray(target_data[tensor_id])
+            aligned = _apply_state_to_tensor(graph, tensor_id, target, state)
+            diff = (
+                ref[None, ...] - aligned
+                if aligned.ndim == ref.ndim + 1
+                else ref - aligned
+            )
+            axes, gram = self._metric(graph, tensor_id)
+            term = self._quadratic(
+                diff,
+                axes,
+                jnp.asarray(gram, dtype=ref.dtype),
+                tensor_ndim=len(tensor_spec.shape),
+            )
+            loss = term if loss is None else loss + term
+        return jnp.asarray(0.0) if loss is None else loss
+
+    def linearize_group(self, graph, reference_data, target_data, state, group_id: str):
+        del graph, reference_data, target_data, state, group_id
+        raise UnsupportedGroupLinearization(
+            "relative_fisher is Sinkhorn-only: its full activation Gram makes "
+            "the assignment-dependent target self-energy a quadratic assignment term."
+        )
+
+    def linearize_group_split(
+        self, graph, reference_data, target_data, state, group_id: str
+    ):
+        return self.linearize_group(graph, reference_data, target_data, state, group_id)
+
+
 class UnsupportedGroupLinearization(ValueError):
     """Raised when an exact LAP update is mathematically invalid."""
 
@@ -440,6 +585,7 @@ __all__ = [
     "Objective",
     "EuclideanObjective",
     "DiagonalFisherObjective",
+    "RelativeFisherObjective",
     "UnsupportedGroupLinearization",
     "register_objective",
     "get_objective",

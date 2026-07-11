@@ -18,7 +18,12 @@ from .harness import (
     run_regression_suite,
     write_report,
 )
-from .posterior import load_experiment_posterior_case
+from .posterior import (
+    load_experiment_posterior_case,
+    make_synthetic_layernorm_mha_transformer_posterior_case,
+    make_synthetic_mlp_posterior_case,
+    make_synthetic_rmsnorm_gqa_rope_transformer_posterior_case,
+)
 from .synthetic import default_schedule_grid
 
 
@@ -53,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME[=JSON]",
         help="Objective to include; repeat for several. Optional '=JSON' "
         "suffix passes objective kwargs, e.g. "
-        '--objective \'fisher_rao={"calibration_data_path": "x.npz"}\'.',
+        '--objective \'diagonal_fisher={"calibration": "fisher"}\'.',
     )
     compare.add_argument(
         "--schedules",
@@ -78,6 +83,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the performance benchmark rows.",
     )
+    compare.add_argument(
+        "--synthetic-posterior",
+        choices=("mlp", "layernorm_mha_transformer", "rmsnorm_gqa_rope_transformer"),
+        help="Use a named synthetic posterior instead of the default isotropic MLP.",
+    )
+    compare.add_argument(
+        "--posterior-noise-mode",
+        choices=("isotropic", "inverse_fisher"),
+        default="isotropic",
+    )
+    compare.add_argument("--posterior-noise-scale", type=float, default=0.02)
+    compare.add_argument("--posterior-seed", type=int, default=0)
+    compare.add_argument("--posterior-chains", type=int, default=3)
+    compare.add_argument("--posterior-samples", type=int, default=6)
+    compare.add_argument("--posterior-barycenter-passes", type=int, default=2)
     compare.add_argument("--output", type=Path, help="Write the JSON report here.")
     compare.add_argument(
         "--markdown", type=Path, help="Write a markdown comparison table here."
@@ -218,7 +238,24 @@ def _run_compare(args: argparse.Namespace) -> int:
             f"Unknown schedule(s) {', '.join(unknown)}; available: "
             + ", ".join(sorted(grid))
         )
+    if args.synthetic_posterior is not None and args.experiment_root is not None:
+        raise SystemExit(
+            "--synthetic-posterior and --experiment-root are mutually exclusive."
+        )
     posterior_case = _load_experiment_case(args)
+    if args.synthetic_posterior is not None and not args.no_posterior:
+        factories = {
+            "mlp": make_synthetic_mlp_posterior_case,
+            "layernorm_mha_transformer": make_synthetic_layernorm_mha_transformer_posterior_case,
+            "rmsnorm_gqa_rope_transformer": make_synthetic_rmsnorm_gqa_rope_transformer_posterior_case,
+        }
+        posterior_case = factories[args.synthetic_posterior](
+            seed=args.posterior_seed,
+            n_chains=args.posterior_chains,
+            n_samples=args.posterior_samples,
+            noise_mode=args.posterior_noise_mode,
+            noise_scale=args.posterior_noise_scale,
+        )
     records = run_objective_comparison(
         objectives=_parse_objectives(args.objective),
         schedules={name: grid[name] for name in schedule_names},
@@ -226,6 +263,8 @@ def _run_compare(args: argparse.Namespace) -> int:
         seeds=_parse_int_list(args.seeds) or [0],
         include_posterior=not args.no_posterior,
         posterior_case=posterior_case,
+        posterior_canonicalize=args.synthetic_posterior is not None,
+        posterior_barycenter_passes=args.posterior_barycenter_passes,
         include_performance=not args.no_performance,
     )
     _emit(records, label="objective-comparison", output=args.output)

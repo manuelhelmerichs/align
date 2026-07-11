@@ -30,10 +30,11 @@ from align.matching import (
     TransformState,
     build_solver_sequence,
     estimate_diag_fisher_tree,
+    match_batch,
     match_sample,
     resolve_calibration_kwargs,
 )
-from align.symmetry import MHACircuitConstraint, SymmetryGraph
+from align.symmetry import GQARoPECircuitConstraint, MHACircuitConstraint, SymmetryGraph
 
 from .synthetic import (
     ParamTree,
@@ -41,12 +42,14 @@ from .synthetic import (
     layernorm_mha_transformer_apply,
     make_layernorm_mha_transformer_params,
     make_rmsnorm_gqa_rope_transformer_params,
+    mlp_activation_samples,
     mlp_apply,
     permutation_matrix,
     rmsnorm_gqa_rope_transformer_apply,
 )
 
 ApplyFn = Callable[[ParamTree, jax.Array], jax.Array]
+ActivationFn = Callable[[ParamTree, jax.Array], Mapping[str, Mapping[str, Any]]]
 
 ChainList = tuple[tuple[ParamTree, ...], ...]
 
@@ -61,6 +64,7 @@ class PosteriorBenchmarkCase:
     reference_chain: int = 0
     reference_sample: int = 0
     apply_fn: ApplyFn | None = None
+    activation_fn: ActivationFn | None = None
     inputs: jax.Array | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -102,6 +106,8 @@ class PosteriorBenchmarkResult:
     wall_time_s: float
     samples_per_s: float
     aligned_chains: ChainList
+    head_assignment_accuracy: float | None = None
+    head_assignment_exact_rate: float | None = None
 
 
 def _flatten_sample(params: ParamTree) -> np.ndarray:
@@ -345,6 +351,7 @@ def make_synthetic_mlp_posterior_case(
         graph=graph,
         chains=tuple(chains),
         apply_fn=mlp_apply,
+        activation_fn=mlp_activation_samples,
         inputs=inputs,
         metadata={
             "seed": seed,
@@ -707,6 +714,53 @@ def _tree_mean(trees: Sequence[ParamTree]) -> ParamTree:
     )
 
 
+def _head_assignment_recovery(case, flat_samples, transforms_flat):
+    """Direct oracle recovery for synthetic MHA head / GQA kv assignments."""
+
+    chain_transforms = case.metadata.get("chain_transforms")
+    if chain_transforms is None:
+        return None, None
+    head_groups = [
+        constraint.head_group
+        for constraint in case.graph.constraints
+        if isinstance(constraint, MHACircuitConstraint)
+    ] + [
+        constraint.kv_group
+        for constraint in case.graph.constraints
+        if isinstance(constraint, GQARoPECircuitConstraint)
+    ]
+    if not head_groups:
+        return None, None
+    has_transformed_chain = any(
+        bool(entry.get("transforms")) for entry in chain_transforms
+    )
+
+    correct = 0
+    total = 0
+    exact = 0
+    comparisons = 0
+    for (chain_index, _, _), transforms in zip(
+        flat_samples, transforms_flat, strict=True
+    ):
+        forward = chain_transforms[chain_index]["transforms"]
+        if has_transformed_chain and not forward:
+            continue
+        for group_id in head_groups:
+            size = case.graph.groups[group_id].size
+            expected = (
+                np.asarray(forward[group_id]).T if group_id in forward else np.eye(size)
+            )
+            actual = np.asarray(transforms[group_id])
+            expected_indices = np.argmax(expected, axis=1)
+            actual_indices = np.argmax(actual, axis=1)
+            matches = expected_indices == actual_indices
+            correct += int(np.sum(matches))
+            total += size
+            exact += int(np.all(matches))
+            comparisons += 1
+    return correct / total, exact / comparisons
+
+
 def run_posterior_benchmark(
     case: PosteriorBenchmarkCase,
     *,
@@ -752,6 +806,7 @@ def run_posterior_benchmark(
     ]
 
     aligned_flat: list[ParamTree] = []
+    transforms_flat: list[Mapping[str, Any]] = []
     objective_values: list[float] = []
     start = time.perf_counter()
     for pass_idx in range(barycenter_passes):
@@ -763,6 +818,7 @@ def run_posterior_benchmark(
                 params=reference,
                 apply_fn=case.apply_fn,
                 inputs=case.inputs,
+                activation_fn=case.activation_fn,
             ),
             schedule=schedule,
         )
@@ -770,21 +826,39 @@ def run_posterior_benchmark(
             reference, backend=solver_sequence.backend, cache=True
         )
         aligned_flat = []
+        transforms_flat = []
         objective_values = []
-        for index, target in enumerate(targets):
-            aligned, _, aux = match_sample(
+        if solver_sequence.supports_batching:
+            batch_results = match_batch(
                 case.graph,
                 reference,
-                target,
+                targets,
                 solver_sequence=solver_sequence,
                 reference_data=reference_data,
-                rng_key=jax.random.fold_in(
-                    jax.random.PRNGKey(rng_seed), pass_idx * len(targets) + index
-                ),
+                rng_key=jax.random.fold_in(jax.random.PRNGKey(rng_seed), pass_idx),
             )
-            aligned_flat.append(aligned)
-            if aux is not None and "objective_final" in aux:
-                objective_values.append(float(aux["objective_final"]))
+            for aligned, transforms, aux in batch_results:
+                aligned_flat.append(aligned)
+                transforms_flat.append(transforms)
+                if aux is not None and "objective_final" in aux:
+                    objective_values.append(float(aux["objective_final"]))
+        else:
+            for index, target in enumerate(targets):
+                aligned, transforms, aux = match_sample(
+                    case.graph,
+                    reference,
+                    target,
+                    solver_sequence=solver_sequence,
+                    reference_data=reference_data,
+                    rng_key=jax.random.fold_in(
+                        jax.random.PRNGKey(rng_seed),
+                        pass_idx * len(targets) + index,
+                    ),
+                )
+                aligned_flat.append(aligned)
+                transforms_flat.append(transforms)
+                if aux is not None and "objective_final" in aux:
+                    objective_values.append(float(aux["objective_final"]))
         if pass_idx < barycenter_passes - 1:
             reference = _tree_mean(aligned_flat)
     wall_time = time.perf_counter() - start
@@ -806,6 +880,9 @@ def run_posterior_benchmark(
         function_drift = drift
 
     n_samples = len(flat_samples)
+    head_accuracy, head_exact_rate = _head_assignment_recovery(
+        case, flat_samples, transforms_flat
+    )
     return PosteriorBenchmarkResult(
         metrics_before=metrics_before,
         metrics_after=metrics_after,
@@ -816,6 +893,8 @@ def run_posterior_benchmark(
         wall_time_s=float(wall_time),
         samples_per_s=float(n_samples / wall_time) if wall_time > 0 else float("inf"),
         aligned_chains=aligned_tuple,
+        head_assignment_accuracy=head_accuracy,
+        head_assignment_exact_rate=head_exact_rate,
     )
 
 

@@ -117,22 +117,38 @@ def resolve_calibration_kwargs(
     params: Mapping[str, Any],
     apply_fn: Callable[[Mapping[str, Any], jax.Array], jax.Array] | None,
     inputs: jax.Array | None,
+    activation_fn: Callable[[Mapping[str, Any], Any], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Materialize a ``calibration`` spec in objective kwargs into weights.
+    """Materialize a data-dependent ``calibration`` objective specification.
 
-    ``{"calibration": "fisher"}`` (optionally with ``calibration_damping``)
-    is replaced by ``tensor_weights`` computed at ``params`` -- which must be
-    the tree the objective will actually match against (i.e. after any
-    normalization). Kwargs without a ``calibration`` key pass through.
+    ``{"calibration": "fisher"}`` is replaced by diagonal ``tensor_weights``;
+    ``{"calibration": "relative_fisher"}`` is replaced by activation-Gram
+    ``tensor_metrics``.  Both are computed at ``params``, which must be the
+    tree the objective will actually match against (after canonicalization).
+    Kwargs without a ``calibration`` key pass through.
     """
 
     kwargs = dict(objective_kwargs or {})
-    spec = kwargs.pop("calibration", None)
+    spec = kwargs.get("calibration")
     if spec is None:
         return kwargs
+    if spec == "relative_fisher":
+        from .relative_fisher import resolve_relative_fisher_calibration_kwargs
+
+        return resolve_relative_fisher_calibration_kwargs(
+            kwargs,
+            graph=graph,
+            params=params,
+            activation_fn=activation_fn,
+            inputs=inputs,
+        )
+    kwargs.pop("calibration")
     damping = float(kwargs.pop("calibration_damping", 1.0))
     if spec != "fisher":
-        raise ValueError(f"Unknown calibration spec {spec!r}; expected 'fisher'.")
+        raise ValueError(
+            f"Unknown calibration spec {spec!r}; expected 'fisher' or "
+            "'relative_fisher'."
+        )
     if apply_fn is None or inputs is None:
         raise ValueError(
             "calibration='fisher' requires an apply_fn and calibration inputs; "
