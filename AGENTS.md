@@ -17,6 +17,7 @@
 ## Workflow
 
 - Use the project toolchain: `uv sync --extra dev`, then `uv run ...`.
+- Read through the relevant pages of the [`wiki/`](wiki).
 - Standard checks:
   - `uv run pytest`
   - `uv run ruff check .`
