@@ -21,7 +21,7 @@ from ..symmetry import (
     MHACircuitConstraint,
     binding_axis_interval,
 )
-from .objectives import _apply_other_groups_hard
+from .objectives import DiagonalFisherObjective, _apply_other_groups_hard
 from .state import TransformState, as_permutation_matrix
 
 
@@ -100,19 +100,64 @@ def _head_matrices(graph, spec, tensor_id: str, tensor) -> np.ndarray:
     return moved.reshape(spec.num_heads, -1, spec.head_dim)
 
 
+def _projection_bias_id(graph, kernel_id: str) -> str | None:
+    """Return a projection's sibling bias tensor id when the graph has one."""
+
+    if not kernel_id.endswith("/kernel"):
+        return None
+    bias_id = kernel_id[: -len("kernel")] + "bias"
+    return bias_id if bias_id in graph.tensors else None
+
+
+def _head_factor(
+    graph,
+    spec,
+    data,
+    tensor_id: str,
+    *,
+    include_bias: bool,
+    state=None,
+    skip_groups=None,
+) -> np.ndarray:
+    tensor = data[tensor_id]
+    if state is not None:
+        tensor = _apply_other_groups_hard(
+            graph, tensor_id, tensor, state, skip_groups or set()
+        )
+    factor = _head_matrices(graph, spec, tensor_id, tensor)
+    bias_id = _projection_bias_id(graph, tensor_id) if include_bias else None
+    if bias_id is not None:
+        bias = data[bias_id]
+        if state is not None:
+            bias = _apply_other_groups_hard(
+                graph, bias_id, bias, state, skip_groups or set()
+            )
+        factor = np.concatenate(
+            [factor, _head_matrices(graph, spec, bias_id, bias)], axis=1
+        )
+    return factor
+
+
 def _circuits(
     graph, spec, data, *, state=None, skip_groups: set[str] | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return stacked QK and OV circuit matrices, one pair per head."""
 
-    tensors = {}
-    for tensor_id in (spec.query, spec.key, spec.value, spec.out):
-        tensor = data[tensor_id]
-        if state is not None:
-            tensor = _apply_other_groups_hard(
-                graph, tensor_id, tensor, state, skip_groups or set()
-            )
-        tensors[tensor_id] = _head_matrices(graph, spec, tensor_id, tensor)
+    tensors = {
+        tensor_id: _head_factor(
+            graph,
+            spec,
+            data,
+            tensor_id,
+            # Query and value biases change their respective circuits.  Key
+            # bias adds a key-position-constant score and cancels in softmax;
+            # output bias is shared after the head sum.
+            include_bias=tensor_id in (spec.query, spec.value),
+            state=state,
+            skip_groups=skip_groups,
+        )
+        for tensor_id in (spec.query, spec.key, spec.value, spec.out)
+    }
 
     query, key = tensors[spec.query], tensors[spec.key]
     value, out = tensors[spec.value], tensors[spec.out]
@@ -121,8 +166,113 @@ def _circuits(
     return qk, ov
 
 
+def _quotient_circuit_precision(
+    left: np.ndarray,
+    right: np.ndarray,
+    left_fisher: np.ndarray,
+    right_fisher: np.ndarray,
+) -> np.ndarray:
+    """Diagonal quotient precision for the circuit ``left @ right.T``.
+
+    Linearizing the circuit and minimizing parameter-space displacement under
+    ``diag(left_fisher, right_fisher)`` induces circuit covariance
+    ``J F^-1 J.T``.  Keeping its diagonal gives
+
+    ``W[a,b]^-1 = sum_k right[b,k]^2/F_left[a,k]
+                         + left[a,k]^2/F_right[b,k]``.
+
+    The normal damped-Fisher path is strictly positive.  The explicit
+    semidefinite handling below assigns zero circuit precision whenever a
+    zero-Fisher parameter can change that circuit coordinate.
+    """
+
+    left = np.asarray(left, dtype=np.float64)
+    right = np.asarray(right, dtype=np.float64)
+    left_fisher = np.asarray(left_fisher, dtype=np.float64)
+    right_fisher = np.asarray(right_fisher, dtype=np.float64)
+    if left.shape != left_fisher.shape or right.shape != right_fisher.shape:
+        raise ValueError("Circuit factors and diagonal Fisher weights must match.")
+    if np.any(left_fisher < 0.0) or np.any(right_fisher < 0.0):
+        raise ValueError("Circuit Fisher weights must be non-negative.")
+
+    def _variance_term(square, fisher):
+        return np.where(
+            fisher > 0.0,
+            square / np.where(fisher > 0.0, fisher, 1.0),
+            np.where(square > 0.0, np.inf, 0.0),
+        )
+
+    left_variance = _variance_term(right[None, :, :] ** 2, left_fisher[:, None, :])
+    right_variance = _variance_term(left[:, None, :] ** 2, right_fisher[None, :, :])
+    variance = np.sum(left_variance + right_variance, axis=-1)
+    return np.where(np.isfinite(variance) & (variance > 0.0), 1.0 / variance, 0.0)
+
+
+def _weighted_circuit_cost(
+    reference: np.ndarray, target: np.ndarray, precision: np.ndarray
+) -> np.ndarray:
+    """Directed pairwise circuit distances in a reference-slot metric."""
+
+    residual = reference[:, None, :, :] - target[None, :, :, :]
+    return np.sum(precision[:, None, :, :] * np.square(residual), axis=(-2, -1))
+
+
+def _mha_circuit_precisions(graph, objective, reference_data, spec):
+    factors = {
+        tensor_id: _head_factor(
+            graph,
+            spec,
+            reference_data,
+            tensor_id,
+            include_bias=tensor_id in (spec.query, spec.value),
+        )
+        for tensor_id in (spec.query, spec.key, spec.value, spec.out)
+    }
+    metric_ids = {spec.query, spec.key, spec.value, spec.out}
+    for tensor_id in (spec.query, spec.value):
+        bias_id = _projection_bias_id(graph, tensor_id)
+        if bias_id is not None:
+            metric_ids.add(bias_id)
+    fisher_data = {
+        tensor_id: objective._weight(graph, tensor_id) for tensor_id in metric_ids
+    }
+    fisher = {
+        tensor_id: _head_factor(
+            graph,
+            spec,
+            fisher_data,
+            tensor_id,
+            include_bias=tensor_id in (spec.query, spec.value),
+        )
+        for tensor_id in (spec.query, spec.key, spec.value, spec.out)
+    }
+    qk = np.stack(
+        [
+            _quotient_circuit_precision(
+                factors[spec.query][head],
+                factors[spec.key][head],
+                fisher[spec.query][head],
+                fisher[spec.key][head],
+            )
+            for head in range(spec.num_heads)
+        ]
+    )
+    ov = np.stack(
+        [
+            _quotient_circuit_precision(
+                factors[spec.value][head],
+                factors[spec.out][head],
+                fisher[spec.value][head],
+                fisher[spec.out][head],
+            )
+            for head in range(spec.num_heads)
+        ]
+    )
+    return qk, ov
+
+
 def head_cost_matrix(
-    graph, reference_data, target_data, state, spec: AttentionModuleSpec
+    graph, objective, reference_data, target_data, state, spec: AttentionModuleSpec
 ) -> np.ndarray:
     """Circuit-distance cost of assigning target head ``j`` to ref slot ``i``.
 
@@ -139,16 +289,21 @@ def head_cost_matrix(
         state=state,
         skip_groups=set(spec.groups),
     )
-    qk_cost = (
-        np.sum(ref_qk**2, axis=(1, 2))[:, None]
-        + np.sum(target_qk**2, axis=(1, 2))[None, :]
-        - 2.0 * np.einsum("hij,gij->hg", ref_qk, target_qk, optimize=True)
-    )
-    ov_cost = (
-        np.sum(ref_ov**2, axis=(1, 2))[:, None]
-        + np.sum(target_ov**2, axis=(1, 2))[None, :]
-        - 2.0 * np.einsum("hij,gij->hg", ref_ov, target_ov, optimize=True)
-    )
+    if isinstance(objective, DiagonalFisherObjective):
+        qk_precision, ov_precision = _mha_circuit_precisions(
+            graph, objective, reference_data, spec
+        )
+        qk_cost = _weighted_circuit_cost(ref_qk, target_qk, qk_precision)
+        ov_cost = _weighted_circuit_cost(ref_ov, target_ov, ov_precision)
+    else:
+        qk_cost = np.sum(
+            np.square(ref_qk[:, None, :, :] - target_qk[None, :, :, :]),
+            axis=(2, 3),
+        )
+        ov_cost = np.sum(
+            np.square(ref_ov[:, None, :, :] - target_ov[None, :, :, :]),
+            axis=(2, 3),
+        )
     return qk_cost + ov_cost
 
 
@@ -172,7 +327,7 @@ def update_attention_module(
 
     from .solvers import update_group_transform
 
-    cost = head_cost_matrix(graph, reference_data, target_data, state, spec)
+    cost = head_cost_matrix(graph, objective, reference_data, target_data, state, spec)
     row_ind, col_ind = linear_sum_assignment(cost)
     head_matrix = np.zeros((spec.num_heads, spec.num_heads), dtype=np.float64)
     head_matrix[row_ind, col_ind] = 1.0
@@ -295,8 +450,59 @@ def _gqa_circuits(
     return qk, ov
 
 
+def _gqa_circuit_precisions(graph, objective, reference_data, spec):
+    query = np.asarray(reference_data[spec.query])
+    key = np.asarray(reference_data[spec.key])
+    value = np.asarray(reference_data[spec.value])
+    out = np.asarray(reference_data[spec.out])
+    query_fisher = objective._weight(graph, spec.query)
+    key_fisher = objective._weight(graph, spec.key)
+    value_fisher = objective._weight(graph, spec.value)
+    out_fisher = objective._weight(graph, spec.out)
+
+    qk = np.empty(
+        (
+            spec.num_kv_groups,
+            spec.heads_per_group,
+            query.shape[0],
+            key.shape[0],
+        ),
+        dtype=np.float64,
+    )
+    ov = np.empty_like(qk)
+    # K and V are shared by every query head in a kv group.  Splitting their
+    # precision evenly makes the sum of the per-query-head diagonal circuit
+    # approximations use the original shared-factor metric.  Cross-head
+    # covariance from that sharing is deliberately omitted by the nested LAP.
+    shared_scale = float(spec.heads_per_group)
+    for group in range(spec.num_kv_groups):
+        for head in range(spec.heads_per_group):
+            qk[group, head] = _quotient_circuit_precision(
+                query[:, group, head, :],
+                key[:, group, :],
+                query_fisher[:, group, head, :],
+                key_fisher[:, group, :] / shared_scale,
+            )
+            ov[group, head] = _quotient_circuit_precision(
+                value[:, group, :],
+                out[group, head, :, :].T,
+                value_fisher[:, group, :] / shared_scale,
+                out_fisher[group, head, :, :].T,
+            )
+    return qk, ov
+
+
+def _weighted_gqa_pairwise(ref, target, precision) -> np.ndarray:
+    """Directed ``(G,R,G,R)`` distances under ref-query-head precisions."""
+
+    residual = ref[:, :, None, None, :, :] - target[None, None, :, :, :, :]
+    return np.sum(
+        precision[:, :, None, None, :, :] * np.square(residual), axis=(-2, -1)
+    )
+
+
 def gqa_head_cost_matrix(
-    graph, reference_data, target_data, state, spec: GQAModuleSpec
+    graph, objective, reference_data, target_data, state, spec: GQAModuleSpec
 ) -> tuple[np.ndarray, np.ndarray]:
     """Two-level circuit cost of assigning target kv group ``j`` to ref slot ``i``.
 
@@ -319,12 +525,18 @@ def gqa_head_cost_matrix(
 
     def _pairwise(ref, target) -> np.ndarray:
         # (G, R, d, d) x (G, R, d, d) -> (G, R, G, R) squared distances.
-        ref_sq = np.sum(ref**2, axis=(2, 3))
-        target_sq = np.sum(target**2, axis=(2, 3))
-        cross = np.einsum("irde,jsde->irjs", ref, target, optimize=True)
-        return ref_sq[:, :, None, None] + target_sq[None, None] - 2.0 * cross
+        residual = ref[:, :, None, None, :, :] - target[None, None, :, :, :, :]
+        return np.sum(np.square(residual), axis=(-2, -1))
 
-    head_cost = _pairwise(ref_qk, target_qk) + _pairwise(ref_ov, target_ov)
+    if isinstance(objective, DiagonalFisherObjective):
+        qk_precision, ov_precision = _gqa_circuit_precisions(
+            graph, objective, reference_data, spec
+        )
+        head_cost = _weighted_gqa_pairwise(
+            ref_qk, target_qk, qk_precision
+        ) + _weighted_gqa_pairwise(ref_ov, target_ov, ov_precision)
+    else:
+        head_cost = _pairwise(ref_qk, target_qk) + _pairwise(ref_ov, target_ov)
     num_groups, heads = spec.num_kv_groups, spec.heads_per_group
     cost = np.zeros((num_groups, num_groups), dtype=np.float64)
     inner = np.zeros((num_groups, num_groups, heads, heads), dtype=np.float64)
@@ -358,7 +570,9 @@ def update_gqa_attention_module(
 
     from .solvers import update_group_transform
 
-    cost, _ = gqa_head_cost_matrix(graph, reference_data, target_data, state, spec)
+    cost, _ = gqa_head_cost_matrix(
+        graph, objective, reference_data, target_data, state, spec
+    )
     row_ind, col_ind = linear_sum_assignment(cost)
     kv_matrix = np.zeros_like(cost)
     kv_matrix[row_ind, col_ind] = 1.0

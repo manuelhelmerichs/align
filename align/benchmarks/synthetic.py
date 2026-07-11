@@ -42,6 +42,7 @@ from align.symmetry import (
 
 ParamTree = Mapping[str, Any]
 ApplyFn = Callable[[ParamTree, jax.Array], jax.Array]
+ActivationFn = Callable[[ParamTree, jax.Array], Mapping[str, Mapping[str, Any]]]
 
 
 @dataclass
@@ -56,6 +57,7 @@ class SyntheticOrbitCase:
     inputs: jax.Array
     apply_fn: ApplyFn
     expected_transforms: Mapping[str, np.ndarray]
+    activation_fn: ActivationFn | None = None
     expected_residual_channel_ties: tuple[tuple[str, ...], ...] = ()
     known_optimum_distance: float | None = 0.0
 
@@ -151,7 +153,10 @@ def tree_l2_distance(left: ParamTree, right: ParamTree) -> float:
 def mlp_apply(params: ParamTree, x: jax.Array) -> jax.Array:
     """Evaluate a ReLU MLP stored with Flax Dense kernels ``(in_dim, out_dim)``."""
 
-    layers = params["params"]["fcn"]  # type: ignore[index]
+    if "params" in params:
+        layers = params["params"]["fcn"]  # type: ignore[index]
+    else:
+        layers = params["fcn"]  # type: ignore[index]
     names = sorted(layers, key=_natural_key)
     h = x
     for name in names[:-1]:
@@ -161,6 +166,37 @@ def mlp_apply(params: ParamTree, x: jax.Array) -> jax.Array:
         h = jnp.maximum(0.0, h @ w + b)
     last = layers[names[-1]]
     return h @ jnp.asarray(last["kernel"]) + jnp.asarray(last["bias"])
+
+
+def mlp_activation_samples(
+    params: ParamTree, x: jax.Array
+) -> dict[str, dict[str, Any]]:
+    """Incoming activations for every tensor in the benchmark MLP graph."""
+
+    if "params" in params:
+        layers = params["params"]["fcn"]  # type: ignore[index]
+        root = "params/fcn"
+    else:
+        layers = params["fcn"]  # type: ignore[index]
+        root = "fcn"
+    names = sorted(layers, key=_natural_key)
+    h = jnp.asarray(x)
+    samples: dict[str, dict[str, Any]] = {}
+    for index, name in enumerate(names):
+        layer = layers[name]
+        prefix = f"{root}/{name}"
+        samples[f"{prefix}/kernel"] = {
+            "input_axes": (0,),
+            "activations": h,
+        }
+        samples[f"{prefix}/bias"] = {
+            "input_axes": (),
+            "activations": None,
+        }
+        h = h @ jnp.asarray(layer["kernel"]) + jnp.asarray(layer["bias"])
+        if index < len(names) - 1:
+            h = jnp.maximum(0.0, h)
+    return samples
 
 
 def _conv1x1(x: jax.Array, kernel: jax.Array, bias: jax.Array) -> jax.Array:
@@ -1097,6 +1133,7 @@ def make_mlp_orbit_case(seed: int = 0) -> SyntheticOrbitCase:
         inputs=inputs,
         apply_fn=mlp_apply,
         expected_transforms=_inverse_permutations(forward_perms),
+        activation_fn=mlp_activation_samples,
     )
 
 
@@ -1415,6 +1452,7 @@ def run_alignment_benchmark(
         params=reference,
         apply_fn=case.apply_fn,
         inputs=case.inputs,
+        activation_fn=case.activation_fn,
     )
     aligned, transforms, diagnostics = match_sample(
         case.graph,
