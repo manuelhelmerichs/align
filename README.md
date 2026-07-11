@@ -62,6 +62,18 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
+Tests use CPU by default so the standard suite is deterministic and portable.
+On Apple Silicon, install the MPS extra and run the same suite against the GPU:
+
+```bash
+uv sync --extra dev --extra mps
+uv run pytest --jax-platform=mps
+```
+
+`ALIGN_TEST_PLATFORM=mps uv run pytest` is the equivalent environment-variable
+form. The MPS plugin is experimental, so CPU remains the CI and default test
+platform.
+
 The paper benchmarks are repository-only and are not included in the installed
 `align` package. Run their command-line harness from the repository root:
 

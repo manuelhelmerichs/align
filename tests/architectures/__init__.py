@@ -1,0 +1,1 @@
+"""Architecture recipe tests."""
