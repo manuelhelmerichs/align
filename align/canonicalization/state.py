@@ -50,7 +50,9 @@ class ScaleState:
     def validate(self, graph) -> None:
         """Validate group coverage, vector shapes, and positivity."""
 
-        if set(self.group_order) != set(graph.groups):
+        if len(self.group_order) != len(graph.groups) or set(self.group_order) != set(
+            graph.groups
+        ):
             raise ValueError(
                 "ScaleState group_order must contain exactly the graph groups."
             )

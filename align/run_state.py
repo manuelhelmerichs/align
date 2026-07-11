@@ -54,7 +54,9 @@ class ProcessedTracker:
         )
         if mode == "w+":
             self._buffer[:] = 0
-        bits = np.unpackbits(np.asarray(self._buffer))[: self.total]
+        # ``mark`` stores index 0 in the least-significant bit of each byte.
+        # Match that convention when reconstructing the persisted count.
+        bits = np.unpackbits(np.asarray(self._buffer), bitorder="little")[: self.total]
         self._count = int(bits.sum())
         self._dirty = False
 

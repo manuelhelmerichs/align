@@ -68,7 +68,7 @@ def match_sample(
         state = TransformState.identity(graph, backend=backend)
         return params, state.to_artifacts(), {"reference": True}
 
-    target_data = graph.materialize(params, backend=backend, cache=False)
+    target_data = graph.materialize(params, backend=backend, cache=True)
     state, aux_info = solver_sequence.solve(
         graph,
         reference_data,
@@ -167,7 +167,7 @@ def match_component_across(
         for reference_tensor_id in reference_subgraph.tensors
     }
     target_data = target_subgraph.materialize(
-        target_params, backend=backend, cache=False
+        target_params, backend=backend, cache=True
     )
     state, aux_info = solver_sequence.solve(
         target_subgraph,

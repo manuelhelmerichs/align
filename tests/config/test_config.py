@@ -169,6 +169,9 @@ class TestSolverStep(unittest.TestCase):
         self.assertTrue(step.record_ambiguity)
         self.assertTrue(step.to_dict()["record_ambiguity"])
 
+        lap_step = SolverStep.from_mapping({"solver": "lap", "record_ambiguity": True})
+        self.assertTrue(lap_step.to_dict()["record_ambiguity"])
+
     def test_groups_round_trip(self) -> None:
         step = SolverStep.from_mapping(
             {"solver": "lap", "groups": ["core/Conv_1"], "max_sweeps": 5}
@@ -204,6 +207,10 @@ class TestSolverStep(unittest.TestCase):
             SolverStep.from_mapping(
                 {"solver": "lap", "groups": ["g"], "components": ["b"]}
             )
+
+    def test_rejects_procrustes_ambiguity(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not defined for procrustes"):
+            SolverStep.from_mapping({"solver": "procrustes", "record_ambiguity": True})
 
 
 class TestArchitectureConfig(unittest.TestCase):

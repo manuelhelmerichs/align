@@ -297,7 +297,7 @@ class SymmetryGraph:
         metadata_order = self.metadata.get("group_order")
         if metadata_order is not None:
             ordered = tuple(str(gid) for gid in metadata_order)
-            if set(ordered) != set(self.groups):
+            if len(ordered) != len(self.groups) or set(ordered) != set(self.groups):
                 raise ValueError(
                     "metadata['group_order'] must contain exactly the graph groups."
                 )

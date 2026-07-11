@@ -82,6 +82,10 @@ class SolverStep:
             raise ValueError(
                 "A match solver step may set 'groups' or 'components', not both."
             )
+        if self.solver == "procrustes" and self.record_ambiguity:
+            raise ValueError(
+                "match.solvers.record_ambiguity is not defined for procrustes."
+            )
         for name, value in (
             ("max_sweeps", self.max_sweeps),
             ("max_steps", self.max_steps),
@@ -145,6 +149,8 @@ class SolverStep:
         payload: dict[str, Any] = {"solver": self.solver, "tolerance": self.tolerance}
         if self.solver in ("lap", "procrustes"):
             payload["max_sweeps"] = self.max_sweeps
+            if self.solver == "lap" and self.record_ambiguity:
+                payload["record_ambiguity"] = True
         elif self.solver == "sinkhorn":
             payload.update(
                 {
@@ -157,8 +163,6 @@ class SolverStep:
                     "record_ambiguity": self.record_ambiguity,
                 }
             )
-        elif self.record_ambiguity:
-            payload["record_ambiguity"] = True
         if self.groups is not None:
             payload["groups"] = list(self.groups)
         if self.components is not None:

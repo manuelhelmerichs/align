@@ -71,6 +71,38 @@ def test_run_state_progress_and_unprocess(tmp_path: Path) -> None:
     assert reloaded.processed_count() == 0
 
 
+def test_run_state_reloads_partial_bitmap_count(tmp_path: Path) -> None:
+    run_state_path = tmp_path / "output" / "state" / "run_state.json"
+    run_state = RunState(
+        path=run_state_path,
+        experiment_root=tmp_path,
+        output_dir=run_state_path.parents[1],
+        manifest_path=run_state_path.with_name("sample_manifest.json"),
+        config_digest="digest",
+        manifest_digest="manifest",
+        stages=["match"],
+        total_samples=10,
+    )
+    for sample_index in (0, 2, 8):
+        run_state.record_progress(sample_index=sample_index)
+    run_state.save()
+
+    reloaded = RunState.load(run_state_path)
+    assert reloaded.processed_count() == 3
+    assert [reloaded.is_processed(index) for index in range(10)] == [
+        True,
+        False,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        True,
+        False,
+    ]
+
+
 def test_artifact_checksum_store_rejects_layout_mismatch(tmp_path: Path) -> None:
     checksum_path = tmp_path / "artifact_checksums.npy"
     checksum_path.write_bytes(np.zeros((1, 1), dtype=np.uint64).tobytes())

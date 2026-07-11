@@ -65,6 +65,16 @@ def test_graph_group_order_uses_validated_metadata_order():
     assert graph.group_order == ("a", "b")
 
 
+def test_graph_group_order_rejects_duplicates():
+    graph = SymmetryGraph(
+        groups={"a": SymmetryGroup(id="a", size=2)},
+        tensors={},
+        metadata={"group_order": ("a", "a")},
+    )
+    with pytest.raises(ValueError, match="exactly the graph groups"):
+        graph.validate()
+
+
 def test_lap_matching_recovers_dense_permutation():
     recipe = MLPRecipe(parameter_root="params.fcn")
     reference_params = _make_params_tree()

@@ -336,7 +336,9 @@ class TransformState:
         )
 
     def validate(self, graph, *, hard: bool = False) -> None:
-        if set(self.group_order) != set(graph.groups):
+        if len(self.group_order) != len(graph.groups) or set(self.group_order) != set(
+            graph.groups
+        ):
             raise ValueError("State group_order must contain exactly the graph groups.")
         if set(self.transforms) != set(graph.groups):
             raise ValueError("State transforms must contain exactly the graph groups.")
