@@ -1,7 +1,5 @@
 """LayerNorm + MHA transformer structure, invariance, and matching tests."""
 
-from pathlib import Path
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -14,7 +12,6 @@ from align.matching import (
     match_component_across,
     match_sample,
 )
-from align.samples import load_pytree_definition
 from align.symmetry import MHACircuitConstraint
 from benchmarks import (
     layernorm_mha_transformer_apply,
@@ -23,9 +20,6 @@ from benchmarks import (
     run_alignment_benchmark,
 )
 from benchmarks.synthetic import layer_norm, mhdpa_apply
-
-DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
-BUNDLE = DATA_ROOT / "bayesmates_module_graph_samples"
 
 
 def _perm_matrix(indices) -> np.ndarray:
@@ -42,14 +36,6 @@ def _random_state(graph, seed: int) -> TransformState:
         for group_id, group in graph.groups.items()
     }
     return TransformState.from_transforms(graph, perms)
-
-
-def _load_bundle_sample(experiment: str, chain: int = 0, sample: int = 0):
-    tree_path = BUNDLE / experiment / "tree_sampling"
-    treedef = load_pytree_definition(tree_path)
-    npz = np.load(BUNDLE / experiment / "samples" / str(chain) / f"sample_{sample}.npz")
-    leaves = [jnp.asarray(npz[name]) for name in npz.files]
-    return jax.tree_util.tree_unflatten(treedef, leaves)
 
 
 # --- ViT-style synthetic tree + faithful forward -----------------------------
@@ -181,6 +167,38 @@ def vit_transformer_apply(params, images: jax.Array) -> jax.Array:
     )
 
 
+@pytest.fixture(scope="module")
+def bayesmates_gpt_params():
+    """Deterministic fixture matching the external BayesMates GPT layout."""
+
+    return make_layernorm_mha_transformer_params(
+        key=jax.random.PRNGKey(20),
+        vocab_size=23,
+        context_len=8,
+        d_model=16,
+        num_heads=2,
+        num_blocks=2,
+        ffn_dim=64,
+    )
+
+
+@pytest.fixture(scope="module")
+def bayesmates_vit_params():
+    """Deterministic fixture matching the external BayesMates ViT layout."""
+
+    return make_vit_style_params(
+        key=jax.random.PRNGKey(21),
+        image_size=16,
+        patch_size=4,
+        d_model=16,
+        num_heads=2,
+        num_blocks=2,
+        ffn_dim=32,
+        classifier_dim=16,
+        num_classes=5,
+    )
+
+
 # --- structure ---------------------------------------------------------------
 
 
@@ -227,17 +245,17 @@ class TestTransformerStructure:
         assert "core/pos_embedding" in stream_tensors
         assert "core/patch_embedding/kernel" in stream_tensors
 
-    def test_real_gpt_tiny_graph(self):
-        params = _load_bundle_sample("bayesmates_gpt_tiny")
-        graph = LayerNormMHATransformerRecipe().build_graph(params)
+    def test_bayesmates_gpt_layout(self, bayesmates_gpt_params):
+        graph = LayerNormMHATransformerRecipe().build_graph(bayesmates_gpt_params)
         assert graph.metadata["d_model"] == 16
         assert graph.groups["Block_0/attention/heads"].size == 2
         assert graph.groups["Block_0/ffn/h0"].size == 64
         assert "classifier" not in graph.components  # one layer has no junctions
 
-    def test_real_vit_tiny_graph(self):
-        params = _load_bundle_sample("bayesmates_vit_tiny")
-        graph = LayerNormMHATransformerRecipe(parameter_root="core").build_graph(params)
+    def test_bayesmates_vit_layout(self, bayesmates_vit_params):
+        graph = LayerNormMHATransformerRecipe(parameter_root="core").build_graph(
+            bayesmates_vit_params
+        )
         assert graph.metadata["d_model"] == 16
         assert graph.groups["classifier/h0"].size == 16
         assert graph.groups["Transformer_0/TransformerBlock_0/ffn/h0"].size == 32
@@ -289,26 +307,32 @@ class TestTransformerInvariance:
                 atol=1e-5,
             )
 
-    def test_real_gpt_tiny_random_state_preserves_function(self):
-        params = _load_bundle_sample("bayesmates_gpt_tiny")
-        graph = LayerNormMHATransformerRecipe().build_graph(params)
+    def test_bayesmates_gpt_layout_preserves_function(self, bayesmates_gpt_params):
+        graph = LayerNormMHATransformerRecipe().build_graph(bayesmates_gpt_params)
         tokens = jax.random.randint(jax.random.PRNGKey(6), (3, 8), 0, 23)
-        baseline = np.asarray(layernorm_mha_transformer_apply(params, tokens))
-        transformed = graph.apply_transforms(params, _random_state(graph, seed=7))
+        baseline = np.asarray(
+            layernorm_mha_transformer_apply(bayesmates_gpt_params, tokens)
+        )
+        transformed = graph.apply_transforms(
+            bayesmates_gpt_params, _random_state(graph, seed=7)
+        )
         np.testing.assert_allclose(
             np.asarray(layernorm_mha_transformer_apply(transformed, tokens)),
             baseline,
             atol=1e-4,
         )
 
-    def test_real_vit_tiny_random_state_preserves_function(self):
-        params = _load_bundle_sample("bayesmates_vit_tiny")
-        graph = LayerNormMHATransformerRecipe(parameter_root="core").build_graph(params)
+    def test_bayesmates_vit_layout_preserves_function(self, bayesmates_vit_params):
+        graph = LayerNormMHATransformerRecipe(parameter_root="core").build_graph(
+            bayesmates_vit_params
+        )
         images = jax.random.normal(
             jax.random.PRNGKey(8), (2, 16, 16, 3), dtype=jnp.float32
         )
-        baseline = np.asarray(vit_transformer_apply(params, images))
-        transformed = graph.apply_transforms(params, _random_state(graph, seed=9))
+        baseline = np.asarray(vit_transformer_apply(bayesmates_vit_params, images))
+        transformed = graph.apply_transforms(
+            bayesmates_vit_params, _random_state(graph, seed=9)
+        )
         np.testing.assert_allclose(
             np.asarray(vit_transformer_apply(transformed, images)),
             baseline,
