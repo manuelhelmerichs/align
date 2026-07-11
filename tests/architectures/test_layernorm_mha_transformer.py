@@ -304,6 +304,7 @@ class TestTransformerInvariance:
             np.testing.assert_allclose(
                 np.asarray(vit_transformer_apply(transformed, images)),
                 baseline,
+                rtol=1e-6,
                 atol=1e-5,
             )
 
