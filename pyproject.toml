@@ -42,6 +42,7 @@ include = ["align*"]
 addopts = "-ra"
 testpaths = [
     "tests",
+    "benchmarks/tests",
 ]
 filterwarnings = [
     "ignore:JAXopt is no longer maintained\\.:DeprecationWarning",
