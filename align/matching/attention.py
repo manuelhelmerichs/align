@@ -4,7 +4,7 @@ Attention symmetries form a wreath product: an inter-head permutation shared by
 q/k/v/out plus per-slot intra-head permutations (qk and vo circuits). The head
 group's generic LAP linearization is inexact once intra permutations are
 non-identity, so head matching uses QK/OV circuit costs, which are invariant to
-intra-head permutations (see the Transformer subsection in docs/theory.md).
+intra-head permutations (see wiki/Architecture-LayerNorm-MHA-Transformer.md).
 Intra groups are then updated with the generic exact LAP linearization.
 """
 
@@ -365,7 +365,7 @@ class GQAModuleSpec:
     The head symmetry is the GQA quotient: kv-group permutations (size ``G``)
     times per-group query-head permutations (size ``H/G``), the wreath
     product. The per-slot qk groups are ``rotation_pairs`` groups — RoPE
-    removes the qk permutation symmetry (see docs/theory.md) — and are
+    removes the qk permutation symmetry (see the LayerNorm MHA wiki page) — and are
     updated by the generic rotation projection, not by this structured
     update.
     """

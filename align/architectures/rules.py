@@ -312,7 +312,7 @@ class GQARoPEAttentionRule(SymmetryRule):
     kernels), one signed vo intra group per kv slot, and one qk
     ``rotation_pairs`` group per kv slot: rotary embeddings restrict the qk
     circuit symmetry to per frequency-pair scaled rotations (see the
-    RMSNorm/RoPE/GQA subsection of docs/theory.md), so the qk groups carry
+    RMSNorm/GQA/RoPE architecture wiki page), so the qk groups carry
     no permutations — solvers update them by the closed-form per-pair
     rotation projection, and the canonicalization plan balances the pair scales
     through the same bindings.

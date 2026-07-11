@@ -21,4 +21,6 @@
   - `uv run pytest`
   - `uv run ruff check .`
   - `uv run ruff format --check .`
-- Update `docs/theory.md`, `docs/developer_reference.md`, and example configs when behavior or user-facing configuration changes.
+- Update the relevant pages in the `wiki/` submodule and example configs when
+  behavior or user-facing configuration changes. Commit and push wiki changes
+  before updating the submodule pointer in this repository.

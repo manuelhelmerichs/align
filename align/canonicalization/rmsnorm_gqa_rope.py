@@ -1,7 +1,7 @@
 """RMSNorm/RoPE/GQA scale canonicalization: gamma, qk pairs, and vo circuits.
 
 Three exact diagonal symmetries coexist in the RMSNorm + RoPE + GQA family
-(derivations in the RMSNorm/RoPE/GQA subsection of docs/theory.md):
+(derivations in wiki/Architecture-RMSNorm-GQA-RoPE-Transformer.md):
 
 - **RMSNorm post-norm scale.** ``RMSNorm(x) = gamma * x / rms(x)`` depends on
   ``gamma`` only linearly, so per channel ``gamma_c -> gamma_c / s_c`` with

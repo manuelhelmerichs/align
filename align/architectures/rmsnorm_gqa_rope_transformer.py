@@ -9,7 +9,8 @@ head_dim, d_model)``. Flat ``(d, H, dk)`` layouts with query head ``i`` in kv
 group ``i // (H/G)`` reshape losslessly into this form.
 
 The symmetry model (derived in the RMSNorm/RoPE/GQA subsection of
-docs/theory.md) differs from the LayerNorm/GPT family in three ways:
+wiki/Architecture-RMSNorm-GQA-RoPE-Transformer.md) differs from the
+LayerNorm/GPT family in three ways:
 
 - the RMSNorm residual stream carries a full orthogonal symmetry: the stream
   group declares ``signed_permutation`` by default (``orthogonal`` via

@@ -787,7 +787,7 @@ def run_posterior_benchmark(
     ``1/sqrt(n_samples)``. Objectives with ``calibration`` kwargs re-resolve
     at each pass's reference (the metric lives at the matching base point).
     Past the matching breakdown point refinement can hurt (see
-    ``docs/theory.md``); pass ``barycenter_passes=1`` there.
+    ``wiki/Matching-objectives-and-solvers.md``); pass ``barycenter_passes=1`` there.
     """
 
     if barycenter_passes < 1:
