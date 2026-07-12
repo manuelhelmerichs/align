@@ -305,15 +305,10 @@ class SinkhornSolver:
             return cached
 
         tensor_ids = tuple(graph.tensors)
-        all_group_ids = graph.group_order
         template = TransformState.identity(graph, backend="jax")
         optimizer = optax.adam(self.step.learning_rate)
 
-        def pack(logit_tuple, base_matrices):
-            matrices = {
-                group_id: matrix
-                for group_id, matrix in zip(all_group_ids, base_matrices, strict=True)
-            }
+        def pack(logit_tuple):
             projected = tuple(
                 sinkhorn_operator(
                     logit,
@@ -322,37 +317,29 @@ class SinkhornSolver:
                 )
                 for logit in logit_tuple
             )
-            matrices.update(
-                {gid: matrix for gid, matrix in zip(groups, projected, strict=True)}
-            )
+            matrices = {
+                gid: matrix for gid, matrix in zip(groups, projected, strict=True)
+            }
             return template.with_relaxation({}, matrices), projected
 
-        def losses_for(logit_tuple, base_matrices, reference_values, target_values):
-            soft_state, projected = pack(logit_tuple, base_matrices)
+        def loss_for_one(logit_tuple, reference_values, target_values):
+            soft_state, projected = pack(logit_tuple)
             reference = dict(zip(tensor_ids, reference_values, strict=True))
             target = dict(zip(tensor_ids, target_values, strict=True))
-            losses = jnp.ravel(
+            loss = jnp.ravel(
                 jnp.asarray(self.objective.value(graph, reference, target, soft_state))
-            )
-            return losses, projected
+            )[0]
+            return loss, projected
 
-        def summed_loss(logit_tuple, base_matrices, reference_values, target_values):
-            losses, _ = losses_for(
-                logit_tuple, base_matrices, reference_values, target_values
-            )
-            return jnp.sum(losses), losses
+        value_and_grad = jax.value_and_grad(loss_for_one, has_aux=True)
 
-        value_and_grad = jax.value_and_grad(summed_loss, has_aux=True)
-
-        def run(logit_tuple, base_matrices, reference_values, target_values):
+        def run_one(logit_tuple, reference_values, target_values):
             opt_state = optimizer.init(logit_tuple)
-            initial_losses, _ = losses_for(
-                logit_tuple, base_matrices, reference_values, target_values
-            )
+            initial_loss, _ = loss_for_one(logit_tuple, reference_values, target_values)
             history = jnp.full(
-                (self.step.max_steps, initial_losses.shape[0]),
+                (self.step.max_steps if self.step.record_loss_history else 0,),
                 jnp.nan,
-                dtype=initial_losses.dtype,
+                dtype=initial_loss.dtype,
             )
 
             def cond(loop_state):
@@ -362,26 +349,26 @@ class SinkhornSolver:
                 )
 
             def body(loop_state):
-                step_index, current, current_opt, previous_losses, _, loss_history = (
+                step_index, current, current_opt, previous_loss, _, loss_history = (
                     loop_state
                 )
-                (_, losses), grads = value_and_grad(
-                    current, base_matrices, reference_values, target_values
+                (loss, _), grads = value_and_grad(
+                    current, reference_values, target_values
                 )
                 updates, next_opt = optimizer.update(grads, current_opt, current)
                 next_logits = optax.apply_updates(current, updates)
                 delta = jnp.where(
                     step_index == 0,
-                    jnp.asarray(jnp.inf, dtype=losses.dtype),
-                    jnp.max(jnp.abs(losses - previous_losses)),
+                    jnp.asarray(jnp.inf, dtype=loss.dtype),
+                    jnp.abs(loss - previous_loss),
                 )
                 if self.step.record_loss_history:
-                    loss_history = loss_history.at[step_index].set(losses)
+                    loss_history = loss_history.at[step_index].set(loss)
                 return (
                     step_index + 1,
                     next_logits,
                     next_opt,
-                    losses,
+                    loss,
                     delta,
                     loss_history,
                 )
@@ -393,16 +380,27 @@ class SinkhornSolver:
                     jnp.asarray(0, dtype=jnp.int32),
                     logit_tuple,
                     opt_state,
-                    initial_losses,
-                    jnp.asarray(jnp.inf, dtype=initial_losses.dtype),
+                    initial_loss,
+                    jnp.asarray(jnp.inf, dtype=initial_loss.dtype),
                     history,
                 ),
             )
             steps, final_logits, _, _, _, history = loop_state
-            final_losses, projected = losses_for(
-                final_logits, base_matrices, reference_values, target_values
+            final_loss, projected = loss_for_one(
+                final_logits, reference_values, target_values
             )
-            return final_logits, projected, steps, initial_losses, final_losses, history
+            return projected, steps, initial_loss, final_loss, history
+
+        # Each mapped invocation owns a scalar loop predicate and a distinct Adam
+        # state. JAX's batching rule executes them together while masking every
+        # state leaf after that record's predicate becomes false. This preserves
+        # batching without allowing a difficult neighbor to keep updating a
+        # converged record.
+        run = jax.vmap(
+            run_one,
+            in_axes=(0, None, 0),
+            out_axes=(0, 0, 0, 0, 0),
+        )
 
         compiled = jax.jit(run)
         self._compiled_loops[signature] = compiled
@@ -437,40 +435,52 @@ class SinkhornSolver:
         )
         groups = self._groups(graph)
         logit_tuple = tuple(logits[gid] for gid in groups)
-        base_matrices = tuple(
-            jnp.asarray(state.matrix(group_id, dtype=jnp.float32))
-            for group_id in graph.group_order
-        )
         reference_values = tuple(
             jnp.asarray(reference_data[key]) for key in graph.tensors
         )
-        target_values = tuple(jnp.asarray(target_data[key]) for key in graph.tensors)
+        target_values = []
+        for key, spec in graph.tensors.items():
+            value = jnp.asarray(target_data[key])
+            if value.ndim == len(spec.shape):
+                value = value[None, ...]
+            target_values.append(value)
+        target_values = tuple(target_values)
         loop = self._compiled_loop(graph, groups)
-        final_tuple, projected_tuple, steps, initial, final, history = loop(
-            logit_tuple, base_matrices, reference_values, target_values
+        projected_tuple, steps, initial, final, history = loop(
+            logit_tuple, reference_values, target_values
+        )
+        projected_tuple, steps, initial, final, history = jax.device_get(
+            (projected_tuple, steps, initial, final, history)
         )
         projected = {
             gid: matrix for gid, matrix in zip(groups, projected_tuple, strict=True)
         }
-        final_logits = {
-            gid: value for gid, value in zip(groups, final_tuple, strict=True)
-        }
-        relaxed = state.with_relaxation(final_logits, projected)
+        relaxed = state.with_relaxation({}, projected)
         output_state = relaxed.harden(groups=groups)
-        steps_taken = int(np.asarray(steps))
+        steps_taken = np.asarray(steps, dtype=np.int32)
+        converged = steps_taken < self.step.max_steps
         initial_losses = np.asarray(initial).tolist()
         final_losses = np.asarray(final).tolist()
         aux: dict[str, Any] = {
             "solver": "sinkhorn",
-            "steps": steps_taken,
-            "converged": steps_taken < self.step.max_steps,
+            "steps": (
+                int(steps_taken[0])
+                if batch_size == 1
+                else steps_taken.astype(int).tolist()
+            ),
+            "converged": (
+                bool(converged[0]) if batch_size == 1 else converged.tolist()
+            ),
             "loss_initial": [float(value) for value in initial_losses],
             "loss_final": [float(value) for value in final_losses],
             "hardening_method": "hungarian",
         }
         if self.step.record_loss_history:
-            history_values = np.asarray(history)[:steps_taken]
-            aux["loss_history"] = history_values.T.tolist()
+            history_values = np.asarray(history)
+            aux["loss_history"] = [
+                history_values[index, : int(step_count)].tolist()
+                for index, step_count in enumerate(steps_taken)
+            ]
         if self.step.record_ambiguity:
             aux["ambiguity"] = _transport_ambiguity(projected, batch_size)
         return output_state, aux

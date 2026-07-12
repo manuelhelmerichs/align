@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import queue
 import shutil
 import threading
@@ -10,9 +11,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..run_state import file_checksum
 from ..sample_manifest import SampleManifest, SampleRecord
-from .artifacts import write_scales_artifact, write_transforms_artifact
+from .artifacts import (
+    write_scales_artifact_with_checksum,
+    write_transforms_artifact_with_checksum,
+)
 from .pipeline import SampleAlignmentResult, StagePipeline
 
 if TYPE_CHECKING:
@@ -53,25 +56,29 @@ class _ArtifactWriter:
         checksums: dict[str, int] = {}
 
         aligned_path = sample_dir / "aligned_sample.npz"
-        self.sample_codec.save(aligned_path, final_sample)
+        aligned_checksum = self.sample_codec.save(aligned_path, final_sample)
         artifacts["aligned_sample_path"] = str(aligned_path)
-        checksums["aligned_sample"] = file_checksum(aligned_path)
+        checksums["aligned_sample"] = aligned_checksum
 
         transform_path = None
         if transforms is not None:
-            transform_path = write_transforms_artifact(
-                sample_dir / "transforms.npz",
-                transforms,
-                transform_families=transform_families,
+            transform_path, transform_checksum = (
+                write_transforms_artifact_with_checksum(
+                    sample_dir / "transforms.npz",
+                    transforms,
+                    transform_families=transform_families,
+                )
             )
         artifacts["transforms_path"] = str(transform_path) if transform_path else None
-        checksums["transforms"] = file_checksum(transform_path) if transform_path else 0
+        checksums["transforms"] = transform_checksum if transform_path else 0
 
         scale_path = None
         if scales is not None:
-            scale_path = write_scales_artifact(sample_dir / "scales.npz", scales)
+            scale_path, scale_checksum = write_scales_artifact_with_checksum(
+                sample_dir / "scales.npz", scales
+            )
         artifacts["scales_path"] = str(scale_path) if scale_path else None
-        checksums["scales"] = file_checksum(scale_path) if scale_path else 0
+        checksums["scales"] = scale_checksum if scale_path else 0
 
         outputs = dict(stage_outputs or {})
         for stage in self.stage_output_stages:
@@ -79,9 +86,9 @@ class _ArtifactWriter:
             stage_path = None
             if stage in outputs:
                 stage_path = sample_dir / f"{kind}.npz"
-                self.sample_codec.save(stage_path, outputs[stage])
+                checksums[kind] = self.sample_codec.save(stage_path, outputs[stage])
             artifacts[f"{kind}_path"] = str(stage_path) if stage_path else None
-            checksums[kind] = file_checksum(stage_path) if stage_path else 0
+            checksums.setdefault(kind, 0)
 
         return artifacts, checksums
 
@@ -155,7 +162,6 @@ class _WorkerLoop:
             target=self._heartbeat_loop, daemon=True
         )
         self._heartbeat_thread.start()
-        self._seq = 0
 
     def run(self) -> None:
         try:
@@ -268,16 +274,13 @@ class _WorkerLoop:
         block: bool = True,
         timeout: float | None = None,
     ) -> None:
-        self._seq += 1
-        payload.update(
-            {
-                "worker_id": self.worker_id,
-                "generation": self.generation,
-                "seq": self._seq,
-            }
-        )
+        message = {
+            **payload,
+            "worker_id": self.worker_id,
+            "generation": self.generation,
+        }
         try:
-            self.progress_queue.put(payload, block=block, timeout=timeout)
+            self.progress_queue.put(message, block=block, timeout=timeout)
         except queue.Full:
             if block:
                 raise
@@ -329,6 +332,14 @@ def _build_stage_executors(
 
 def run_worker(job: dict[str, Any], command_queue, progress_queue) -> None:
     manifest = SampleManifest.load(Path(job["manifest_path"]))
+    input_samples_dir = job.get("input_samples_dir")
+    if input_samples_dir:
+        input_dir = Path(input_samples_dir)
+        manifest = dataclasses.replace(
+            manifest,
+            samples_dir=input_dir,
+            tree_path=input_dir / "tree",
+        )
 
     from .loaders import SampleLoader  # Imported after device visibility is set
 

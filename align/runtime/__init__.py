@@ -8,6 +8,7 @@ from typing import Any
 _PUBLIC_API = {
     "AlignmentRunner": "align.runtime.runner",
     "PrefetchingLoader": "align.runtime.loaders",
+    "PreparedRun": "align.runtime.preflight",
     "RunArtifactStore": "align.runtime.artifacts",
     "RunState": "align.run_state",
     "SampleLoader": "align.runtime.loaders",
@@ -15,6 +16,7 @@ _PUBLIC_API = {
     "SampleRecord": "align.sample_manifest",
     "compute_config_digest": "align.run_state",
     "reference_stability_diagnostic": "align.runtime.diagnostics",
+    "prepare_run": "align.runtime.preflight",
 }
 
 __all__ = sorted(_PUBLIC_API)

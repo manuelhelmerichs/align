@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.tree_util import DictKey, GetAttrKey, SequenceKey
 
+from .run_state import write_npz_compressed
 from .sample_formats import DEFAULT_SAMPLE_FORMAT, normalize_sample_format
 
 type ParamTree = Any
@@ -61,8 +62,8 @@ class WeightSampleCodec(Protocol):
     def load(self, path: str | Path) -> WeightSample:
         """Decode one sample artifact."""
 
-    def save(self, path: str | Path, sample: WeightSample) -> None:
-        """Encode one sample artifact."""
+    def save(self, path: str | Path, sample: WeightSample) -> int:
+        """Encode one sample artifact and return its content checksum."""
 
     def copy_structure(self, target_dir: str | Path, *, artifact_name: str) -> Path:
         """Copy any shared structure file required to reload saved samples."""
@@ -129,7 +130,7 @@ class PyTreeNpzCodec:
             },
         )
 
-    def save(self, path: str | Path, sample: WeightSample) -> None:
+    def save(self, path: str | Path, sample: WeightSample) -> int:
         sample_path = Path(path)
         sample_path.parent.mkdir(parents=True, exist_ok=True)
         names, leaves, _ = tree_leaves_with_names(sample.params)
@@ -137,7 +138,7 @@ class PyTreeNpzCodec:
             name or f"leaf_{idx}": np.asarray(leaf)
             for idx, (name, leaf) in enumerate(zip(names, leaves, strict=True))
         }
-        np.savez_compressed(sample_path, **arrays)
+        return write_npz_compressed(sample_path, arrays)
 
     def copy_structure(self, target_dir: str | Path, *, artifact_name: str) -> Path:
         target = Path(target_dir)

@@ -43,13 +43,17 @@ class StageExecutor(ABC):
     def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
         """Run this stage for a single sample."""
 
-    @abstractmethod
     def process_batch(
         self,
         records: Sequence[SampleRecord],
         samples: Sequence[WeightSample],
     ) -> list[StageResult]:
-        """Run this stage for a batch of samples."""
+        """Run this stage sequentially; batch-aware stages override this."""
+
+        return [
+            self.process_single(record, sample)
+            for record, sample in zip(records, samples, strict=True)
+        ]
 
     @property
     @abstractmethod
@@ -190,6 +194,7 @@ class CanonicalizeExecutor(StageExecutor):
         self.recipe = get_recipe(self.family, **self.recipe_kwargs)
         self.graph = self.recipe.build_graph(reference_sample.params)
         self.canonicalizer = ScaleCanonicalizer()
+        self.canonicalizer.prepare(self.graph, strategy=self.config.strategy)
 
     def process_single(self, record: SampleRecord, sample: WeightSample) -> StageResult:
         if self.recipe is None or self.graph is None or self.canonicalizer is None:
@@ -205,16 +210,6 @@ class CanonicalizeExecutor(StageExecutor):
             scales=scales,
             diagnostics=dict(diagnostics or {}),
         )
-
-    def process_batch(
-        self,
-        records: Sequence[SampleRecord],
-        samples: Sequence[WeightSample],
-    ) -> list[StageResult]:
-        return [
-            self.process_single(record, sample)
-            for record, sample in zip(records, samples, strict=True)
-        ]
 
     @property
     def supports_batching(self) -> bool:
@@ -265,16 +260,6 @@ class CenterSoftmaxHeadExecutor(StageExecutor):
             diagnostics=diagnostics,
         )
 
-    def process_batch(
-        self,
-        records: Sequence[SampleRecord],
-        samples: Sequence[WeightSample],
-    ) -> list[StageResult]:
-        return [
-            self.process_single(record, sample)
-            for record, sample in zip(records, samples, strict=True)
-        ]
-
     @property
     def supports_batching(self) -> bool:
         return False
@@ -324,11 +309,32 @@ class MatchExecutor(StageExecutor):
             objective_kwargs=self.config.objective.kwargs,
             schedule=self.config.solvers,
         )
+        self.solver_sequence.objective.validate_graph(self.graph)
         self.solver_sequence.validate_graph(self.graph)
         backend = self.solver_sequence.backend
         self.reference_backend = backend
         self.reference_data = self.graph.materialize(
             reference_sample.params, backend=backend, cache=True
+        )
+
+    def retarget(
+        self,
+        reference_sample: WeightSample,
+        *,
+        reference_index: int | None,
+        rng_offset: int,
+    ) -> None:
+        """Reuse the validated graph/objective/solver with a new barycenter."""
+
+        if self.graph is None or self.solver_sequence is None:
+            raise RuntimeError("MatchExecutor not prepared.")
+        self.reference_sample = reference_sample
+        self.reference_index = reference_index
+        self.rng_offset = int(rng_offset)
+        self.reference_data = self.graph.materialize(
+            reference_sample.params,
+            backend=self.reference_backend,
+            cache=True,
         )
 
     def _rng_for_record(self, record: SampleRecord) -> jax.Array | None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import tempfile
@@ -38,6 +39,51 @@ def file_checksum(path: Path) -> int:
         while chunk := handle.read(_CHECKSUM_CHUNK_SIZE):
             digest.update(chunk)
     return int.from_bytes(digest.digest()[:8], "big")
+
+
+class _HashingWriter:
+    """Sequential binary writer that hashes exactly the bytes being persisted."""
+
+    def __init__(self, handle) -> None:
+        self._handle = handle
+        self._digest = hashlib.sha256()
+        self._position = 0
+
+    def write(self, data: bytes) -> int:
+        written = self._handle.write(data)
+        chunk = data[:written]
+        self._digest.update(chunk)
+        self._position += written
+        return written
+
+    def read(self, _size: int = -1) -> bytes:
+        # NumPy recognizes file-like objects by the presence of ``read``;
+        # ZipFile never reads its output stream in write mode.
+        raise io.UnsupportedOperation("write-only checksum stream")
+
+    def tell(self) -> int:
+        return self._position
+
+    def flush(self) -> None:
+        self._handle.flush()
+
+    def seekable(self) -> bool:
+        return False
+
+    def checksum(self) -> int:
+        return int.from_bytes(self._digest.digest()[:8], "big")
+
+
+def write_npz_compressed(path: Path, arrays: Mapping[str, Any]) -> int:
+    """Write an NPZ and return its checksum without rereading the file."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as raw:
+        writer = _HashingWriter(raw)
+        np.savez_compressed(writer, **arrays)
+        writer.flush()
+        return writer.checksum()
 
 
 class ProcessedTracker:

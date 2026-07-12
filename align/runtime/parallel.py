@@ -19,9 +19,12 @@ _LOG = logging.getLogger(__name__)
 
 def worker_process_main(job: dict[str, object], command_queue, progress_queue) -> None:
     device_id = job.get("device_id")
-    if device_id is not None:
+    device_type = str(job.get("device_type") or "cpu")
+    if device_id is not None and device_type in {"cuda", "gpu", "rocm"}:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(device_id)
         os.environ["JAX_VISIBLE_DEVICES"] = "0"
+    if device_type == "mps" and job.get("mps_async_dispatch") is not None:
+        os.environ["JAX_MPS_ASYNC_DISPATCH"] = "1" if job["mps_async_dispatch"] else "0"
     worker_threads = str(int(job.get("worker_threads") or 1))
     for variable in (
         "OMP_NUM_THREADS",
@@ -94,12 +97,23 @@ class WorkerPool:
             return []
 
         if self.strategy_prefers_gpu:
-            base = self.device_ids or self._visible_gpu_ids()
+            visible = self._visible_gpu_devices()
+            if self.device_ids:
+                requested_ids = set(self.device_ids)
+                base = [device for device in visible if device[0] in requested_ids]
+                known_ids = {device[0] for device in base}
+                base.extend(
+                    (device_id, "gpu")
+                    for device_id in self.device_ids
+                    if device_id not in known_ids
+                )
+            else:
+                base = visible
         else:
-            base = [None]
+            base = [(None, "cpu")]
 
         if not base:
-            base = [None]
+            base = [(None, "cpu")]
         elif (
             self.strategy_prefers_gpu
             and count > len(base)
@@ -113,8 +127,7 @@ class WorkerPool:
 
         plan: list[WorkerConfig] = []
         for idx in range(count):
-            device_id = base[idx % len(base)]
-            device_type = "gpu" if device_id is not None else "cpu"
+            device_id, device_type = base[idx % len(base)]
             plan.append(
                 WorkerConfig(
                     worker_id=idx, device_id=device_id, device_type=device_type
@@ -230,12 +243,12 @@ class WorkerPool:
         return self._progress_queue
 
     @staticmethod
-    def _visible_gpu_ids() -> list[int]:
+    def _visible_gpu_devices() -> list[tuple[int, str]]:
         try:
             import jax
 
             return [
-                int(device.id)
+                (int(device.id), str(device.platform))
                 for device in jax.devices()
                 if is_gpu_platform(device.platform)
             ]

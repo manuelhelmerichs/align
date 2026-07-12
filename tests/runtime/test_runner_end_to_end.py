@@ -86,15 +86,26 @@ def _perm_matrix(indices: np.ndarray) -> np.ndarray:
     return mat
 
 
-def _residual_convnet_residual_topology() -> dict[str, list[dict[str, object]]]:
+def _residual_convnet_residual_topology() -> dict[str, object]:
     return {
+        "schema": "align.residual_module_graph",
+        "version": 1,
         "nodes": [
-            {
-                "name": "residual_add",
-                "type": "add",
-                "inputs": ["core/Conv_0", "core/Conv_2"],
-            }
-        ]
+            {"id": "input", "kind": "input"},
+            {"id": "core/Conv_0", "kind": "conv"},
+            {"id": "core/Conv_1", "kind": "conv"},
+            {"id": "core/Conv_2", "kind": "conv"},
+            {"id": "residual_add", "kind": "add"},
+            {"id": "core/Dense_0", "kind": "dense"},
+        ],
+        "edges": [
+            {"source": "input", "target": "core/Conv_0"},
+            {"source": "core/Conv_0", "target": "core/Conv_1"},
+            {"source": "core/Conv_1", "target": "core/Conv_2"},
+            {"source": "core/Conv_0", "target": "residual_add"},
+            {"source": "core/Conv_2", "target": "residual_add"},
+            {"source": "residual_add", "target": "core/Dense_0"},
+        ],
     }
 
 
@@ -329,7 +340,9 @@ def _run_align(
         architecture=ArchitectureConfig(family=_FAMILY_BY_SCENARIO[architecture]),
         selection=selection,
         pipeline=pipeline,
-        canonicalize=CanonicalizeConfig() if canonicalize_stage else None,
+        canonicalize=(
+            CanonicalizeConfig(activation="relu") if canonicalize_stage else None
+        ),
         match=MatchConfig(solvers=solvers),
         runtime=RuntimeConfig(
             parallelism=1, save_intermediate=False, validate_artifacts_on_resume=False

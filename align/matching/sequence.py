@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from ..symmetry import materialize_many
@@ -92,7 +93,20 @@ class SolverSequence:
 
     @property
     def backend(self) -> str:
-        return "jax" if self.prefers_gpu else "numpy"
+        return "jax" if self.steps[0].solver == "sinkhorn" else "numpy"
+
+    @property
+    def backend_phases(self) -> tuple[tuple[str, tuple[int, ...]], ...]:
+        """Consecutive host/device phases and their schedule step indices."""
+
+        phases: list[tuple[str, list[int]]] = []
+        for index, step in enumerate(self.steps):
+            backend = "device" if step.solver == "sinkhorn" else "host"
+            if not phases or phases[-1][0] != backend:
+                phases.append((backend, [index]))
+            else:
+                phases[-1][1].append(index)
+        return tuple((backend, tuple(indices)) for backend, indices in phases)
 
     def validate_graph(self, graph) -> None:
         """Validate objective/solver/group compatibility before any execution."""
@@ -148,12 +162,20 @@ class SolverSequence:
         rng_keys=None,
     ) -> tuple[TransformState, dict[str, Any]]:
         self.validate_graph(graph)
+        self.objective.set_reference_data(reference_data)
         state = initial_state or TransformState.identity(
             graph, backend="jax" if self.prefers_gpu else "numpy"
         )
         _check_permute_only_folded(graph, reference_data, target_data)
+        current_backend = self.backend
         aux_steps: list[dict[str, Any]] = []
         for index, step in enumerate(self.steps):
+            required_backend = "jax" if step.solver == "sinkhorn" else "numpy"
+            if required_backend != current_backend:
+                reference_data, target_data = _transfer_phase_data(
+                    reference_data, target_data, backend=required_backend
+                )
+                current_backend = required_backend
             if step.solver == "lap":
                 state, aux = self._run_lap_step(
                     graph, reference_data, target_data, state, step
@@ -184,16 +206,23 @@ class SolverSequence:
                     rng_keys=per_record_step_keys,
                 )
                 state = _unbatch_state(state, sample_index=0)
+                aux = _sinkhorn_record_aux(aux, sample_index=0, batch_size=1)
             else:  # pragma: no cover - guarded in __init__
                 raise ValueError(step.solver)
             aux_steps.append({"index": index, **aux})
 
-        values = self.objective.value(graph, reference_data, target_data, state)
+        if current_backend == "numpy":
+            final_value = self.objective.value_hard_numpy(
+                graph, reference_data, target_data, state
+            )
+        else:
+            values = self.objective.value(graph, reference_data, target_data, state)
+            final_value = float(np.ravel(np.asarray(values))[0])
         aux_payload = {
             "objective": getattr(self.objective, "name", type(self.objective).__name__),
             "solvers": [step.to_dict() for step in self.steps],
             "steps": aux_steps,
-            "objective_final": float(np.ravel(np.asarray(values))[0]),
+            "objective_final": final_value,
         }
         state.validate(graph, hard=True)
         return state, aux_payload
@@ -211,6 +240,7 @@ class SolverSequence:
         if not target_params_batch:
             return [], []
         self.validate_graph(graph)
+        self.objective.set_reference_data(reference_data)
         if not self.supports_batching:
             results: list[TransformState] = []
             aux_payload: list[dict[str, Any]] = []
@@ -269,17 +299,9 @@ class SolverSequence:
         for sample_idx in range(batch_size):
             sample_steps = []
             for step_aux in aux_steps:
-                sample_aux = dict(step_aux)
-                for key in ("loss_initial", "loss_final", "loss_history"):
-                    value = sample_aux.get(key)
-                    if isinstance(value, list) and len(value) == batch_size:
-                        sample_aux[key] = value[sample_idx]
-                ambiguity = sample_aux.get("ambiguity")
-                if isinstance(ambiguity, dict):
-                    sample_aux["ambiguity"] = {
-                        group_id: group_values[sample_idx]
-                        for group_id, group_values in ambiguity.items()
-                    }
+                sample_aux = _sinkhorn_record_aux(
+                    step_aux, sample_index=sample_idx, batch_size=batch_size
+                )
                 sample_steps.append(sample_aux)
             aux_batch.append(
                 {
@@ -446,6 +468,50 @@ def _unbatch_state(state: TransformState, *, sample_index: int) -> TransformStat
         transforms=transforms,
         logits=None,
         metadata=dict(state.metadata),
+        _graph=state._graph,
+    )
+
+
+def _sinkhorn_record_aux(
+    aux: Mapping[str, Any], *, sample_index: int, batch_size: int
+) -> dict[str, Any]:
+    """Extract one record's diagnostics from a batched Sinkhorn payload."""
+
+    result = dict(aux)
+    for key in ("loss_initial", "loss_final", "loss_history"):
+        value = result.get(key)
+        if isinstance(value, list) and len(value) == batch_size:
+            result[key] = value[sample_index]
+    for key in ("steps", "converged"):
+        value = result.get(key)
+        if isinstance(value, list):
+            result[key] = value[sample_index]
+    ambiguity = result.get("ambiguity")
+    if isinstance(ambiguity, dict):
+        result["ambiguity"] = {
+            group_id: group_values[sample_index]
+            for group_id, group_values in ambiguity.items()
+        }
+    return result
+
+
+def _transfer_phase_data(reference_data, target_data, *, backend: str):
+    """Move complete tensor mappings once at a schedule backend boundary."""
+
+    packed = (
+        {key: reference_data[key] for key in reference_data},
+        {key: target_data[key] for key in target_data},
+    )
+    if backend == "numpy":
+        reference, target = jax.device_get(packed)
+        return (
+            {key: np.asarray(value) for key, value in reference.items()},
+            {key: np.asarray(value) for key, value in target.items()},
+        )
+    reference, target = jax.device_put(packed)
+    return (
+        {key: jnp.asarray(value) for key, value in reference.items()},
+        {key: jnp.asarray(value) for key, value in target.items()},
     )
 
 

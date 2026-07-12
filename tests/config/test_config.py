@@ -43,7 +43,7 @@ class TestCanonicalizeConfig(unittest.TestCase):
         self.assertIsInstance(config.epsilon, float)
         self.assertIsInstance(config.degenerate_channels, str)
         self.assertIsInstance(config.include_bias_in_norm, bool)
-        self.assertIsInstance(config.activation, str)
+        self.assertIsNone(config.activation)
 
     def test_invalid_strategy_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown canonicalize.strategy"):
@@ -84,8 +84,8 @@ class TestCanonicalizeConfig(unittest.TestCase):
 
 class TestObjectiveConfig(unittest.TestCase):
     def test_string_shorthand(self) -> None:
-        config = ObjectiveConfig.from_mapping("diagonal_fisher")
-        self.assertEqual(config.type, "diagonal_fisher")
+        config = ObjectiveConfig.from_mapping("euclidean")
+        self.assertEqual(config.type, "euclidean")
 
     def test_mapping_with_weights_path(self) -> None:
         config = ObjectiveConfig.from_mapping(
@@ -102,6 +102,29 @@ class TestObjectiveConfig(unittest.TestCase):
     def test_unknown_type_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown match.objective.type"):
             ObjectiveConfig(type="cosine")
+
+    def test_inline_and_file_contents_change_resume_identity(self) -> None:
+        left = ObjectiveConfig(
+            type="diagonal_fisher", tensor_weights={"w": [1.0, 2.0]}
+        ).as_dict()
+        right = ObjectiveConfig(
+            type="diagonal_fisher", tensor_weights={"w": [1.0, 3.0]}
+        ).as_dict()
+        self.assertNotEqual(
+            left["tensor_weights_sha256"], right["tensor_weights_sha256"]
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "weights.npz"
+            path.write_bytes(b"first")
+            first = ObjectiveConfig(
+                type="diagonal_fisher", weights_path=str(path)
+            ).as_dict()
+            path.write_bytes(b"second")
+            second = ObjectiveConfig(
+                type="diagonal_fisher", weights_path=str(path)
+            ).as_dict()
+        self.assertNotEqual(first["weights_sha256"], second["weights_sha256"])
 
 
 class TestMatchConfig(unittest.TestCase):
@@ -126,7 +149,10 @@ class TestMatchConfig(unittest.TestCase):
     def test_solvers_round_trip(self) -> None:
         config = MatchConfig.from_mapping(
             {
-                "objective": {"type": "diagonal_fisher"},
+                "objective": {
+                    "type": "diagonal_fisher",
+                    "tensor_weights": {"w": [1.0]},
+                },
                 "solvers": [{"solver": "lap", "max_sweeps": 5}],
             }
         )

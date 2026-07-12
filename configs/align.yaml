@@ -66,6 +66,8 @@ match:
     #   tolerance: 0.0
 
 runtime:
+  # Optional experimental Apple MPS dispatch policy; omit to inherit the plugin default.
+  mps_async_dispatch: null
   resume: false            # Reuse manifests/outputs inside output_dir and continue unfinished runs.
   dry_run: false           # Build manifests, validate configuration, and exit without aligning samples.
   list_samples: false      # Emit the manifest ordering to stdout and exit (debugging aid).

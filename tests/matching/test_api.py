@@ -75,6 +75,13 @@ def test_graph_group_order_rejects_duplicates():
         graph.validate()
 
 
+def test_transform_state_mapping_is_immutable():
+    graph = MLPRecipe(parameter_root="params.fcn").build_graph(_make_params_tree())
+    state = TransformState.identity(graph, backend="numpy")
+    with pytest.raises(TypeError):
+        state.transforms["mlp/h0"] = np.eye(2)
+
+
 def test_lap_matching_recovers_dense_permutation():
     recipe = MLPRecipe(parameter_root="params.fcn")
     reference_params = _make_params_tree()
@@ -220,6 +227,83 @@ def test_sinkhorn_batch_rng_is_invariant_to_batch_order():
         )
 
 
+def test_sinkhorn_stopping_is_invariant_to_chunk_membership():
+    def random_params(seed: int):
+        rng = np.random.default_rng(seed)
+        layers = {}
+        for index, (din, dout) in enumerate(((3, 5), (5, 5), (5, 2))):
+            layers[f"layer{index}"] = {
+                "kernel": jnp.asarray(rng.normal(size=(din, dout)), dtype=jnp.float32),
+                "bias": jnp.asarray(rng.normal(size=(dout,)), dtype=jnp.float32),
+            }
+        return {"params": {"fcn": layers}}
+
+    reference = random_params(0)
+    targets = [random_params(seed) for seed in range(1, 5)]
+    keys = [jax.random.PRNGKey(seed) for seed in (11, 22, 33, 44)]
+    graph = MLPRecipe(parameter_root="params.fcn").build_graph(reference)
+    sequence = build_solver_sequence(
+        schedule=[
+            SolverStep(
+                solver="sinkhorn",
+                max_steps=40,
+                tolerance=0.2,
+                sinkhorn_iterations=20,
+                init_scale=0.15,
+            )
+        ]
+    )
+    singles = [
+        match_sample(
+            graph,
+            reference,
+            target,
+            solver_sequence=sequence,
+            rng_key=key,
+        )
+        for target, key in zip(targets, keys, strict=True)
+    ]
+
+    for order, chunks in (
+        ((0, 1, 2, 3), (2, 2)),
+        ((2, 0, 3, 1), (3, 1)),
+    ):
+        offset = 0
+        observed = {}
+        for chunk_size in chunks:
+            indices = order[offset : offset + chunk_size]
+            offset += chunk_size
+            batch = match_batch(
+                graph,
+                reference,
+                [targets[index] for index in indices],
+                solver_sequence=sequence,
+                rng_keys=jnp.stack([keys[index] for index in indices]),
+            )
+            observed.update(zip(indices, batch, strict=True))
+
+        for index, expected in enumerate(singles):
+            actual = observed[index]
+            for group_id in graph.group_order:
+                np.testing.assert_array_equal(
+                    actual[1][group_id], expected[1][group_id]
+                )
+            for actual_leaf, expected_leaf in zip(
+                _flatten_tree(actual[0]), _flatten_tree(expected[0]), strict=True
+            ):
+                np.testing.assert_allclose(actual_leaf, expected_leaf, atol=1e-6)
+            actual_step = actual[2]["steps"][0]
+            expected_step = expected[2]["steps"][0]
+            assert actual_step["steps"] == expected_step["steps"]
+            assert actual_step["converged"] == expected_step["converged"]
+            assert actual_step["loss_final"] == pytest.approx(
+                expected_step["loss_final"], abs=1e-5
+            )
+            assert actual[2]["objective_final"] == pytest.approx(
+                expected[2]["objective_final"], abs=1e-5
+            )
+
+
 def _resnet_params():
     return {
         "core": {
@@ -241,7 +325,7 @@ def _resnet_params():
 
 def test_sinkhorn_resnet_identity_perm():
     params = _resnet_params()
-    recipe = ResidualConvNetRecipe(parameter_root="core")
+    recipe = ResidualConvNetRecipe(parameter_root="core", linear_residual_free=True)
     graph = recipe.build_graph(params)
     solver_sequence = build_solver_sequence(
         schedule=[

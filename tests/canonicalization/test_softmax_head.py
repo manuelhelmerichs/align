@@ -159,7 +159,9 @@ def test_detection_rejects_ambiguous_heads():
             "Dense_1": _dense(4, 3),
         }
     }
-    graph = ResidualConvNetRecipe(parameter_root="core").build_graph(params)
+    graph = ResidualConvNetRecipe(
+        parameter_root="core", linear_residual_free=True
+    ).build_graph(params)
     with pytest.raises(ValueError, match="found 2"):
         detect_softmax_head(graph)
 

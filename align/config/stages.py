@@ -6,10 +6,14 @@ JAX platform, so nothing here may import the matching/canonicalization runtime.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from ._utils import _maybe_int, _require_bool, _validate_fields
 
@@ -50,6 +54,37 @@ _VALID_DEGENERATE_CHANNELS = frozenset(
 _VALID_ACTIVATIONS = frozenset({"relu", "leaky_relu", "tlu", "gelu"})
 _VALID_OBJECTIVES = frozenset({"euclidean", "diagonal_fisher", "relative_fisher"})
 _VALID_SOLVERS = frozenset({"lap", "procrustes", "sinkhorn"})
+
+_SOLVER_FIELDS_BY_TYPE = {
+    "lap": frozenset(
+        {
+            "solver",
+            "max_sweeps",
+            "tolerance",
+            "record_ambiguity",
+            "groups",
+            "components",
+        }
+    ),
+    "procrustes": frozenset(
+        {"solver", "max_sweeps", "tolerance", "groups", "components"}
+    ),
+    "sinkhorn": frozenset(
+        {
+            "solver",
+            "max_steps",
+            "tolerance",
+            "tau",
+            "learning_rate",
+            "sinkhorn_iterations",
+            "init_scale",
+            "record_loss_history",
+            "record_ambiguity",
+            "groups",
+            "components",
+        }
+    ),
+}
 
 
 def _validate_choice(name: str, value: str, valid: frozenset[str]) -> str:
@@ -116,12 +151,26 @@ class SolverStep:
         _validate_fields("match solver", payload, _SOLVER_FIELDS)
         if "solver" not in payload:
             raise ValueError("Each match solver entry must define 'solver'.")
+        solver = _validate_choice(
+            "match solver", str(payload["solver"]).lower(), _VALID_SOLVERS
+        )
+        if solver == "procrustes" and "record_ambiguity" in payload:
+            raise ValueError(
+                "match.solvers.record_ambiguity is not defined for procrustes."
+            )
+        _validate_fields(
+            f"match solver ({solver})", payload, _SOLVER_FIELDS_BY_TYPE[solver]
+        )
         groups = payload.get("groups")
         components = payload.get("components")
+        for name, values in (("groups", groups), ("components", components)):
+            if values is not None and (
+                not isinstance(values, list)
+                or not all(isinstance(value, str) and value for value in values)
+            ):
+                raise ValueError(f"match.solvers.{name} must be a list of names.")
         return cls(
-            solver=_validate_choice(
-                "match solver", str(payload["solver"]).lower(), _VALID_SOLVERS
-            ),
+            solver=solver,
             max_sweeps=int(payload.get("max_sweeps", 25)),
             max_steps=int(payload.get("max_steps", 200)),
             tolerance=float(payload.get("tolerance", 0.0)),
@@ -183,7 +232,7 @@ class CanonicalizeConfig:
     epsilon: float = 1e-8
     degenerate_channels: str = "preserve"
     include_bias_in_norm: bool = True
-    activation: str = "relu"
+    activation: str | None = None
 
     def __post_init__(self) -> None:
         if self.strategy is not None:
@@ -199,9 +248,12 @@ class CanonicalizeConfig:
         self.include_bias_in_norm = _require_bool(
             "canonicalize.include_bias_in_norm", self.include_bias_in_norm
         )
-        self.activation = _validate_choice(
-            "canonicalize.activation", str(self.activation).lower(), _VALID_ACTIVATIONS
-        )
+        if self.activation is not None:
+            self.activation = _validate_choice(
+                "canonicalize.activation",
+                str(self.activation).lower(),
+                _VALID_ACTIVATIONS,
+            )
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> CanonicalizeConfig:
@@ -216,20 +268,22 @@ class CanonicalizeConfig:
                 "canonicalize.include_bias_in_norm",
                 payload.get("include_bias_in_norm", True),
             ),
-            activation=payload.get("activation", "relu"),
+            activation=payload.get("activation"),
         )
 
     @property
     def canonicalizer_kwargs(self) -> dict[str, Any]:
         """Keyword arguments for :meth:`ScaleCanonicalizer.canonicalize`."""
 
-        return {
+        kwargs = {
             "epsilon": self.epsilon,
             "strategy": self.strategy,
             "degenerate_channels": self.degenerate_channels,
             "include_bias_in_norm": self.include_bias_in_norm,
-            "activation": self.activation,
         }
+        if self.activation is not None:
+            kwargs["activation"] = self.activation
+        return kwargs
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -289,6 +343,28 @@ class ObjectiveConfig:
         self.type = _validate_choice(
             "match.objective.type", str(self.type).lower(), _VALID_OBJECTIVES
         )
+        weight_sources = sum(
+            value is not None for value in (self.weights_path, self.tensor_weights)
+        )
+        metric_sources = sum(
+            value is not None for value in (self.metrics_path, self.tensor_metrics)
+        )
+        if self.type == "euclidean" and (weight_sources or metric_sources):
+            raise ValueError(
+                "euclidean objective does not accept Fisher/Gram artifacts."
+            )
+        if self.type == "diagonal_fisher":
+            if metric_sources or weight_sources != 1:
+                raise ValueError(
+                    "diagonal_fisher requires exactly one of weights_path or "
+                    "tensor_weights and accepts no Gram metrics."
+                )
+        if self.type == "relative_fisher":
+            if weight_sources or metric_sources != 1:
+                raise ValueError(
+                    "relative_fisher requires exactly one of metrics_path or "
+                    "tensor_metrics and accepts no diagonal weights."
+                )
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any] | str) -> ObjectiveConfig:
@@ -322,9 +398,48 @@ class ObjectiveConfig:
         payload: dict[str, Any] = {"type": self.type}
         if self.weights_path is not None:
             payload["weights_path"] = self.weights_path
+            payload["weights_sha256"] = _file_sha256(self.weights_path)
+        if self.tensor_weights is not None:
+            payload["tensor_weights_sha256"] = _content_sha256(self.tensor_weights)
         if self.metrics_path is not None:
             payload["metrics_path"] = self.metrics_path
+            payload["metrics_sha256"] = _file_sha256(self.metrics_path)
+        if self.tensor_metrics is not None:
+            payload["tensor_metrics_sha256"] = _content_sha256(self.tensor_metrics)
         return payload
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        while chunk := handle.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _content_sha256(value: Any) -> str:
+    digest = hashlib.sha256()
+
+    def update(item: Any) -> None:
+        if isinstance(item, Mapping):
+            digest.update(b"mapping\0")
+            for key in sorted(item, key=str):
+                digest.update(str(key).encode())
+                digest.update(b"\0")
+                update(item[key])
+            return
+        if isinstance(item, (list, tuple)):
+            digest.update(b"sequence\0")
+            for child in item:
+                update(child)
+            return
+        array = np.asarray(item)
+        digest.update(array.dtype.str.encode())
+        digest.update(repr(tuple(array.shape)).encode())
+        digest.update(np.ascontiguousarray(array).tobytes())
+
+    update(value)
+    return digest.hexdigest()
 
 
 @dataclass

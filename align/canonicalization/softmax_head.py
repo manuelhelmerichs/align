@@ -30,7 +30,7 @@ import numpy as np
 
 from ..symmetry import SymmetryGraph, binding_axis_interval
 from ..symmetry.tensor_ops import _descend
-from ._tree import replace_paths
+from ..tree_utils import replace_paths
 
 ParamTree = Mapping[str, Any]
 

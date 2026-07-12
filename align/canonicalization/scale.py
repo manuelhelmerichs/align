@@ -51,10 +51,12 @@ from typing import Any
 import numpy as np
 
 from ..symmetry import AxisBinding, SymmetryGraph, binding_axis_interval
-from ..symmetry.tensor_ops import _descend
-from ._tree import replace_paths
+from ..symmetry.tensor_ops import _descend, scale_axis
+from ..tree_utils import replace_paths
 from .activations import is_positive_homogeneous, validate_activation
 from .convnet import (
+    ConvBalancePlan,
+    build_conv_balance_plan,
     convnet_balanced_scales,
     convnet_producer_scales,
     has_convnet_component,
@@ -237,13 +239,6 @@ def _dense_scale_plan(graph: SymmetryGraph) -> _DenseScalePlan:
     )
 
 
-def _multiply_axis(tensor: Any, factors: Any, *, axis: int) -> Any:
-    factor = np.asarray(factors)
-    broadcast_shape = [1] * np.ndim(tensor)
-    broadcast_shape[axis] = factor.shape[0]
-    return np.asarray(tensor) * factor.reshape(broadcast_shape)
-
-
 def _has_degenerate(mask: Any) -> bool:
     return bool(np.any(np.asarray(mask)))
 
@@ -276,7 +271,7 @@ def _group_scales(
         bias = np.asarray(_descend(params, site.bias_path))
         if site.in_binding is not None:
             in_axis, _, _ = binding_axis_interval(kernel.shape, site.in_binding)
-            kernel = _multiply_axis(
+            kernel = scale_axis(
                 kernel,
                 outgoing_scales[site.in_binding.group],
                 axis=in_axis,
@@ -401,7 +396,7 @@ def _zero_degenerate_consumers(
         # Zero scales are cleanup, not a valid positive ScaleState action.
         if binding.role != "in" or binding.group not in active_masks:
             return segment
-        return _multiply_axis(segment, active_masks[binding.group], axis=axis)
+        return scale_axis(segment, active_masks[binding.group], axis=axis)
 
     return graph._transform_bound_tensors(params, _mask)
 
@@ -428,6 +423,31 @@ def _canonicalize_degenerate_producers(
 class ScaleCanonicalizer:
     """Deterministic graph-native scale canonicalization."""
 
+    def __init__(self) -> None:
+        self._prepared_graph: SymmetryGraph | None = None
+        self._dense_plan: _DenseScalePlan | None = None
+        self._conv_balance_plan: ConvBalancePlan | None = None
+
+    def prepare(self, graph: SymmetryGraph, *, strategy: str | None = None) -> None:
+        """Cache graph-derived plans reused by every sample in an executor."""
+
+        self._prepared_graph = graph
+        self._dense_plan = None
+        self._conv_balance_plan = None
+        if has_convnet_component(graph):
+            if strategy != "unit_norm":
+                self._conv_balance_plan = build_conv_balance_plan(graph)
+        elif not has_rmsnorm_gqa_rope_transformer_plan(graph) and not (
+            mha_circuit_constraints(graph)
+        ):
+            self._dense_plan = _dense_scale_plan(graph)
+
+    def _ensure_prepared(
+        self, graph: SymmetryGraph, *, strategy: str | None = None
+    ) -> None:
+        if self._prepared_graph is not graph:
+            self.prepare(graph, strategy=strategy)
+
     def canonicalize(
         self,
         graph: SymmetryGraph,
@@ -445,15 +465,14 @@ class ScaleCanonicalizer:
             "include_bias_in_norm",
             canonicalizer_kwargs.pop("include_bias_in_norm", True),
         )
-        activation = validate_activation(
-            canonicalizer_kwargs.pop("activation", "relu"), None
-        )
+        raw_activation = canonicalizer_kwargs.pop("activation", None)
         strategy = canonicalizer_kwargs.pop("strategy", None)
         if strategy is not None and strategy not in ("balanced", "unit_norm"):
             raise ValueError(
                 f"Unknown canonicalize strategy {strategy!r}. Available: "
                 "balanced, unit_norm."
             )
+        self._ensure_prepared(graph, strategy=strategy)
         if canonicalizer_kwargs:
             unexpected = next(iter(canonicalizer_kwargs))
             raise TypeError(
@@ -462,6 +481,11 @@ class ScaleCanonicalizer:
             )
 
         if has_rmsnorm_gqa_rope_transformer_plan(graph):
+            if raw_activation is not None:
+                raise ValueError(
+                    "canonicalize.activation is unused by the RMSNorm/RoPE/GQA "
+                    "circuit plan; omit it."
+                )
             if strategy is not None:
                 raise ValueError(
                     "The RMSNorm/RoPE/GQA plan has one canonical form (gamma "
@@ -473,11 +497,15 @@ class ScaleCanonicalizer:
                 params,
                 epsilon=epsilon,
                 degenerate_channels=degenerate_channels,
-                activation=activation,
                 include_bias_in_norm=include_bias_in_norm,
             )
 
         if mha_circuit_constraints(graph):
+            if raw_activation is not None:
+                raise ValueError(
+                    "canonicalize.activation is unused by attention circuit "
+                    "balancing; omit it."
+                )
             if strategy == "unit_norm":
                 raise ValueError(
                     "strategy='unit_norm' is undefined for attention circuit "
@@ -491,10 +519,16 @@ class ScaleCanonicalizer:
                 epsilon=epsilon,
                 include_bias_in_norm=include_bias_in_norm,
                 degenerate_channels=degenerate_channels,
-                activation=activation,
             )
 
         if has_convnet_component(graph):
+            if raw_activation is None:
+                raise ValueError(
+                    "Conv-stack scale canonicalization requires an explicit "
+                    "canonicalize.activation because activation semantics cannot "
+                    "be inferred from weights."
+                )
+            activation = validate_activation(raw_activation, None)
             return self._canonicalize_convnet(
                 graph,
                 params,
@@ -505,6 +539,13 @@ class ScaleCanonicalizer:
                 activation=activation,
             )
 
+        if raw_activation is None:
+            raise ValueError(
+                "Dense-chain scale canonicalization requires an explicit "
+                "canonicalize.activation because activation semantics cannot be "
+                "inferred from weights."
+            )
+        activation = validate_activation(raw_activation, None)
         if not is_positive_homogeneous(activation):
             raise ValueError(
                 f"Dense-chain canonicalization requires a positively homogeneous "
@@ -513,7 +554,9 @@ class ScaleCanonicalizer:
                 "architecture."
             )
         dense_strategy = strategy or "balanced"
-        plan = _dense_scale_plan(graph)
+        plan = self._dense_plan
+        if plan is None:  # pragma: no cover - guarded by plan dispatch above
+            raise RuntimeError("Dense scale plan was not prepared.")
         convergence = None
         if dense_strategy == "balanced":
             action_scales, scales, degenerate_masks, convergence = (
@@ -597,7 +640,14 @@ class ScaleCanonicalizer:
             )
 
         if strategy == "balanced":
-            scales = convnet_balanced_scales(graph, params, epsilon=epsilon)
+            if self._conv_balance_plan is None:
+                self._conv_balance_plan = build_conv_balance_plan(graph)
+            scales = convnet_balanced_scales(
+                graph,
+                params,
+                epsilon=epsilon,
+                plan=self._conv_balance_plan,
+            )
             plan = "conv_balanced"
         else:
             scales = convnet_producer_scales(graph, params, epsilon=epsilon)
@@ -623,7 +673,6 @@ class ScaleCanonicalizer:
         *,
         epsilon: float,
         degenerate_channels: str,
-        activation: str,
         include_bias_in_norm: bool,
     ) -> tuple[ParamTree, dict[str, Any], dict[str, Any]]:
         """RMSNorm gamma folding, qk pair balancing, and vo circuit balancing.
@@ -667,7 +716,6 @@ class ScaleCanonicalizer:
             "epsilon": epsilon,
             "degenerate_channels": degenerate_channels,
             "include_bias_in_norm": include_bias_in_norm,
-            "activation": activation,
             "rmsnorm_scales": sorted(gamma_scales),
             "balanced_qk_groups": [
                 gid for gid in graph.group_order if gid in pair_scales
@@ -686,7 +734,6 @@ class ScaleCanonicalizer:
         epsilon: float,
         include_bias_in_norm: bool,
         degenerate_channels: str,
-        activation: str,
     ) -> tuple[ParamTree, dict[str, Any], dict[str, Any]]:
         """Balance qk/vo circuit scales; all other groups stay at identity."""
 
@@ -713,7 +760,6 @@ class ScaleCanonicalizer:
             "epsilon": epsilon,
             "degenerate_channels": degenerate_channels,
             "include_bias_in_norm": include_bias_in_norm,
-            "activation": activation,
             "balanced_groups": [
                 group_id for group_id in graph.group_order if group_id in scales
             ],

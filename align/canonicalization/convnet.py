@@ -176,6 +176,14 @@ class _BalanceBinding:
     role: str
 
 
+@dataclass(frozen=True)
+class ConvBalancePlan:
+    """Immutable graph-derived binding plan for balanced canonicalization."""
+
+    tensor_ids: tuple[str, ...]
+    group_bindings: Mapping[str, tuple[_BalanceBinding, ...]]
+
+
 def _slice_energy(array: np.ndarray, binding: _BalanceBinding) -> np.ndarray:
     """Per-channel sum of squares over the binding's axis interval."""
 
@@ -203,18 +211,13 @@ def _scale_slice(
         array[indexer] = array[indexer] * factors
 
 
-def _balance_plan(
-    graph: SymmetryGraph, params: Mapping[str, Any]
-) -> tuple[
-    dict[str, np.ndarray], dict[str, list[_BalanceBinding]], dict[str, np.dtype]
-]:
-    """Materialize scale-carrying tensors and per-group power-1 bindings."""
+def build_conv_balance_plan(graph: SymmetryGraph) -> ConvBalancePlan:
+    """Validate and cache graph-only balanced-canonicalization structure."""
 
-    arrays: dict[str, np.ndarray] = {}
+    tensor_ids: list[str] = []
     group_bindings: dict[str, list[_BalanceBinding]] = {
         group_id: [] for group_id in graph.group_order
     }
-    group_dtypes: dict[str, np.dtype] = {}
     for tensor_id, spec in graph.tensors.items():
         bindings = [
             binding
@@ -223,9 +226,7 @@ def _balance_plan(
         ]
         if not bindings:
             continue
-        arrays[tensor_id] = np.asarray(
-            _descend(params, spec.path), dtype=np.float64
-        ).copy()
+        tensor_ids.append(tensor_id)
         for binding in bindings:
             if binding.scale_power != 1.0:
                 raise ValueError(
@@ -238,14 +239,37 @@ def _balance_plan(
                     "Balanced conv-stack canonicalization does not support "
                     f"selector-restricted bindings ({tensor_id})."
                 )
-            group_dtypes.setdefault(
-                binding.group, np.asarray(_descend(params, spec.path)).dtype
-            )
             for axis, start, stop in binding_axis_intervals(spec.shape, binding):
                 group_bindings[binding.group].append(
                     _BalanceBinding(tensor_id, axis, start, stop, binding.role)
                 )
-    return arrays, group_bindings, group_dtypes
+    return ConvBalancePlan(
+        tensor_ids=tuple(tensor_ids),
+        group_bindings={
+            group_id: tuple(bindings) for group_id, bindings in group_bindings.items()
+        },
+    )
+
+
+def _materialize_balance_plan(
+    graph: SymmetryGraph,
+    params: Mapping[str, Any],
+    plan: ConvBalancePlan,
+) -> tuple[dict[str, np.ndarray], dict[str, np.dtype]]:
+    arrays = {
+        tensor_id: np.asarray(
+            _descend(params, graph.tensors[tensor_id].path), dtype=np.float64
+        ).copy()
+        for tensor_id in plan.tensor_ids
+    }
+    group_dtypes: dict[str, np.dtype] = {}
+    for group_id, bindings in plan.group_bindings.items():
+        if bindings:
+            tensor_id = bindings[0].tensor_id
+            group_dtypes[group_id] = np.asarray(
+                _descend(params, graph.tensors[tensor_id].path)
+            ).dtype
+    return arrays, group_dtypes
 
 
 def convnet_balanced_scales(
@@ -255,6 +279,7 @@ def convnet_balanced_scales(
     epsilon: float = 1e-8,
     max_iter: int = 1000,
     tol: float = 1e-9,
+    plan: ConvBalancePlan | None = None,
 ) -> dict[str, np.ndarray]:
     """Minimum-norm per-group scales: balance dividing and multiplying energies.
 
@@ -270,7 +295,9 @@ def convnet_balanced_scales(
     energy at or below ``epsilon``) keep scale 1.
     """
 
-    arrays, group_bindings, group_dtypes = _balance_plan(graph, params)
+    plan = plan or build_conv_balance_plan(graph)
+    arrays, group_dtypes = _materialize_balance_plan(graph, params, plan)
+    group_bindings = plan.group_bindings
 
     self_loop_tensors: dict[str, set[str]] = {}
     masks: dict[str, np.ndarray] = {}
@@ -367,6 +394,8 @@ def convnet_balanced_scales(
 
 
 __all__ = [
+    "ConvBalancePlan",
+    "build_conv_balance_plan",
     "convnet_balanced_scales",
     "convnet_producer_scales",
     "has_convnet_component",

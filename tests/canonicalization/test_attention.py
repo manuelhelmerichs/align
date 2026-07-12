@@ -97,12 +97,8 @@ def test_apply_scales_on_intra_groups_preserves_transformer_function():
 def test_balancing_canonicalizer_preserves_function_and_is_idempotent():
     graph, params, tokens = _case(seed=2)
 
-    canonicalized, factors, aux = ScaleCanonicalizer().canonicalize(
-        graph, params, activation="gelu"
-    )
-    twice, _, _ = ScaleCanonicalizer().canonicalize(
-        graph, canonicalized, activation="gelu"
-    )
+    canonicalized, factors, aux = ScaleCanonicalizer().canonicalize(graph, params)
+    twice, _, _ = ScaleCanonicalizer().canonicalize(graph, canonicalized)
 
     assert aux["plan"] == "attention_balance"
     assert factors, "expected balancing factors for qk/vo groups"
@@ -121,12 +117,8 @@ def test_balancing_canonicalizer_collapses_scale_orbit():
     scales = _intra_scales(graph, seed=4)
     scaled = graph.apply_scales(params, ScaleState.from_scales(graph, scales))
 
-    canonical_a, _, _ = ScaleCanonicalizer().canonicalize(
-        graph, params, activation="gelu"
-    )
-    canonical_b, _, _ = ScaleCanonicalizer().canonicalize(
-        graph, scaled, activation="gelu"
-    )
+    canonical_a, _, _ = ScaleCanonicalizer().canonicalize(graph, params)
+    canonical_b, _, _ = ScaleCanonicalizer().canonicalize(graph, scaled)
 
     assert _tree_max_abs_diff(canonical_a, canonical_b) < 1e-4
 
@@ -134,9 +126,7 @@ def test_balancing_canonicalizer_collapses_scale_orbit():
 def test_balancing_canonicalizer_equalizes_circuit_energies():
     graph, params, _ = _case(seed=5)
 
-    canonicalized, _, _ = ScaleCanonicalizer().canonicalize(
-        graph, params, activation="gelu"
-    )
+    canonicalized, _, _ = ScaleCanonicalizer().canonicalize(graph, params)
 
     residual = attention_balancing_scales(graph, canonicalized)
     for group_id, factors in residual.items():
@@ -152,9 +142,7 @@ def test_balancing_canonicalizer_leaves_non_circuit_groups_untouched():
     """Stream/head/FFN tensors without intra-head bindings must be unchanged."""
 
     graph, params, _ = _case(seed=6)
-    canonicalized, _, _ = ScaleCanonicalizer().canonicalize(
-        graph, params, activation="gelu"
-    )
+    canonicalized, _, _ = ScaleCanonicalizer().canonicalize(graph, params)
 
     embedding = "TokenEmbedding_0/Embedding/embedding"
     path = graph.tensors[embedding].path
@@ -169,7 +157,7 @@ def test_attention_plan_rejects_dense_only_post_passes():
     graph, params, _ = _case(seed=7)
     with pytest.raises(ValueError, match="degenerate_channels"):
         ScaleCanonicalizer().canonicalize(
-            graph, params, activation="gelu", degenerate_channels="zero_outgoing"
+            graph, params, degenerate_channels="zero_outgoing"
         )
 
 

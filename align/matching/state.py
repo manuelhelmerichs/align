@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal
 
 import jax
@@ -66,6 +67,28 @@ class MatrixTransform:
 
 
 HardTransform = PermutationTransform | SignedPermutationTransform | MatrixTransform
+
+
+def _is_identity_transform(transform: HardTransform) -> bool:
+    if isinstance(transform, PermutationTransform):
+        indices = np.asarray(transform.indices)
+        expected = np.arange(indices.shape[-1])
+        return bool(np.all(indices == expected))
+    if isinstance(transform, SignedPermutationTransform):
+        indices = np.asarray(transform.indices)
+        expected = np.arange(indices.shape[-1])
+        return bool(
+            np.all(indices == expected) and np.all(np.asarray(transform.signs) == 1)
+        )
+    matrix = np.asarray(transform.matrix)
+    return bool(
+        np.allclose(
+            matrix,
+            np.eye(matrix.shape[-1]),
+            rtol=0.0,
+            atol=1e-7,
+        )
+    )
 
 
 def solve_lap_maximize(cost: np.ndarray) -> np.ndarray:
@@ -223,15 +246,39 @@ def sinkhorn_operator(
     return jax.lax.fori_loop(0, n_iters, body, matrix)
 
 
-@dataclass
+@dataclass(frozen=True)
 class TransformState:
     """Hard typed transforms plus optional Sinkhorn relaxation state."""
 
     group_order: tuple[str, ...]
-    transforms: dict[str, HardTransform]
-    logits: dict[str, jnp.ndarray] | None = None
-    relaxed_matrices: dict[str, Any] | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    transforms: Mapping[str, HardTransform]
+    logits: Mapping[str, jnp.ndarray] | None = None
+    relaxed_matrices: Mapping[str, Any] | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    active_groups: frozenset[str] | None = None
+    _graph: Any | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "group_order", tuple(self.group_order))
+        object.__setattr__(self, "transforms", MappingProxyType(dict(self.transforms)))
+        if self.logits is not None:
+            object.__setattr__(self, "logits", MappingProxyType(dict(self.logits)))
+        if self.relaxed_matrices is not None:
+            object.__setattr__(
+                self,
+                "relaxed_matrices",
+                MappingProxyType(dict(self.relaxed_matrices)),
+            )
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        if self.active_groups is None:
+            active = frozenset(
+                group_id
+                for group_id, transform in self.transforms.items()
+                if not _is_identity_transform(transform)
+            )
+            object.__setattr__(self, "active_groups", active)
+        else:
+            object.__setattr__(self, "active_groups", frozenset(self.active_groups))
 
     @classmethod
     def identity(
@@ -256,7 +303,12 @@ class TransformState:
                     xp.eye(group.size, dtype=dtype), family="rotation_pairs"
                 )
             transforms[group_id] = transform
-        return cls(group_order=graph.group_order, transforms=transforms)
+        return cls(
+            group_order=graph.group_order,
+            transforms=transforms,
+            active_groups=frozenset(),
+            _graph=graph,
+        )
 
     @classmethod
     def from_transforms(
@@ -287,6 +339,12 @@ class TransformState:
             logits=self.logits,
             relaxed_matrices=self.relaxed_matrices,
             metadata=dict(self.metadata),
+            active_groups=frozenset(
+                group_id
+                for group_id, transform in transforms.items()
+                if not _is_identity_transform(transform)
+            ),
+            _graph=self._graph,
         )
 
     def with_relaxation(
@@ -298,6 +356,8 @@ class TransformState:
             logits=dict(logits),
             relaxed_matrices=dict(matrices),
             metadata=dict(self.metadata),
+            active_groups=self.active_groups,
+            _graph=self._graph,
         )
 
     def matrix(self, group_id: str, *, dtype: Any | None = None) -> Any:
@@ -333,7 +393,16 @@ class TransformState:
             group_order=self.group_order,
             transforms=transforms,
             metadata=metadata,
+            active_groups=frozenset(
+                group_id
+                for group_id, transform in transforms.items()
+                if not _is_identity_transform(transform)
+            ),
+            _graph=self._graph,
         )
+
+    def validated_for(self, graph) -> bool:
+        return self._graph is graph
 
     def validate(self, graph, *, hard: bool = False) -> None:
         if len(self.group_order) != len(graph.groups) or set(self.group_order) != set(

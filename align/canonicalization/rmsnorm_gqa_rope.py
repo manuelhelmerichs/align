@@ -49,8 +49,8 @@ from ..symmetry import (
     RMSNormScaleConstraint,
     SymmetryGraph,
 )
-from ..symmetry.tensor_ops import _descend
-from ._tree import replace_paths
+from ..symmetry.tensor_ops import _descend, scale_axis
+from ..tree_utils import replace_paths
 
 
 def rmsnorm_scale_constraints(
@@ -83,13 +83,6 @@ def has_rmsnorm_gqa_rope_transformer_plan(graph: SymmetryGraph) -> bool:
     return bool(rmsnorm_scale_constraints(graph)) or bool(
         gqa_rope_circuit_constraints(graph)
     )
-
-
-def _multiply_axis(tensor: Any, factors: Any, *, axis: int) -> Any:
-    factors = np.asarray(factors)
-    broadcast = [1] * np.ndim(tensor)
-    broadcast[axis] = int(factors.shape[0])
-    return np.asarray(tensor) * factors.reshape(broadcast)
 
 
 def rms_gamma_scales(
@@ -143,7 +136,7 @@ def apply_rms_gamma_scales(
         for tensor_id, axis in constraint.consumers:
             path = graph.tensors[str(tensor_id)].path
             tensor = np.asarray(_descend(params, path))
-            replacements.append((path, _multiply_axis(tensor, factors, axis=int(axis))))
+            replacements.append((path, scale_axis(tensor, factors, axis=int(axis))))
     return replace_paths(params, replacements) if replacements else params
 
 

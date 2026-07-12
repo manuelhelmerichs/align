@@ -13,7 +13,7 @@ RESIDUAL_CONVNET_OPTIONS = frozenset(
         "parameter_root",
         "batch_stats_root",
         "residual_topology",
-        "residual_connections",
+        "linear_residual_free",
     }
 )
 

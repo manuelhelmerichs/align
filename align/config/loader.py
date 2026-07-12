@@ -52,7 +52,7 @@ class RunConfig:
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> RunConfig:
         _validate_fields("top-level", payload, _TOP_LEVEL_FIELDS)
-        pipeline_raw = payload.get("pipeline")
+        pipeline_raw = payload.get("pipeline", ["canonicalize", "match"])
         if not isinstance(pipeline_raw, list) or not pipeline_raw:
             raise ValueError("Config must define a non-empty 'pipeline' list.")
         pipeline = tuple(str(stage).lower() for stage in pipeline_raw)
@@ -147,7 +147,22 @@ def load_align_config(
             raise ValueError("Config file must define a mapping at the top level.")
         data = dict(loaded)
     if overrides:
-        data = _merge_dicts(data, overrides)
+        override_payload = dict(overrides)
+        architecture_override = override_payload.get("architecture")
+        if (
+            isinstance(architecture_override, Mapping)
+            and "family" in architecture_override
+        ):
+            # Architecture family is a discriminant: options from another recipe
+            # are invalid, not recursively mergeable.
+            data["architecture"] = dict(architecture_override)
+            override_payload.pop("architecture")
+        data = _merge_dicts(data, override_payload)
+        if "pipeline" in override_payload:
+            active = set(override_payload["pipeline"])
+            for stage in _STAGES:
+                if stage not in active:
+                    data.pop(stage, None)
     return RunConfig.from_mapping(data)
 
 

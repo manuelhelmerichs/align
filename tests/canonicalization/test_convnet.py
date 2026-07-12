@@ -31,13 +31,24 @@ from benchmarks.synthetic import (
 )
 
 _MODULE_GRAPH = {
+    "schema": "align.residual_module_graph",
+    "version": 1,
     "nodes": [
-        {
-            "name": "residual_add",
-            "type": "add",
-            "inputs": ["core/Conv_0", "core/Conv_2"],
-        }
-    ]
+        {"id": "input", "kind": "input"},
+        {"id": "core/Conv_0", "kind": "conv", "normalizer": "core/FRN_0"},
+        {"id": "core/Conv_1", "kind": "conv", "normalizer": "core/FRN_1"},
+        {"id": "core/Conv_2", "kind": "conv", "normalizer": "core/FRN_2"},
+        {"id": "residual_add", "kind": "add"},
+        {"id": "core/Dense_0", "kind": "dense"},
+    ],
+    "edges": [
+        {"source": "input", "target": "core/Conv_0"},
+        {"source": "core/Conv_0", "target": "core/Conv_1"},
+        {"source": "core/Conv_1", "target": "core/Conv_2"},
+        {"source": "core/Conv_0", "target": "residual_add"},
+        {"source": "core/Conv_2", "target": "residual_add"},
+        {"source": "residual_add", "target": "core/Dense_0"},
+    ],
 }
 
 
@@ -51,6 +62,12 @@ def _frn_case(seed: int = 0):
         jax.random.PRNGKey(seed + 50), (5, 3, 3, 2), dtype=jnp.float32
     )
     return graph, params, inputs
+
+
+def test_conv_plan_requires_explicit_activation():
+    graph, params, _ = _frn_case(seed=31)
+    with pytest.raises(ValueError, match="requires an explicit.*activation"):
+        ScaleCanonicalizer().canonicalize(graph, params)
 
 
 def _positive_scales(graph, seed: int) -> dict[str, np.ndarray]:
@@ -285,7 +302,7 @@ def test_bare_conv_residual_cycle_rejected_by_unit_norm_only():
     case = make_residual_conv_orbit_case(seed=0)
     with pytest.raises(ValueError, match="residual cycle of bare convs"):
         ScaleCanonicalizer().canonicalize(
-            case.graph, case.reference, strategy="unit_norm"
+            case.graph, case.reference, strategy="unit_norm", activation="relu"
         )
 
 
@@ -297,7 +314,9 @@ def test_bare_conv_residual_cycle_balances_exactly():
     case = make_residual_conv_orbit_case(seed=0)
     graph, params, inputs = case.graph, case.reference, case.inputs
 
-    canonicalized, _, aux = ScaleCanonicalizer().canonicalize(graph, params)
+    canonicalized, _, aux = ScaleCanonicalizer().canonicalize(
+        graph, params, activation="relu"
+    )
     assert aux["plan"] == "conv_balanced"
     np.testing.assert_allclose(
         np.asarray(residual_conv_apply(canonicalized, inputs)),
@@ -307,12 +326,16 @@ def test_bare_conv_residual_cycle_balances_exactly():
     for group_id, (div, mult) in _balance_energies(graph, canonicalized).items():
         np.testing.assert_allclose(div, mult, rtol=1e-4, err_msg=group_id)
 
-    twice, _, _ = ScaleCanonicalizer().canonicalize(graph, canonicalized)
+    twice, _, _ = ScaleCanonicalizer().canonicalize(
+        graph, canonicalized, activation="relu"
+    )
     assert _tree_max_abs_diff(canonicalized, twice) < 1e-5
 
     scales = _positive_scales(graph, seed=12)
     scaled = graph.apply_scales(params, ScaleState.from_scales(graph, scales))
-    canonical_b, _, _ = ScaleCanonicalizer().canonicalize(graph, scaled)
+    canonical_b, _, _ = ScaleCanonicalizer().canonicalize(
+        graph, scaled, activation="relu"
+    )
     assert _tree_max_abs_diff(canonicalized, canonical_b) < 1e-4
 
 
@@ -342,9 +365,22 @@ def test_bare_conv_self_loop_group_balances_exactly():
         }
     }
     topology = {
+        "schema": "align.residual_module_graph",
+        "version": 1,
         "nodes": [
-            {"name": "add", "type": "add", "inputs": ["core/Conv_0", "core/Conv_1"]}
-        ]
+            {"id": "input", "kind": "input"},
+            {"id": "core/Conv_0", "kind": "conv"},
+            {"id": "core/Conv_1", "kind": "conv"},
+            {"id": "add", "kind": "add"},
+            {"id": "core/Dense_0", "kind": "dense"},
+        ],
+        "edges": [
+            {"source": "input", "target": "core/Conv_0"},
+            {"source": "core/Conv_0", "target": "core/Conv_1"},
+            {"source": "core/Conv_0", "target": "add"},
+            {"source": "core/Conv_1", "target": "add"},
+            {"source": "add", "target": "core/Dense_0"},
+        ],
     }
     graph = ResidualConvNetRecipe(
         parameter_root="core", residual_topology=topology
@@ -367,7 +403,9 @@ def test_bare_conv_self_loop_group_balances_exactly():
         )
 
     inputs = jnp.asarray(rng.standard_normal((5, 3, 3, 2)), jnp.float32)
-    canonicalized, _, aux = ScaleCanonicalizer().canonicalize(graph, params)
+    canonicalized, _, aux = ScaleCanonicalizer().canonicalize(
+        graph, params, activation="relu"
+    )
     assert aux["plan"] == "conv_balanced"
     np.testing.assert_allclose(
         np.asarray(_apply(canonicalized, inputs)),
@@ -379,7 +417,9 @@ def test_bare_conv_self_loop_group_balances_exactly():
 
     scales = _positive_scales(graph, seed=16)
     scaled = graph.apply_scales(params, ScaleState.from_scales(graph, scales))
-    canonical_b, _, _ = ScaleCanonicalizer().canonicalize(graph, scaled)
+    canonical_b, _, _ = ScaleCanonicalizer().canonicalize(
+        graph, scaled, activation="relu"
+    )
     assert _tree_max_abs_diff(canonicalized, canonical_b) < 1e-4
 
 
@@ -407,7 +447,9 @@ def test_bare_conv_chain_canonicalizes_like_dense():
             },
         }
     }
-    graph = ResidualConvNetRecipe(parameter_root="core").build_graph(params)
+    graph = ResidualConvNetRecipe(
+        parameter_root="core", linear_residual_free=True
+    ).build_graph(params)
 
     def _apply(tree, x):
         core = tree["core"]
@@ -425,10 +467,10 @@ def test_bare_conv_chain_canonicalizes_like_dense():
 
     inputs = jnp.asarray(rng.standard_normal((5, 3, 3, 2)), jnp.float32)
     canonicalized, _, aux = ScaleCanonicalizer().canonicalize(
-        graph, params, strategy="unit_norm"
+        graph, params, strategy="unit_norm", activation="relu"
     )
     twice, _, _ = ScaleCanonicalizer().canonicalize(
-        graph, canonicalized, strategy="unit_norm"
+        graph, canonicalized, strategy="unit_norm", activation="relu"
     )
 
     assert aux["plan"] == "conv_producer_energy"
@@ -450,7 +492,9 @@ def test_bare_conv_chain_canonicalizes_like_dense():
         )
 
     # The balanced default also handles the chain (coupled fixed point).
-    balanced, _, balanced_aux = ScaleCanonicalizer().canonicalize(graph, params)
+    balanced, _, balanced_aux = ScaleCanonicalizer().canonicalize(
+        graph, params, activation="relu"
+    )
     assert balanced_aux["plan"] == "conv_balanced"
     np.testing.assert_allclose(
         np.asarray(_apply(balanced, inputs)),

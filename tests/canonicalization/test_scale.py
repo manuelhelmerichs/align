@@ -60,6 +60,11 @@ def _tree_max_abs_diff(left, right) -> float:
     )
 
 
+def _canonicalize(graph, params, **kwargs):
+    kwargs.setdefault("activation", "relu")
+    return ScaleCanonicalizer().canonicalize(graph, params, **kwargs)
+
+
 def test_apply_scales_preserves_relu_mlp_function():
     params = _mlp_params(seed=0)
     graph = MLPRecipe(parameter_root="params.fcn").build_graph(params)
@@ -91,8 +96,8 @@ def test_scale_canonicalizer_preserves_function_and_is_idempotent():
     params = _mlp_params(seed=5)
     graph = MLPRecipe(parameter_root="params.fcn").build_graph(params)
 
-    canonicalized, _, _ = ScaleCanonicalizer().canonicalize(graph, params)
-    twice, _, _ = ScaleCanonicalizer().canonicalize(graph, canonicalized)
+    canonicalized, _, _ = _canonicalize(graph, params)
+    twice, _, _ = _canonicalize(graph, canonicalized)
 
     x = jnp.asarray(np.random.default_rng(6).standard_normal((8, 3)), dtype=jnp.float32)
     np.testing.assert_allclose(
@@ -112,8 +117,8 @@ def test_scale_canonicalizer_is_invariant_to_prior_scaling():
     scales = _positive_scales(graph, seed=8)
     scaled = graph.apply_scales(params, ScaleState.from_scales(graph, scales))
 
-    canonical_a, _, _ = ScaleCanonicalizer().canonicalize(graph, params)
-    canonical_b, _, _ = ScaleCanonicalizer().canonicalize(graph, scaled)
+    canonical_a, _, _ = _canonicalize(graph, params)
+    canonical_b, _, _ = _canonicalize(graph, scaled)
 
     assert _tree_max_abs_diff(canonical_a, canonical_b) < 1e-5
 
@@ -122,9 +127,7 @@ def test_scale_canonicalizer_unit_norm_hidden_neurons():
     params = _mlp_params(seed=9)
     graph = MLPRecipe(parameter_root="params.fcn").build_graph(params)
 
-    canonicalized, _, _ = ScaleCanonicalizer().canonicalize(
-        graph, params, strategy="unit_norm"
-    )
+    canonicalized, _, _ = _canonicalize(graph, params, strategy="unit_norm")
 
     fcn = canonicalized["params"]["fcn"]
     for name in ("Dense_0", "Dense_1"):  # hidden producers only
@@ -138,7 +141,7 @@ def test_scale_canonicalizer_matches_explicit_scale_action_when_non_degenerate()
     params = _mlp_params(seed=14)
     graph = MLPRecipe(parameter_root="params.fcn").build_graph(params)
 
-    canonicalized, scales, _ = ScaleCanonicalizer().canonicalize(graph, params)
+    canonicalized, scales, _ = _canonicalize(graph, params)
     assert all(np.all(np.asarray(scale) > 1e-4) for scale in scales.values())
 
     action_scales = scales
@@ -153,7 +156,7 @@ def test_scale_canonicalizer_matches_explicit_scale_action_when_non_degenerate()
 def test_scale_artifact_retains_ids_and_reconstructs_action(tmp_path):
     params = _mlp_params(seed=15)
     graph = MLPRecipe(parameter_root="params.fcn").build_graph(params)
-    canonicalized, scales, _ = ScaleCanonicalizer().canonicalize(graph, params)
+    canonicalized, scales, _ = _canonicalize(graph, params)
 
     path = write_scales_artifact(tmp_path / "scales.npz", scales)
     loaded, metadata = read_scales_artifact(path)

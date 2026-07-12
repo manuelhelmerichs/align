@@ -95,6 +95,117 @@ def _rhat_from_predictions(
     return calculate_r_hat(values, chain_labels=chain_labels, num_chains=preds.shape[0])
 
 
+def test_residual_dag_action_preserves_fanout_projection_function_when_reordered():
+    rng = np.random.default_rng(91)
+
+    def module(din, dout):
+        return {
+            "kernel": rng.normal(size=(1, 1, din, dout)).astype(np.float32),
+            "bias": rng.normal(size=(dout,)).astype(np.float32),
+        }
+
+    # Deliberately unrelated insertion/name order: topology, not mapping order,
+    # defines the stem -> two-branch fan-out -> residual add dataflow.
+    params = {
+        "core": {
+            "Conv_10": module(3, 3),
+            "Dense_0": {
+                "kernel": rng.normal(size=(3, 2)).astype(np.float32),
+                "bias": rng.normal(size=(2,)).astype(np.float32),
+            },
+            "Conv_0": module(2, 3),
+            "Conv_2": module(3, 3),
+        }
+    }
+    topology = {
+        "schema": "align.residual_module_graph",
+        "version": 1,
+        "nodes": [
+            {"id": "input", "kind": "input"},
+            {"id": "core/Conv_0", "kind": "conv"},
+            {"id": "core/Conv_10", "kind": "conv"},
+            {"id": "core/Conv_2", "kind": "conv"},
+            {"id": "residual_add", "kind": "add"},
+            {"id": "core/Dense_0", "kind": "dense"},
+        ],
+        "edges": [
+            {"source": "input", "target": "core/Conv_0"},
+            {"source": "core/Conv_0", "target": "core/Conv_10"},
+            {"source": "core/Conv_0", "target": "core/Conv_2"},
+            {"source": "core/Conv_10", "target": "residual_add"},
+            {"source": "core/Conv_2", "target": "residual_add"},
+            {"source": "residual_add", "target": "core/Dense_0"},
+        ],
+    }
+    graph = ResidualConvNetRecipe(
+        parameter_root="core", residual_topology=topology
+    ).build_graph(params)
+
+    def apply(tree, x):
+        core = tree["core"]
+
+        def conv(name, value):
+            layer = core[name]
+            return value @ jnp.asarray(layer["kernel"])[0, 0] + jnp.asarray(
+                layer["bias"]
+            )
+
+        stem = jax.nn.relu(conv("Conv_0", x))
+        merged = jax.nn.relu(conv("Conv_10", stem) + conv("Conv_2", stem))
+        dense = core["Dense_0"]
+        return merged @ jnp.asarray(dense["kernel"]) + jnp.asarray(dense["bias"])
+
+    transforms = {
+        group_id: _perm_matrix(rng.permutation(group.size))
+        for group_id, group in graph.groups.items()
+    }
+    transformed = graph.apply_transforms(
+        params, TransformState.from_transforms(graph, transforms)
+    )
+    x = jnp.asarray(rng.normal(size=(7, 2)), dtype=jnp.float32)
+    np.testing.assert_allclose(
+        np.asarray(apply(transformed, x)), np.asarray(apply(params, x)), atol=1e-5
+    )
+
+
+def test_residual_dag_with_more_than_ten_convs_uses_topological_order():
+    rng = np.random.default_rng(92)
+    modules = {
+        f"Conv_{index}": {
+            "kernel": rng.normal(size=(1, 1, 2, 2)).astype(np.float32),
+            "bias": rng.normal(size=(2,)).astype(np.float32),
+        }
+        for index in reversed(range(12))
+    }
+    modules["Dense_0"] = {
+        "kernel": rng.normal(size=(2, 1)).astype(np.float32),
+        "bias": rng.normal(size=(1,)).astype(np.float32),
+    }
+    nodes = (
+        [{"id": "input", "kind": "input"}]
+        + [{"id": f"core/Conv_{index}", "kind": "conv"} for index in range(12)]
+        + [{"id": "core/Dense_0", "kind": "dense"}]
+    )
+    edges = (
+        [{"source": "input", "target": "core/Conv_0"}]
+        + [
+            {"source": f"core/Conv_{index}", "target": f"core/Conv_{index + 1}"}
+            for index in range(11)
+        ]
+        + [{"source": "core/Conv_11", "target": "core/Dense_0"}]
+    )
+    graph = ResidualConvNetRecipe(
+        parameter_root="core",
+        residual_topology={
+            "schema": "align.residual_module_graph",
+            "version": 1,
+            "nodes": nodes,
+            "edges": edges,
+        },
+    ).build_graph({"core": modules})
+    assert graph.group_order == tuple(f"core/Conv_{index}" for index in range(12))
+
+
 @pytest.mark.parametrize(
     "schedule",
     [
@@ -269,7 +380,7 @@ def test_residual_convnet_matching_preserves_predictions(schedule):
         }
     }
 
-    recipe = ResidualConvNetRecipe()
+    recipe = ResidualConvNetRecipe(linear_residual_free=True)
     graph = recipe.build_graph(ref)
 
     # Create a target that's a pure channel permutation of Conv_0 outputs (size=2)

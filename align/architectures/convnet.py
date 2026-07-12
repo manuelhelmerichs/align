@@ -23,7 +23,6 @@ GELU lenetti) are rejected loudly by that plan, which is correct — they have
 no scale symmetry.
 """
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -31,15 +30,12 @@ from typing import Any, ClassVar
 import numpy as np
 
 from ..symmetry import SymmetryGraph
+from ..symmetry.tensor_ops import _descend
+from ._utils import natural_key, path_tokens
 from .graph_builder import SymmetryGraphBuilder
 from .recipe import ArchitectureRecipe, register_recipe
 from .rules import DenseChainRule
 from .schemas import CONVNET_OPTIONS
-
-
-def _natural_key(value: str) -> list[int | str]:
-    parts = re.split(r"(\d+)", value)
-    return [int(part) if part.isdigit() else part for part in parts if part]
 
 
 def _shape(node: Any) -> tuple[int, ...]:
@@ -60,20 +56,11 @@ class ConvNetRecipe(ArchitectureRecipe):
     parameter_root: str = "core"
     config_options: ClassVar[frozenset[str]] = CONVNET_OPTIONS
 
-    def _tokens_from_path(self, path: str) -> tuple[str, ...]:
-        return tuple(part for part in path.split(".") if part)
-
-    def _descend(self, mapping: Mapping[str, Any], path: tuple[str, ...]) -> Any:
-        node: Any = mapping
-        for key in path:
-            node = node[key]
-        return node
-
     def _discover(
         self, params: Mapping[str, Any]
     ) -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
-        root = self._tokens_from_path(self.parameter_root)
-        subtree = self._descend(params, root)
+        root = path_tokens(self.parameter_root)
+        subtree = _descend(params, root)
         if not isinstance(subtree, Mapping):
             raise ValueError(
                 f"Expected mapping under '{self.parameter_root}', got {type(subtree)}"
@@ -106,8 +93,8 @@ class ConvNetRecipe(ArchitectureRecipe):
                 f"'{self.parameter_root}'; the convnet recipe needs a dense chain "
                 "after the flatten."
             )
-        conv_names.sort(key=_natural_key)
-        dense_names.sort(key=_natural_key)
+        conv_names.sort(key=natural_key)
+        dense_names.sort(key=natural_key)
         return (
             [(*root, name) for name in conv_names],
             [(*root, name) for name in dense_names],
@@ -120,7 +107,7 @@ class ConvNetRecipe(ArchitectureRecipe):
         conv_groups: list[str] = []
         previous_out: int | None = None
         for path in conv_paths:
-            module = self._descend(params, path)
+            module = _descend(params, path)
             kernel_shape = _shape(module["kernel"])
             in_channels, out_channels = kernel_shape[2], kernel_shape[3]
             if previous_out is not None and in_channels != previous_out:
@@ -139,7 +126,7 @@ class ConvNetRecipe(ArchitectureRecipe):
             conv_groups.append(group_id)
             previous_out = out_channels
 
-        first_dense = self._descend(params, dense_paths[0])
+        first_dense = _descend(params, dense_paths[0])
         dense_in = _shape(first_dense["kernel"])[0]
         channels = previous_out
         if dense_in % channels != 0:

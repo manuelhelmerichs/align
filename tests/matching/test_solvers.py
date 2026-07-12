@@ -112,7 +112,20 @@ class TestLAPSchedule:
         recipe = ResidualConvNetRecipe(
             parameter_root="core",
             residual_topology={
-                "nodes": [{"type": "add", "inputs": ["core/Conv_0", "core/Conv_1"]}]
+                "schema": "align.residual_module_graph",
+                "version": 1,
+                "nodes": [
+                    {"id": "input", "kind": "input"},
+                    {"id": "core/Conv_0", "kind": "conv"},
+                    {"id": "core/Conv_1", "kind": "conv"},
+                    {"id": "add", "kind": "add"},
+                ],
+                "edges": [
+                    {"source": "input", "target": "core/Conv_0"},
+                    {"source": "core/Conv_0", "target": "core/Conv_1"},
+                    {"source": "core/Conv_0", "target": "add"},
+                    {"source": "core/Conv_1", "target": "add"},
+                ],
             },
         )
         graph = recipe.build_graph(params)
@@ -277,7 +290,7 @@ class TestSinkhornSchedule:
             graph.materialize(_params(), backend="jax"),
             rng_key=jax.random.PRNGKey(0),
         )
-        ambiguity = aux["steps"][0]["ambiguity"]["mlp/h0"][0]
+        ambiguity = aux["steps"][0]["ambiguity"]["mlp/h0"]
         assert set(ambiguity) == {
             "row_entropy_mean",
             "row_entropy_max",

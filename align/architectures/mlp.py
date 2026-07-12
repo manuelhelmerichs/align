@@ -1,11 +1,12 @@
 """Dense MLP architecture recipe: one dense-stack component."""
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from ..symmetry import SymmetryGraph
+from ..symmetry.tensor_ops import _descend
+from ._utils import natural_key, path_tokens
 from .graph_builder import SymmetryGraphBuilder
 from .recipe import ArchitectureRecipe, register_recipe
 from .rules import DenseChainRule
@@ -26,22 +27,9 @@ class MLPRecipe(ArchitectureRecipe):
     parameter_root: str = "params.fcn"
     config_options: ClassVar[frozenset[str]] = MLP_OPTIONS
 
-    def _tokens_from_path(self, path: str) -> tuple[str, ...]:
-        return tuple(part for part in path.split(".") if part)
-
-    def _natural_key(self, value: str) -> list[int | str]:
-        parts = re.split(r"(\d+)", value)
-        return [int(part) if part.isdigit() else part for part in parts if part]
-
-    def _descend(self, mapping: Mapping[str, Any], path: tuple[str, ...]) -> Any:
-        node: Any = mapping
-        for key in path:
-            node = node[key]
-        return node
-
     def _infer_layer_paths(self, params: Mapping[str, Any]) -> list[tuple[str, ...]]:
-        root = self._tokens_from_path(self.parameter_root)
-        subtree = self._descend(params, root)
+        root = path_tokens(self.parameter_root)
+        subtree = _descend(params, root)
         if not isinstance(subtree, Mapping):
             raise ValueError(
                 f"Expected mapping under '{self.parameter_root}', got {type(subtree)}"
@@ -54,7 +42,7 @@ class MLPRecipe(ArchitectureRecipe):
             if "kernel" in value and "bias" in value:
                 candidates.append(str(name))
 
-        layer_names = sorted(candidates, key=self._natural_key)
+        layer_names = sorted(candidates, key=natural_key)
         if not layer_names:
             raise ValueError(
                 f"No dense layers discovered under '{self.parameter_root}'."

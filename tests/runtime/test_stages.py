@@ -135,7 +135,7 @@ def test_center_softmax_head_executor_detects_and_centers(tmp_path) -> None:
     executor = CenterSoftmaxHeadExecutor(
         CenterSoftmaxHeadConfig(),
         family="residual_convnet",
-        recipe_kwargs={},
+        recipe_kwargs={"linear_residual_free": True},
     )
     executor.prepare(manifest, reference_sample)
     assert executor.head_path == ("core", "Dense_0")
@@ -151,7 +151,7 @@ def test_center_softmax_head_executor_detects_and_centers(tmp_path) -> None:
     explicit = CenterSoftmaxHeadExecutor(
         CenterSoftmaxHeadConfig(head="core.Dense_0"),
         family="residual_convnet",
-        recipe_kwargs={},
+        recipe_kwargs={"linear_residual_free": True},
     )
     explicit.prepare(manifest, reference_sample)
     assert explicit.head_path == ("core", "Dense_0")
@@ -163,7 +163,7 @@ def test_canonicalize_executor_process_single(tmp_path) -> None:
     reference_sample = loader.load_reference()
 
     executor = CanonicalizeExecutor(
-        CanonicalizeConfig(),
+        CanonicalizeConfig(activation="relu"),
         family="mlp",
         recipe_kwargs={},
     )
@@ -243,9 +243,9 @@ def test_residual_convnet_stages_round_trip(tmp_path) -> None:
     reference_sample = loader.load_reference()
 
     canonicalize_executor = CanonicalizeExecutor(
-        CanonicalizeConfig(),
+        CanonicalizeConfig(activation="relu"),
         family="residual_convnet",
-        recipe_kwargs={},
+        recipe_kwargs={"linear_residual_free": True},
     )
     canonicalize_executor.prepare(manifest, reference_sample)
     canonicalize_result = canonicalize_executor.process_single(
@@ -262,7 +262,7 @@ def test_residual_convnet_stages_round_trip(tmp_path) -> None:
         seed=0,
         batch_size=2,
         family="residual_convnet",
-        recipe_kwargs={},
+        recipe_kwargs={"linear_residual_free": True},
     )
     match_executor.prepare(manifest, reference_sample)
 

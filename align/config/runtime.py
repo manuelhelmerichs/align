@@ -27,6 +27,7 @@ _RUNTIME_FIELDS = frozenset(
         "allow_device_sharing",
         "max_worker_retries",
         "worker_threads",
+        "mps_async_dispatch",
     }
 )
 
@@ -61,11 +62,16 @@ class RuntimeConfig:
     allow_device_sharing: bool = False
     max_worker_retries: int = 2
     worker_threads: int = 1
+    mps_async_dispatch: bool | None = None
 
     def __post_init__(self) -> None:
         if self.force_cpu and self.force_gpu:
             raise ValueError(
                 "runtime.force_cpu and runtime.force_gpu are mutually exclusive."
+            )
+        if self.mps_async_dispatch is not None:
+            self.mps_async_dispatch = _require_bool(
+                "runtime.mps_async_dispatch", self.mps_async_dispatch
             )
         for name, value in (
             ("parallelism", self.parallelism),
@@ -133,6 +139,13 @@ class RuntimeConfig:
             ),
             max_worker_retries=int(payload.get("max_worker_retries", 2)),
             worker_threads=int(payload.get("worker_threads", 1)),
+            mps_async_dispatch=(
+                _require_bool(
+                    "runtime.mps_async_dispatch", payload["mps_async_dispatch"]
+                )
+                if "mps_async_dispatch" in payload
+                else None
+            ),
         )
 
 

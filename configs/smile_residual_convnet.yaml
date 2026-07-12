@@ -10,7 +10,7 @@ architecture:
   parameter_root: core
   batch_stats_root: batch_stats
   residual_topology: null
-  residual_connections: []
+  linear_residual_free: false
 
 pipeline: [canonicalize, match]
 

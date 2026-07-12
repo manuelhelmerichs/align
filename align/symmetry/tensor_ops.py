@@ -30,15 +30,6 @@ def _maybe_descend(mapping: Mapping[str, Any], path: Sequence[str]) -> Any | Non
     return node
 
 
-def _set_path(
-    mapping: dict[str, Any], path: Sequence[str], value: Any
-) -> None:  # pragma: no cover - trivial
-    node: dict[str, Any] = mapping
-    for key in path[:-1]:
-        node = node[key]  # type: ignore[index]
-    node[path[-1]] = value
-
-
 def _array_backend(arr: Any):
     """Return the array namespace (numpy or jax.numpy) matching ``arr``."""
     if isinstance(arr, jnp.ndarray):
@@ -53,6 +44,26 @@ def _canonical_axis(ndim: int, axis: int) -> int:
     if axis < 0 or axis >= ndim:
         raise ValueError(f"Axis {axis} is out of bounds for ndim={ndim}.")
     return axis
+
+
+def scale_axis(
+    tensor: Any,
+    factors: Any,
+    *,
+    axis: int,
+    divide: bool = False,
+    power: float = 1.0,
+) -> Any:
+    """Multiply or divide a full tensor axis using backend-native broadcasting."""
+
+    xp = _array_backend(tensor)
+    factor = xp.asarray(factors)
+    if power != 1.0:
+        factor = factor**power
+    shape = [1] * xp.ndim(tensor)
+    shape[axis] = factor.shape[0]
+    factor = factor.reshape(shape)
+    return tensor / factor if divide else tensor * factor
 
 
 def binding_axis_interval(shape: Sequence[int], binding: Any) -> tuple[int, int, int]:
@@ -150,14 +161,6 @@ def binding_sort_key(shape: Sequence[int], binding: Any) -> tuple[int, int, str]
         _canonical_axis(len(shape), binding.axis),
         binding.group,
     )
-
-
-def axis_slice(ndim: int, axis: int, start: int, stop: int) -> tuple[slice, ...]:
-    """Return an index tuple selecting ``[start, stop)`` along one axis."""
-
-    indexer = [slice(None)] * ndim
-    indexer[axis] = slice(start, stop)
-    return tuple(indexer)
 
 
 def binding_indexer(
@@ -294,11 +297,11 @@ __all__ = [
     "apply_matrix_to_axis",
     "apply_group_transform_to_axis",
     "apply_perm_to_axis",
-    "axis_slice",
     "binding_axis_interval",
     "binding_axis_intervals",
     "binding_indexer",
     "binding_selector",
     "binding_sort_key",
     "binding_transform_matrix",
+    "scale_axis",
 ]

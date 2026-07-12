@@ -37,7 +37,9 @@ def __getattr__(name: str) -> Any:
     except KeyError as exc:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
     module = importlib.import_module(module_name)
-    return getattr(module, name)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
 
 
 def __dir__() -> list[str]:

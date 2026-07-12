@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from ..run_state import ArtifactChecksumStore, file_checksum
+from ..run_state import ArtifactChecksumStore, file_checksum, write_npz_compressed
 from ..sample_manifest import SampleManifest, SampleRecord
 from ..samples import WeightSample, create_sample_codec
 from .resources import STATE_SAVE_INTERVAL_SECONDS
@@ -58,20 +58,11 @@ def _read_npz_artifact(
     return arrays, metadata
 
 
-def write_transforms_artifact(
-    path: str | Path,
+def _transform_artifact_payload(
     transforms: Mapping[str, Any],
     *,
     transform_families: Mapping[str, str] | None = None,
-) -> Path | None:
-    """Persist exact hard transforms keyed by stable symmetry-group id."""
-
-    path = Path(path)
-    if not transforms:
-        if path.exists():
-            path.unlink()
-        return None
-
+) -> dict[str, np.ndarray]:
     families = dict(transform_families or {})
     if set(families) != set(transforms):
         raise ValueError(
@@ -107,9 +98,38 @@ def write_transforms_artifact(
             "representations": representations,
         }
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, **payload)
-    return path
+    return payload
+
+
+def write_transforms_artifact(
+    path: str | Path,
+    transforms: Mapping[str, Any],
+    *,
+    transform_families: Mapping[str, str] | None = None,
+) -> Path | None:
+    """Persist exact hard transforms keyed by stable symmetry-group id."""
+
+    written, _ = write_transforms_artifact_with_checksum(
+        path, transforms, transform_families=transform_families
+    )
+    return written
+
+
+def write_transforms_artifact_with_checksum(
+    path: str | Path,
+    transforms: Mapping[str, Any],
+    *,
+    transform_families: Mapping[str, str] | None = None,
+) -> tuple[Path | None, int]:
+    path = Path(path)
+    if not transforms:
+        if path.exists():
+            path.unlink()
+        return None, 0
+    payload = _transform_artifact_payload(
+        transforms, transform_families=transform_families
+    )
+    return path, write_npz_compressed(path, payload)
 
 
 def read_transforms_artifact(
@@ -123,18 +143,23 @@ def read_transforms_artifact(
 def write_scales_artifact(path: str | Path, scales: Mapping[str, Any]) -> Path | None:
     """Persist scale vectors keyed by stable group or constraint id."""
 
+    written, _ = write_scales_artifact_with_checksum(path, scales)
+    return written
+
+
+def write_scales_artifact_with_checksum(
+    path: str | Path, scales: Mapping[str, Any]
+) -> tuple[Path | None, int]:
     path = Path(path)
     if not scales:
         if path.exists():
             path.unlink()
-        return None
+        return None, 0
     payload = {str(scale_id): np.asarray(scale) for scale_id, scale in scales.items()}
     payload[_METADATA_KEY] = _artifact_metadata(
         {"artifact_type": "scales", "scale_ids": list(payload)}
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, **payload)
-    return path
+    return path, write_npz_compressed(path, payload)
 
 
 def read_scales_artifact(
@@ -275,6 +300,12 @@ class RunArtifactStore:
     def optional_artifacts(self) -> set[str]:
         return {"transforms", "scales"}
 
+    @property
+    def static_config(self) -> Mapping[str, Mapping[str, Any]]:
+        """Return copies of accumulated stage-level diagnostics."""
+
+        return {stage: dict(payload) for stage, payload in self._static_config.items()}
+
     def artifact_paths(self, record: SampleRecord) -> Mapping[str, Path]:
         rel = self._relative_sample_path(record)
         paths: dict[str, Path] = {"aligned_sample": self.aligned_samples_dir / rel}
@@ -363,9 +394,11 @@ class RunArtifactStore:
     def write_aligned_sample(self, record: SampleRecord, sample: WeightSample) -> None:
         path = self.artifact_paths(record)["aligned_sample"]
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.sample_codec.save(path, sample)
+        checksum = self.sample_codec.save(path, sample)
         self._copy_structure_once(self.aligned_samples_dir)
-        self._update_checksum(record, kind="aligned_sample", path=path)
+        self._update_checksum(
+            record, kind="aligned_sample", path=path, checksum_value=checksum
+        )
 
     def write_stage_output(
         self, record: SampleRecord, stage: str, sample: WeightSample
@@ -375,9 +408,9 @@ class RunArtifactStore:
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.sample_codec.save(path, sample)
+        checksum = self.sample_codec.save(path, sample)
         self._copy_structure_once(self.stage_output_dirs[stage])
-        self._update_checksum(record, kind=kind, path=path)
+        self._update_checksum(record, kind=kind, path=path, checksum_value=checksum)
 
     def write_transforms(
         self,
@@ -389,19 +422,23 @@ class RunArtifactStore:
         path = self.artifact_paths(record).get("transforms")
         if path is None:
             return
-        written = write_transforms_artifact(
+        written, checksum = write_transforms_artifact_with_checksum(
             path,
             transforms,
             transform_families=transform_families,
         )
-        self._update_checksum(record, kind="transforms", path=written)
+        self._update_checksum(
+            record, kind="transforms", path=written, checksum_value=checksum
+        )
 
     def write_scales(self, record: SampleRecord, scales: Mapping[str, Any]) -> None:
         path = self.artifact_paths(record).get("scales")
         if path is None:
             return
-        written = write_scales_artifact(path, scales)
-        self._update_checksum(record, kind="scales", path=written)
+        written, checksum = write_scales_artifact_with_checksum(path, scales)
+        self._update_checksum(
+            record, kind="scales", path=written, checksum_value=checksum
+        )
 
     def write_diagnostics(
         self, record: SampleRecord, payload: Mapping[str, Any]
@@ -526,5 +563,7 @@ __all__ = [
     "read_transforms_artifact",
     "write_diagnostics_artifact",
     "write_scales_artifact",
+    "write_scales_artifact_with_checksum",
     "write_transforms_artifact",
+    "write_transforms_artifact_with_checksum",
 ]

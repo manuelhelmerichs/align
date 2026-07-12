@@ -26,10 +26,32 @@ class Objective(ABC):
 
     name: str
 
+    def validate_graph(self, graph) -> None:
+        """Validate static objective artifacts against a symmetry graph."""
+        del graph
+
+    def value_hard_numpy(self, graph, reference_data, target_data, state) -> float:
+        """Evaluate a hard state on host; subclasses may use compact actions."""
+
+        value = self.value(graph, reference_data, target_data, state)
+        return float(np.ravel(np.asarray(value))[0])
+
     def begin_lap_execution(self, graph, target_data) -> None:
         """Create a sweep-local cache of target tensors with other groups applied."""
 
         self._lap_execution_cache = _LAPExecutionCache(graph, target_data)
+
+    def set_reference_data(self, reference_data) -> None:
+        """Own the current reference identity for structured execution caches."""
+
+        if getattr(self, "_reference_data", None) is not reference_data:
+            self._reference_data = reference_data
+            self._reference_token = object()
+            self._attention_reference_cache = {}
+
+    @property
+    def reference_token(self):
+        return getattr(self, "_reference_token", None)
 
     def end_lap_execution(self) -> None:
         self._lap_execution_cache = None
@@ -312,6 +334,16 @@ class EuclideanObjective(Objective):
 
     name = "euclidean"
 
+    def value_hard_numpy(self, graph, reference_data, target_data, state) -> float:
+        loss = 0.0
+        for tensor_id in graph.tensors:
+            aligned = _apply_other_groups_hard(
+                graph, tensor_id, target_data[tensor_id], state, frozenset()
+            )
+            difference = np.asarray(reference_data[tensor_id]) - np.asarray(aligned)
+            loss += float(np.vdot(difference, difference).real)
+        return loss
+
     def __init__(self, repeated_group_policy: str = "reject") -> None:
         if repeated_group_policy != "reject":
             raise ValueError(
@@ -432,6 +464,28 @@ class DiagonalFisherObjective(Objective):
                 f"{weight.shape}, expected {expected}."
             )
         return weight
+
+    def validate_graph(self, graph) -> None:
+        unknown = sorted(set(self.tensor_weights) - set(graph.tensors))
+        if unknown:
+            raise ValueError(
+                "diagonal_fisher has weights for unknown graph tensor(s): "
+                + ", ".join(unknown)
+            )
+        for tensor_id in graph.tensors:
+            self._weight(graph, tensor_id)
+
+    def value_hard_numpy(self, graph, reference_data, target_data, state) -> float:
+        loss = 0.0
+        for tensor_id in graph.tensors:
+            aligned = _apply_other_groups_hard(
+                graph, tensor_id, target_data[tensor_id], state, frozenset()
+            )
+            difference = np.asarray(reference_data[tensor_id]) - np.asarray(aligned)
+            loss += float(
+                np.sum(self._weight(graph, tensor_id) * np.square(difference))
+            )
+        return loss
 
     def value(self, graph, reference_data, target_data, state):
         loss = None
@@ -582,6 +636,16 @@ class RelativeFisherObjective(Objective):
             )
         self._validated_metrics[cache_key] = (axes, gram)
         return axes, gram
+
+    def validate_graph(self, graph) -> None:
+        unknown = sorted(set(self.tensor_metrics) - set(graph.tensors))
+        if unknown:
+            raise ValueError(
+                "relative_fisher has metrics for unknown graph tensor(s): "
+                + ", ".join(unknown)
+            )
+        for tensor_id in graph.tensors:
+            self._metric(graph, tensor_id)
 
     @staticmethod
     def _quadratic(diff, axes, gram, *, tensor_ndim: int):

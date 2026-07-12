@@ -1,5 +1,7 @@
 """Tests for component-structured symmetry graphs."""
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -165,6 +167,15 @@ class TestComponentValidation:
 
 
 class TestComponentListing:
+    def test_graph_public_mappings_and_nested_metadata_are_immutable(self):
+        graph, _ = _mlp_graph()
+        with pytest.raises(TypeError):
+            graph.groups["new"] = SymmetryGroup(id="new", size=1)
+        with pytest.raises(TypeError):
+            graph.metadata["group_order"] = ()
+        with pytest.raises(TypeError):
+            graph.metadata["layer_paths"][0] = ("changed",)
+
     def test_mlp_emits_semantic_component(self):
         graph, _ = _mlp_graph()
         assert set(graph.components) == {"mlp"}
@@ -184,7 +195,7 @@ class TestComponentListing:
 
     def test_describe_symmetry_without_components_uses_implicit_all(self):
         graph, _ = _mlp_graph()
-        graph.components = {}
+        graph = dataclasses.replace(graph, components={})
         (component,) = describe_symmetry(graph)["components"]
         assert component["id"] == "all"
         assert len(component["groups"]) == 2
@@ -209,7 +220,7 @@ class TestComponentSelection:
 
     def test_resolve_patterns_requires_components(self):
         graph, _ = _mlp_graph()
-        graph.components = {}
+        graph = dataclasses.replace(graph, components={})
         with pytest.raises(ValueError, match="declares no components"):
             resolve_component_patterns(graph, ["fcn"])
 

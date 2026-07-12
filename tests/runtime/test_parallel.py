@@ -32,7 +32,7 @@ def test_device_plan_gpu_autodetect(monkeypatch):
         strategy_prefers_gpu=True,
         allow_device_sharing=True,
     )
-    monkeypatch.setattr(pool, "_visible_gpu_ids", lambda: [5])
+    monkeypatch.setattr(pool, "_visible_gpu_devices", lambda: [(5, "gpu")])
     plan = pool.device_plan(2)
     assert [cfg.device_id for cfg in plan] == [5, 5]
     assert all(cfg.device_type == "gpu" for cfg in plan)
@@ -40,6 +40,6 @@ def test_device_plan_gpu_autodetect(monkeypatch):
 
 def test_device_plan_rejects_implicit_accelerator_sharing(monkeypatch):
     pool = WorkerPool(parallelism=2, device_ids=None, strategy_prefers_gpu=True)
-    monkeypatch.setattr(pool, "_visible_gpu_ids", lambda: [0])
+    monkeypatch.setattr(pool, "_visible_gpu_devices", lambda: [(0, "gpu")])
     with pytest.raises(ValueError, match="allow_device_sharing"):
         pool.device_plan(2)

@@ -243,6 +243,7 @@ def _binding_profile(
                     stop,
                     binding.role,
                     binding.scale_power,
+                    binding.transform_scope,
                     group_index[binding.group],
                     selector,
                 )
@@ -267,7 +268,10 @@ def component_signature(graph: SymmetryGraph, component_id: str) -> tuple[Any, .
     )
     return (
         component.kind,
-        tuple(int(graph.groups[gid].size) for gid in ordered_groups),
+        tuple(
+            (int(graph.groups[gid].size), graph.groups[gid].transform_family)
+            for gid in ordered_groups
+        ),
         tuple(profiles),
     )
 

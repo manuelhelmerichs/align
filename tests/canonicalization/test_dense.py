@@ -29,6 +29,7 @@ def _canonicalize(layers, **kwargs):
     ``test_balanced_scale.py``.
     """
     kwargs.setdefault("strategy", "unit_norm")
+    kwargs.setdefault("activation", "relu")
     params = {
         "fcn": {
             f"Dense_{idx}": {"kernel": layer.kernel, "bias": layer.bias}
@@ -47,6 +48,18 @@ def _canonicalize(layers, **kwargs):
         for path in graph.metadata["layer_paths"]
     ]
     return normalized_layers, scales, aux
+
+
+def test_dense_plan_requires_explicit_activation():
+    params = {
+        "fcn": {
+            "Dense_0": {"kernel": jnp.ones((2, 3)), "bias": jnp.zeros((3,))},
+            "Dense_1": {"kernel": jnp.ones((3, 1)), "bias": jnp.zeros((1,))},
+        }
+    }
+    graph = MLPRecipe(parameter_root="fcn").build_graph(params)
+    with pytest.raises(ValueError, match="requires an explicit.*activation"):
+        ScaleCanonicalizer().canonicalize(graph, params)
 
 
 class TestComputeIncomingNorms:
@@ -293,7 +306,7 @@ class TestRecipeCanonicalize:
         recipe = MLPRecipe(parameter_root="fcn")
         graph = recipe.build_graph(params)
         normalized_params, scales, aux = ScaleCanonicalizer().canonicalize(
-            graph, params
+            graph, params, activation="relu"
         )
 
         assert "fcn" in normalized_params
@@ -313,7 +326,7 @@ class TestRecipeCanonicalize:
         recipe = MLPRecipe(parameter_root="fcn")
         graph = recipe.build_graph(params)
         with pytest.raises(ValueError, match="at least one hidden permutation group"):
-            ScaleCanonicalizer().canonicalize(graph, params)
+            ScaleCanonicalizer().canonicalize(graph, params, activation="relu")
 
     def test_recipe_canonicalize_with_all_kwargs(self):
         params = {

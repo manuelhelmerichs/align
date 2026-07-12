@@ -52,7 +52,6 @@ selection:
 canonicalize:
   # GELU FFN hidden units carry no scale symmetry; the plan touches only
   # RMSNorm gammas and the attention circuits.
-  activation: gelu
 
 match:
   objective:

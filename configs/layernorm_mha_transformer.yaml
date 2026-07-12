@@ -35,7 +35,6 @@ canonicalize:
   # dimension (qk and vo); canonicalization balances the query/key and
   # value/out energies. GELU FFN hidden units have no scale symmetry and stay
   # untouched.
-  activation: gelu
 
 match:
   objective:

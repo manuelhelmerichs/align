@@ -36,7 +36,7 @@ def configure_jax_platforms(
         env_updates["JAX_VISIBLE_DEVICES"] = ""
     else:
         gpu_platform = _preferred_gpu_platform()
-        if gpu_platform is not None:
+        if gpu_platform is not None and _probe_platform(gpu_platform):
             env_updates["JAX_PLATFORMS"] = f"{gpu_platform},cpu"
             if not allow_preallocation:
                 env_updates.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -78,6 +78,8 @@ def _normalize_jax_platform_env() -> None:
 def _looks_like_cuda_system() -> bool:
     if os.environ.get("ROCR_VISIBLE_DEVICES"):
         return False
+    if not _cuda_plugin_installed():
+        return False
     cuda_env = os.environ.get("CUDA_VISIBLE_DEVICES")
     if cuda_env is not None and cuda_env.strip() != "":
         return True
@@ -104,6 +106,44 @@ def _looks_like_mps_system() -> bool:
     except metadata.PackageNotFoundError:
         return False
     return True
+
+
+def _cuda_plugin_installed() -> bool:
+    for distribution in (
+        "jax-cuda13-plugin",
+        "jax-cuda12-plugin",
+        "jax-cuda11-plugin",
+    ):
+        try:
+            metadata.version(distribution)
+        except metadata.PackageNotFoundError:
+            continue
+        return True
+    return False
+
+
+def _probe_platform(name: str) -> bool:
+    """Initialize a candidate backend in a disposable child process."""
+
+    env = dict(os.environ)
+    env["JAX_PLATFORMS"] = name
+    command = (
+        "import jax; "
+        f"devices=[d for d in jax.devices() if d.platform == {name!r}]; "
+        "raise SystemExit(0 if devices else 1)"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", command],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _preferred_gpu_platform() -> str | None:

@@ -203,6 +203,12 @@ def bundled_vit_params():
 
 
 class TestTransformerStructure:
+    def test_unknown_block_leaf_is_rejected_with_path_and_shape(self):
+        params = make_layernorm_mha_transformer_params(key=jax.random.PRNGKey(99))
+        params["Block_0"]["mystery_parameter"] = np.zeros((2, 3), dtype=np.float32)
+        with pytest.raises(ValueError, match=r"Block_0/mystery_parameter.*\(2, 3\)"):
+            LayerNormMHATransformerRecipe().build_graph(params)
+
     def test_gpt_style_blocks_and_groups(self):
         params = make_layernorm_mha_transformer_params(key=jax.random.PRNGKey(0))
         graph = LayerNormMHATransformerRecipe().build_graph(params)
@@ -268,9 +274,7 @@ class TestTransformerStructure:
     def test_canonicalize_uses_attention_balance_plan(self):
         params = make_layernorm_mha_transformer_params(key=jax.random.PRNGKey(0))
         graph = LayerNormMHATransformerRecipe().build_graph(params)
-        _, factors, aux = ScaleCanonicalizer().canonicalize(
-            graph, params, activation="gelu"
-        )
+        _, factors, aux = ScaleCanonicalizer().canonicalize(graph, params)
         assert aux["plan"] == "attention_balance"
         assert len(factors) == len(aux["balanced_groups"]) > 0
 

@@ -144,13 +144,22 @@ def test_residual_convnet_recipe_residual_grouping_permutes_all_sites():
         }
     }
     residual_topology = {
+        "schema": "align.residual_module_graph",
+        "version": 1,
         "nodes": [
-            {
-                "name": "add0",
-                "type": "add",
-                "inputs": ["core/Conv_0", "core/Conv_1"],
-            }
-        ]
+            {"id": "input", "kind": "input"},
+            {"id": "core/Conv_0", "kind": "conv", "normalizer": "core/FRN_0"},
+            {"id": "core/Conv_1", "kind": "conv", "normalizer": "core/FRN_1"},
+            {"id": "add0", "kind": "add"},
+            {"id": "core/Dense_0", "kind": "dense"},
+        ],
+        "edges": [
+            {"source": "input", "target": "core/Conv_0"},
+            {"source": "core/Conv_0", "target": "core/Conv_1"},
+            {"source": "core/Conv_0", "target": "add0"},
+            {"source": "core/Conv_1", "target": "add0"},
+            {"source": "add0", "target": "core/Dense_0"},
+        ],
     }
     recipe = ResidualConvNetRecipe(
         parameter_root="core", residual_topology=residual_topology
@@ -224,9 +233,20 @@ def test_residual_convnet_recipe_validates_join_sizes():
         }
     }
     residual_topology = {
+        "schema": "align.residual_module_graph",
+        "version": 1,
         "nodes": [
-            {"type": "add", "inputs": ["core/Conv_0", "core/Conv_1"]},
-        ]
+            {"id": "input", "kind": "input"},
+            {"id": "core/Conv_0", "kind": "conv"},
+            {"id": "core/Conv_1", "kind": "conv"},
+            {"id": "add", "kind": "add"},
+        ],
+        "edges": [
+            {"source": "input", "target": "core/Conv_0"},
+            {"source": "core/Conv_0", "target": "core/Conv_1"},
+            {"source": "core/Conv_0", "target": "add"},
+            {"source": "core/Conv_1", "target": "add"},
+        ],
     }
     recipe = ResidualConvNetRecipe(
         parameter_root="core", residual_topology=residual_topology
@@ -253,20 +273,35 @@ def test_residual_convnet_recipe_transitive_residual_union():
         }
     }
     residual_topology = {
+        "schema": "align.residual_module_graph",
+        "version": 1,
         "nodes": [
-            {"type": "add", "inputs": ["core/Conv_0", "core/Conv_1"]},
-            {"type": "add", "inputs": ["core/Conv_1", "core/Conv_2"]},
-        ]
+            {"id": "input", "kind": "input"},
+            {"id": "core/Conv_0", "kind": "conv"},
+            {"id": "core/Conv_1", "kind": "conv"},
+            {"id": "add0", "kind": "add"},
+            {"id": "core/Conv_2", "kind": "conv"},
+            {"id": "add1", "kind": "add"},
+        ],
+        "edges": [
+            {"source": "input", "target": "core/Conv_0"},
+            {"source": "core/Conv_0", "target": "core/Conv_1"},
+            {"source": "core/Conv_0", "target": "add0"},
+            {"source": "core/Conv_1", "target": "add0"},
+            {"source": "add0", "target": "core/Conv_2"},
+            {"source": "add0", "target": "add1"},
+            {"source": "core/Conv_2", "target": "add1"},
+        ],
     }
     recipe = ResidualConvNetRecipe(
         parameter_root="core", residual_topology=residual_topology
     )
     graph = recipe.build_graph(params)
     assert set(graph.groups) == {"core/Conv_0"}
-    assert graph.metadata["group_order"] == ["core/Conv_0"]
+    assert graph.metadata["group_order"] == ("core/Conv_0",)
 
 
-def test_residual_convnet_recipe_stream_token_requires_stream_id():
+def test_residual_convnet_recipe_rejects_legacy_descriptor():
     params = {
         "core": {
             "Conv_0": {
@@ -291,7 +326,7 @@ def test_residual_convnet_recipe_stream_token_requires_stream_id():
         recipe.build_graph(params)
 
 
-def test_residual_convnet_recipe_stream_token_resolves_stream_id():
+def test_residual_convnet_recipe_requires_explicit_dataflow_edges():
     params = {
         "core": {
             "Conv_0": {
@@ -305,19 +340,25 @@ def test_residual_convnet_recipe_stream_token_resolves_stream_id():
         }
     }
     residual_topology = {
+        "schema": "align.residual_module_graph",
+        "version": 1,
         "nodes": [
-            {
-                "type": "add",
-                "inputs": ["core/Conv_1", "stream"],
-                "stream_id": "core/Conv_0",
-            }
-        ]
+            {"id": "input", "kind": "input"},
+            {"id": "core/Conv_0", "kind": "conv"},
+            {"id": "core/Conv_1", "kind": "conv"},
+            {"id": "add", "kind": "add"},
+        ],
+        "edges": [
+            {"source": "input", "target": "core/Conv_0"},
+            {"source": "core/Conv_0", "target": "add"},
+            {"source": "core/Conv_1", "target": "add"},
+        ],
     }
     recipe = ResidualConvNetRecipe(
         parameter_root="core", residual_topology=residual_topology
     )
-    graph = recipe.build_graph(params)
-    assert set(graph.groups) == {"core/Conv_0"}
+    with pytest.raises(ValueError, match="exactly one incoming edge"):
+        recipe.build_graph(params)
 
 
 def test_residual_convnet_recipe_recursive_conv_discovery():
@@ -340,12 +381,22 @@ def test_residual_convnet_recipe_recursive_conv_discovery():
         }
     }
     residual_topology = {
+        "schema": "align.residual_module_graph",
+        "version": 1,
         "nodes": [
-            {
-                "type": "add",
-                "inputs": ["core/Block_0/Conv_1", "core/Conv_2"],
-            }
-        ]
+            {"id": "input", "kind": "input"},
+            {"id": "core/Block_0/Conv_0", "kind": "conv"},
+            {"id": "core/Block_0/Conv_1", "kind": "conv"},
+            {"id": "core/Conv_2", "kind": "conv"},
+            {"id": "add", "kind": "add"},
+        ],
+        "edges": [
+            {"source": "input", "target": "core/Block_0/Conv_0"},
+            {"source": "core/Block_0/Conv_0", "target": "core/Block_0/Conv_1"},
+            {"source": "core/Block_0/Conv_1", "target": "core/Conv_2"},
+            {"source": "core/Block_0/Conv_1", "target": "add"},
+            {"source": "core/Conv_2", "target": "add"},
+        ],
     }
     recipe = ResidualConvNetRecipe(
         parameter_root="core", residual_topology=residual_topology
@@ -382,7 +433,25 @@ def test_residual_convnet_recipe_batchnorm_permutation():
         },
     }
     recipe = ResidualConvNetRecipe(
-        parameter_root="params.core", batch_stats_root="batch_stats.core"
+        parameter_root="params.core",
+        batch_stats_root="batch_stats.core",
+        residual_topology={
+            "schema": "align.residual_module_graph",
+            "version": 1,
+            "nodes": [
+                {"id": "input", "kind": "input"},
+                {
+                    "id": "core/Conv_0",
+                    "kind": "conv",
+                    "normalizer": "core/BatchNorm_0",
+                },
+                {"id": "core/Dense_0", "kind": "dense"},
+            ],
+            "edges": [
+                {"source": "input", "target": "core/Conv_0"},
+                {"source": "core/Conv_0", "target": "core/Dense_0"},
+            ],
+        },
     )
     graph = recipe.build_graph(params)
     group_bindings = {

@@ -21,7 +21,7 @@ from ..symmetry import (
     MHACircuitConstraint,
     binding_axis_interval,
 )
-from .objectives import DiagonalFisherObjective, _apply_other_groups_hard
+from .objectives import DiagonalFisherObjective
 from .state import PermutationTransform, TransformState
 
 
@@ -111,6 +111,7 @@ def _projection_bias_id(graph, kernel_id: str) -> str | None:
 
 def _head_factor(
     graph,
+    objective,
     spec,
     data,
     tensor_id: str,
@@ -121,7 +122,7 @@ def _head_factor(
 ) -> np.ndarray:
     tensor = data[tensor_id]
     if state is not None:
-        tensor = _apply_other_groups_hard(
+        tensor = objective.apply_other_groups_hard(
             graph, tensor_id, tensor, state, skip_groups or set()
         )
     factor = _head_matrices(graph, spec, tensor_id, tensor)
@@ -129,7 +130,7 @@ def _head_factor(
     if bias_id is not None:
         bias = data[bias_id]
         if state is not None:
-            bias = _apply_other_groups_hard(
+            bias = objective.apply_other_groups_hard(
                 graph, bias_id, bias, state, skip_groups or set()
             )
         factor = np.concatenate(
@@ -139,13 +140,20 @@ def _head_factor(
 
 
 def _circuits(
-    graph, spec, data, *, state=None, skip_groups: set[str] | None = None
+    graph,
+    spec,
+    data,
+    *,
+    objective=None,
+    state=None,
+    skip_groups: set[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return stacked QK and OV circuit matrices, one pair per head."""
 
     tensors = {
         tensor_id: _head_factor(
             graph,
+            objective,
             spec,
             data,
             tensor_id,
@@ -264,6 +272,7 @@ def _mha_circuit_precisions(graph, objective, reference_data, spec):
     factors = {
         tensor_id: _head_factor(
             graph,
+            objective,
             spec,
             reference_data,
             tensor_id,
@@ -282,6 +291,7 @@ def _mha_circuit_precisions(graph, objective, reference_data, spec):
     fisher = {
         tensor_id: _head_factor(
             graph,
+            objective,
             spec,
             fisher_data,
             tensor_id,
@@ -325,7 +335,7 @@ def head_cost_matrix(
     """
 
     cache = _reference_attention_cache(objective)
-    cache_key = ("mha", id(graph), id(reference_data), spec)
+    cache_key = ("mha", id(graph), objective.reference_token, spec)
     prepared = cache.get(cache_key)
     if prepared is None:
         ref_qk, ref_ov = _circuits(graph, spec, reference_data)
@@ -341,6 +351,7 @@ def head_cost_matrix(
         graph,
         spec,
         target_data,
+        objective=objective,
         state=state,
         skip_groups=set(spec.groups),
     )
@@ -484,7 +495,13 @@ def gqa_module_specs(graph) -> tuple[GQAModuleSpec, ...]:
 
 
 def _gqa_circuits(
-    graph, spec: GQAModuleSpec, data, *, state=None, skip_groups=None
+    graph,
+    spec: GQAModuleSpec,
+    data,
+    *,
+    objective=None,
+    state=None,
+    skip_groups=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-query-head QK and OV circuit matrices, shape ``(G, R, d, d)``.
 
@@ -499,7 +516,7 @@ def _gqa_circuits(
     for tensor_id in (spec.query, spec.key, spec.value, spec.out):
         tensor = data[tensor_id]
         if state is not None:
-            tensor = _apply_other_groups_hard(
+            tensor = objective.apply_other_groups_hard(
                 graph, tensor_id, tensor, state, skip_groups or set()
             )
         tensors[tensor_id] = np.asarray(tensor)
@@ -590,7 +607,7 @@ def gqa_head_cost_matrix(
     """
 
     cache = _reference_attention_cache(objective)
-    cache_key = ("gqa", id(graph), id(reference_data), spec)
+    cache_key = ("gqa", id(graph), objective.reference_token, spec)
     prepared = cache.get(cache_key)
     if prepared is None:
         ref_qk, ref_ov = _gqa_circuits(graph, spec, reference_data)
@@ -606,6 +623,7 @@ def gqa_head_cost_matrix(
         graph,
         spec,
         target_data,
+        objective=objective,
         state=state,
         skip_groups=set(spec.groups),
     )

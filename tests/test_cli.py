@@ -8,11 +8,56 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 from align import _jax_platforms
 from align.cli import main as align_main
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_cli_pipeline_override_prunes_inactive_stage_sections(tmp_path):
+    from align.cli import _cli_overrides, build_parser
+    from align.config import load_align_config
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "pipeline": ["canonicalize", "match"],
+                "canonicalize": {"activation": "relu"},
+                "match": {"objective": {"type": "euclidean"}},
+            }
+        )
+    )
+    args = build_parser().parse_args([str(path), "--match-only"])
+    config = load_align_config(path, _cli_overrides(args))
+    assert config.pipeline == ("match",)
+    assert config.canonicalize is None
+    assert config.match is not None
+
+
+def test_cli_architecture_override_replaces_prior_family_options(tmp_path):
+    from align.cli import _cli_overrides, build_parser
+    from align.config import load_align_config
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "architecture": {
+                    "family": "residual_convnet",
+                    "parameter_root": "core",
+                    "linear_residual_free": True,
+                },
+                "pipeline": ["match"],
+            }
+        )
+    )
+    args = build_parser().parse_args([str(path), "--architecture", "mlp"])
+    config = load_align_config(path, _cli_overrides(args))
+    assert config.architecture.family == "mlp"
+    assert config.architecture.options == {}
 
 
 def test_config_digest_includes_every_active_stage_config():
@@ -79,12 +124,27 @@ if any(name == 'jax' or name.startswith('jax.') for name in sys.modules):
 def test_gpu_platform_configuration_supports_mps(monkeypatch):
     monkeypatch.delenv("JAX_PLATFORMS", raising=False)
     monkeypatch.setattr(_jax_platforms, "_preferred_gpu_platform", lambda: "mps")
+    monkeypatch.setattr(_jax_platforms, "_probe_platform", lambda platform: True)
 
     preference = _jax_platforms.configure_jax_platforms("gpu")
 
     assert preference == "gpu"
     assert os.environ["JAX_PLATFORMS"] == "mps,cpu"
     assert _jax_platforms.is_gpu_platform("mps")
+
+
+def test_cuda_hardware_without_jax_plugin_is_not_selected(monkeypatch):
+    monkeypatch.setattr(_jax_platforms, "_cuda_plugin_installed", lambda: False)
+    monkeypatch.setattr(_jax_platforms.shutil, "which", lambda _name: "/bin/nvidia-smi")
+    assert not _jax_platforms._looks_like_cuda_system()
+
+
+def test_broken_accelerator_probe_falls_back_before_jax_import(monkeypatch):
+    monkeypatch.delenv("JAX_PLATFORMS", raising=False)
+    monkeypatch.setattr(_jax_platforms, "_preferred_gpu_platform", lambda: "mps")
+    monkeypatch.setattr(_jax_platforms, "_probe_platform", lambda _platform: False)
+    assert _jax_platforms.configure_jax_platforms("gpu") == "cpu"
+    assert os.environ["JAX_PLATFORMS"] == "cpu"
 
 
 def _write_sample(path: Path) -> None:
@@ -104,7 +164,7 @@ def _make_experiment(tmp_path: Path) -> Path:
 
 
 def test_cli_dry_run_produces_state(tmp_path) -> None:
-    exp_root = _make_experiment(tmp_path)
+    exp_root = _make_mlp_experiment(tmp_path)
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -112,6 +172,8 @@ def test_cli_dry_run_produces_state(tmp_path) -> None:
 paths:
   experiment_root: {exp_root}
 pipeline: [canonicalize]
+canonicalize:
+  activation: relu
 selection:
   reference_chain: 0
   reference_sample: 0
@@ -147,7 +209,7 @@ runtime:
 
 
 def test_cli_match_only_override(tmp_path):
-    exp_root = _make_experiment(tmp_path)
+    exp_root = _make_mlp_experiment(tmp_path)
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -467,7 +529,7 @@ runtime:
 
 
 def test_cli_validate_only_exits_without_running(tmp_path, capsys) -> None:
-    exp_root = _make_experiment(tmp_path)
+    exp_root = _make_mlp_experiment(tmp_path)
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -475,6 +537,8 @@ def test_cli_validate_only_exits_without_running(tmp_path, capsys) -> None:
 paths:
   experiment_root: {exp_root}
 pipeline: [canonicalize]
+canonicalize:
+  activation: relu
 selection:
   reference_chain: 0
   reference_sample: 0
@@ -488,7 +552,7 @@ runtime:
 
     out = capsys.readouterr().out
     assert "Validation successful. No alignment executed." in out
-    assert (output_dir / "state" / "run_state.json").exists()
+    assert not output_dir.exists()
     assert not (output_dir / "aligned_samples").exists()
 
 
@@ -577,6 +641,7 @@ paths:
 architecture:
   family: {family}
   parameter_root: {json.dumps(parameter_root)}
+  {"linear_residual_free: true" if family == "residual_convnet" else ""}
 pipeline: [match]
 selection:
   reference_chain: 0

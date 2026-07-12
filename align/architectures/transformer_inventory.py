@@ -8,7 +8,6 @@ compose the appropriate rules.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -16,20 +15,8 @@ from typing import Any
 import numpy as np
 
 from ..symmetry.tensor_ops import _descend, _maybe_descend
+from ._utils import natural_key, path_key
 from .rules import is_attention_module, is_dense_module
-
-
-def natural_key(value: str) -> list[int | str]:
-    """Natural-sort one path segment."""
-
-    parts = re.split(r"(\d+)", value)
-    return [int(part) if part.isdigit() else part for part in parts if part]
-
-
-def path_key(path: tuple[str, ...]) -> list[list[int | str]]:
-    """Natural-sort a parameter path segment by segment."""
-
-    return [natural_key(part) for part in path]
 
 
 def array_shape(node: Any) -> tuple[int, ...]:
@@ -251,6 +238,16 @@ def _collect_block_layers(
     norms: list[tuple[str, ...]] = []
     dense: list[DenseLayerInventory] = []
     attention_rel = attention_path[len(scope_path) :]
+    recognized: set[tuple[str, ...]] = set()
+
+    def _leaves(node: Any, prefix: tuple[str, ...]):
+        if isinstance(node, Mapping):
+            for child_name, child in node.items():
+                yield from _leaves(child, (*prefix, str(child_name)))
+        elif np.shape(node):
+            yield prefix
+
+    all_leaves = set(_leaves(scope, scope_path))
 
     def _walk(node: Mapping[str, Any], prefix: tuple[str, ...]) -> None:
         for name, value in node.items():
@@ -258,6 +255,25 @@ def _collect_block_layers(
                 continue
             path = prefix + (str(name),)
             if path == attention_rel:
+                allowed_children = {"query", "key", "value", "out"}
+                if set(value) != allowed_children:
+                    extras = sorted(set(value) - allowed_children)
+                    missing = sorted(allowed_children - set(value))
+                    raise ValueError(
+                        f"Attention module {'/'.join(attention_path)} has "
+                        f"unexpected children; missing={missing}, extra={extras}."
+                    )
+                for child_name, child in value.items():
+                    if (
+                        not isinstance(child, Mapping)
+                        or "kernel" not in child
+                        or not set(child) <= {"kernel", "bias"}
+                    ):
+                        raise ValueError(
+                            f"Attention projection {'/'.join((*attention_path, child_name))} "
+                            "must contain kernel and optional bias only."
+                        )
+                recognized.update(_leaves(value, attention_path))
                 continue
             if attention_rel[: len(path)] == path:
                 _walk(value, path)
@@ -266,12 +282,24 @@ def _collect_block_layers(
             if norm_predicate(value):
                 validate_norm(value, full_path)
                 norms.append(full_path)
+                recognized.update(_leaves(value, full_path))
             elif is_dense_module(value):
                 dense.append(_dense_layer(full_path, value))
+                recognized.update(_leaves(value, full_path))
             else:
                 _walk(value, path)
 
     _walk(scope, ())
+    unknown = sorted(all_leaves - recognized, key=path_key)
+    if unknown:
+        detail = ", ".join(
+            f"{'/'.join(path)} shape={array_shape(_descend(scope, path[len(scope_path) :]))}"
+            for path in unknown
+        )
+        raise ValueError(
+            f"Transformer block {'/'.join(scope_path)} contains unrecognized "
+            f"parameter leaves: {detail}."
+        )
     norms.sort(key=path_key)
     dense.sort(key=lambda layer: path_key(layer.path))
     return norms, dense

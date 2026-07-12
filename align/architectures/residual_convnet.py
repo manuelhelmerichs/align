@@ -1,34 +1,30 @@
-"""ResNet-style architecture recipe (conv + FRN/BN) over one conv-stack component."""
+"""Residual ConvNet recipe driven by an explicit, versioned module DAG."""
 
-import dataclasses
+from __future__ import annotations
+
 import json
-from collections.abc import Mapping, Sequence
+from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
 import numpy as np
-import yaml
 
 from ..symmetry import ResidualChannelTie, SymmetryGraph
 from ..symmetry.tensor_ops import _canonical_axis, _descend, _maybe_descend
+from ._utils import natural_key as _natural_key
 from .graph_builder import SymmetryGraphBuilder
 from .recipe import ArchitectureRecipe, register_recipe
 from .rules import SymmetryRule
 from .schemas import RESIDUAL_CONVNET_OPTIONS
 
-
-def _natural_key(value: str) -> list[int | str]:
-    """Split a string into textual and numerical chunks for natural sorting."""
-
-    import re
-
-    parts = re.split(r"(\d+)", value)
-    return [int(part) if part.isdigit() else part for part in parts if part]
+_TOPOLOGY_SCHEMA = "align.residual_module_graph"
+_TOPOLOGY_VERSION = 1
 
 
 class _GroupUnionFind:
-    """Union-find that validates consistent channel sizes."""
+    """Union-find that validates equal channel sizes."""
 
     def __init__(self) -> None:
         self.parent: dict[str, str] = {}
@@ -36,382 +32,395 @@ class _GroupUnionFind:
 
     def add(self, name: str, size: int) -> None:
         if name in self.parent:
-            if self.size[name] != size:
-                raise ValueError(
-                    f"Group '{name}' has inconsistent sizes: {self.size[name]} vs {size}."
-                )
-            return
+            raise ValueError(f"Duplicate channel producer {name!r}.")
         self.parent[name] = name
         self.size[name] = size
 
     def find(self, name: str) -> str:
-        if name not in self.parent:
-            raise KeyError(name)
         parent = self.parent[name]
         if parent != name:
             self.parent[name] = self.find(parent)
         return self.parent[name]
 
-    def union(self, left: str, right: str) -> str:
-        root_left = self.find(left)
-        root_right = self.find(right)
-        if root_left == root_right:
-            return root_left
-        size_left = self.size[root_left]
-        size_right = self.size[root_right]
-        if size_left != size_right:
+    def union(self, left: str, right: str) -> None:
+        left_root, right_root = self.find(left), self.find(right)
+        if left_root == right_root:
+            return
+        if self.size[left_root] != self.size[right_root]:
             raise ValueError(
-                "Residual join requires matching channel sizes: "
-                f"{root_left} has {size_left}, {root_right} has {size_right}."
+                "Residual add requires equal channel sizes: "
+                f"{left!r} has {self.size[left_root]}, {right!r} has "
+                f"{self.size[right_root]}."
             )
-        self.parent[root_right] = root_left
-        return root_left
+        # Union direction is deterministic and independent of descriptor or
+        # parameter mapping order.
+        canonical, other = sorted((left_root, right_root), key=_natural_key)
+        self.parent[other] = canonical
 
-    def roots(self) -> dict[str, int]:
-        return {
-            name: size for name, size in self.size.items() if self.find(name) == name
-        }
+
+@dataclass(frozen=True)
+class _ModuleNode:
+    id: str
+    kind: str
+    normalizer: str | None = None
+
+
+@dataclass(frozen=True)
+class _ModuleTopology:
+    nodes: tuple[_ModuleNode, ...]
+    edges: tuple[tuple[str, str], ...]
+
+    @property
+    def by_id(self) -> dict[str, _ModuleNode]:
+        return {node.id: node for node in self.nodes}
+
+    @property
+    def incoming(self) -> dict[str, tuple[str, ...]]:
+        values: dict[str, list[str]] = defaultdict(list)
+        for source, target in self.edges:
+            values[target].append(source)
+        return {node.id: tuple(values[node.id]) for node in self.nodes}
+
+    def topological_order(self) -> tuple[str, ...]:
+        incoming_count = {node.id: 0 for node in self.nodes}
+        outgoing: dict[str, list[str]] = defaultdict(list)
+        for source, target in self.edges:
+            outgoing[source].append(target)
+            incoming_count[target] += 1
+        ready = sorted(
+            (node_id for node_id, count in incoming_count.items() if count == 0),
+            key=_natural_key,
+        )
+        ordered: list[str] = []
+        while ready:
+            node_id = ready.pop(0)
+            ordered.append(node_id)
+            for target in sorted(outgoing[node_id], key=_natural_key):
+                incoming_count[target] -= 1
+                if incoming_count[target] == 0:
+                    ready.append(target)
+                    ready.sort(key=_natural_key)
+        if len(ordered) != len(self.nodes):
+            cyclic = sorted(
+                (node_id for node_id, count in incoming_count.items() if count),
+                key=_natural_key,
+            )
+            raise ValueError("residual_topology contains a cycle: " + ", ".join(cyclic))
+        return tuple(ordered)
+
+
+def _strict_keys(label: str, value: Mapping[str, Any], allowed: set[str]) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(f"Unknown {label} field(s): {', '.join(unknown)}.")
+
+
+def _load_topology(value: Any) -> _ModuleTopology:
+    if isinstance(value, (str, Path)):
+        path = Path(value)
+        if not path.is_file():
+            raise FileNotFoundError(f"residual_topology path does not exist: {path}")
+        try:
+            value = json.loads(path.read_text())
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"residual_topology must be valid JSON: {path}") from exc
+    if not isinstance(value, Mapping):
+        raise ValueError("residual_topology must be a mapping or JSON file path.")
+    _strict_keys(
+        "residual_topology",
+        value,
+        {"schema", "version", "nodes", "edges", "metadata"},
+    )
+    if value.get("schema") != _TOPOLOGY_SCHEMA:
+        raise ValueError(f"residual_topology.schema must be {_TOPOLOGY_SCHEMA!r}.")
+    if value.get("version") != _TOPOLOGY_VERSION:
+        raise ValueError(f"residual_topology.version must be {_TOPOLOGY_VERSION}.")
+    raw_nodes, raw_edges = value.get("nodes"), value.get("edges")
+    if not isinstance(raw_nodes, list) or not raw_nodes:
+        raise ValueError("residual_topology.nodes must be a non-empty list.")
+    if not isinstance(raw_edges, list):
+        raise ValueError("residual_topology.edges must be a list.")
+
+    nodes: list[_ModuleNode] = []
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(raw_nodes):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"residual_topology.nodes[{index}] must be a mapping.")
+        _strict_keys(
+            f"residual_topology.nodes[{index}]", raw, {"id", "kind", "normalizer"}
+        )
+        node_id, kind = raw.get("id"), raw.get("kind")
+        if not isinstance(node_id, str) or not node_id:
+            raise ValueError(f"residual_topology.nodes[{index}].id must be non-empty.")
+        if node_id in seen_ids:
+            raise ValueError(f"Duplicate residual_topology node id {node_id!r}.")
+        if kind not in {"input", "conv", "dense", "add"}:
+            raise ValueError(
+                f"residual_topology node {node_id!r} has invalid kind {kind!r}."
+            )
+        normalizer = raw.get("normalizer")
+        if normalizer is not None and (
+            kind not in {"conv", "add"}
+            or not isinstance(normalizer, str)
+            or not normalizer
+        ):
+            raise ValueError(
+                f"Node {node_id!r} may declare a normalizer only for conv/add kinds."
+            )
+        nodes.append(_ModuleNode(node_id, kind, normalizer))
+        seen_ids.add(node_id)
+
+    edges: list[tuple[str, str]] = []
+    seen_edges: set[tuple[str, str]] = set()
+    for index, raw in enumerate(raw_edges):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"residual_topology.edges[{index}] must be a mapping.")
+        _strict_keys(f"residual_topology.edges[{index}]", raw, {"source", "target"})
+        source, target = raw.get("source"), raw.get("target")
+        if source not in seen_ids or target not in seen_ids:
+            raise ValueError(
+                f"residual_topology edge {index} references unknown nodes: "
+                f"{source!r} -> {target!r}."
+            )
+        edge = (source, target)
+        if source == target or edge in seen_edges:
+            raise ValueError(f"Invalid duplicate/self edge {source!r} -> {target!r}.")
+        edges.append(edge)
+        seen_edges.add(edge)
+
+    topology = _ModuleTopology(tuple(nodes), tuple(edges))
+    incoming = topology.incoming
+    for node in nodes:
+        count = len(incoming[node.id])
+        if node.kind == "input" and count != 0:
+            raise ValueError(f"Input node {node.id!r} cannot have incoming edges.")
+        if node.kind == "conv" and count != 1:
+            raise ValueError(
+                f"Conv node {node.id!r} must have exactly one incoming edge; use an input/add node."
+            )
+        if node.kind == "dense" and count != 1:
+            raise ValueError(
+                f"Dense node {node.id!r} must have exactly one incoming edge."
+            )
+        if node.kind == "add" and count < 2:
+            raise ValueError(
+                f"Add node {node.id!r} must have at least two incoming edges."
+            )
+    topology.topological_order()
+    return topology
 
 
 def _validate_channel_size(
     path: tuple[str, ...], array: Any, expected: int, *, axis: int = -1
 ) -> None:
-    """Ensure ``array`` has ``expected`` channels along ``axis``."""
     shape = np.shape(array)
     axis = _canonical_axis(len(shape), axis)
-    actual = shape[axis]
-    if actual != expected:
-        raise ValueError(f"{path} has channel dimension {actual}, expected {expected}.")
-
-
-def _load_graph_descriptor(descriptor: Any) -> Any:
-    """Load a module-graph descriptor from a mapping, list, or file path."""
-
-    if descriptor is None:
-        return None
-    if isinstance(descriptor, (str, Path)):
-        path = Path(descriptor)
-        if not path.exists():
-            raise FileNotFoundError(f"residual_topology path does not exist: {path}")
-        text = path.read_text()
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return yaml.safe_load(text)
-    return descriptor
-
-
-def _as_name_list(value: Any) -> list[str]:
-    """Normalize a possibly nested value into a list of string names."""
-
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, Mapping):
-        for key in ("name", "id", "target"):
-            if key in value and isinstance(value[key], str):
-                return [value[key]]
-        return []
-    if isinstance(value, Sequence):
-        names: list[str] = []
-        for item in value:
-            names.extend(_as_name_list(item))
-        return names
-    return []
-
-
-def _filter_conv_names(
-    names: Sequence[str], conv_set: set[str], *, allow_partial: bool = True
-) -> list[str]:
-    """Return known conv names, optionally allowing non-conv tokens."""
-
-    def _last_segment(name: str) -> str:
-        return name.split("/")[-1]
-
-    unknown_conv_like = [
-        name
-        for name in names
-        if isinstance(name, str)
-        and _last_segment(name).lower().startswith("conv")
-        and name not in conv_set
-    ]
-    if unknown_conv_like:
-        joined = ", ".join(unknown_conv_like)
-        raise ValueError(f"Residual descriptor references unknown convs: {joined}.")
-
-    known = [name for name in names if name in conv_set]
-    if known:
-        return known
-    if not allow_partial and names:
+    if shape[axis] != expected:
         raise ValueError(
-            f"Residual descriptor references unknown convs: {', '.join(names)}."
+            f"{path} has channel dimension {shape[axis]}, expected {expected}."
         )
-    return []
-
-
-def _merge_overlapping(groups: list[set[str]]) -> list[set[str]]:
-    """Merge overlapping residual groups inferred from descriptors."""
-
-    merged: list[set[str]] = []
-    for group in groups:
-        merged_group = set(group)
-        changed = True
-        while changed:
-            changed = False
-            for existing in list(merged):
-                if merged_group & existing:
-                    merged.remove(existing)
-                    merged_group |= existing
-                    changed = True
-        merged.append(merged_group)
-    return merged
-
-
-def _sort_groups(
-    groups: list[set[str]], order_index: Mapping[str, int]
-) -> list[set[str]]:
-    """Sort groups deterministically by first occurrence in conv order."""
-
-    def _key(group: set[str]) -> int:
-        return min(order_index[name] for name in group)
-
-    return sorted(groups, key=_key)
-
-
-def _groups_from_nodes(
-    nodes: Mapping[str, Any] | Sequence[Any], conv_names: Sequence[str]
-) -> list[set[str]]:
-    """Infer residual groups from a module graph with explicit add nodes."""
-
-    if not nodes:
-        return []
-    conv_set = set(conv_names)
-    order_index = {name: idx for idx, name in enumerate(conv_names)}
-    node_iter: Sequence[Any]
-    if isinstance(nodes, Mapping):
-        node_iter = list(nodes.values())
-    else:
-        node_iter = list(nodes)
-
-    groups: list[set[str]] = []
-    for node in node_iter:
-        if not isinstance(node, Mapping):
-            continue
-        op = str(
-            node.get("type")
-            or node.get("op")
-            or node.get("kind")
-            or node.get("node_type")
-            or ""
-        ).lower()
-        if "add" not in op and op not in {"sum", "residual"}:
-            continue
-        raw_inputs = (
-            node.get("inputs") or node.get("parents") or node.get("branches") or []
-        )
-        names = _as_name_list(raw_inputs)
-        if "stream" in names:
-            stream_id = node.get("stream_id")
-            if not isinstance(stream_id, str):
-                raise ValueError(
-                    "Residual add node uses 'stream' but does not provide stream_id."
-                )
-            names.append(stream_id)
-        conv_hits = _filter_conv_names(names, conv_set, allow_partial=True)
-        if len(conv_hits) < 2:
-            continue
-        ordered = [name for name in conv_names if name in set(conv_hits)]
-        groups.append(set(ordered))
-
-    merged = _merge_overlapping(groups)
-    return _sort_groups(merged, order_index)
-
-
-def _infer_residual_groups(
-    descriptor: Any, conv_names: Sequence[str]
-) -> list[set[str]]:
-    """Infer residual groups from a module graph descriptor."""
-
-    data = _load_graph_descriptor(descriptor)
-    if data is None:
-        return []
-
-    def _has_node_signature(value: Any) -> bool:
-        return isinstance(value, Mapping) and any(
-            key in value for key in ("type", "op", "kind", "node_type")
-        )
-
-    groups: list[set[str]] = []
-    if isinstance(data, Mapping):
-        nodes_payload: Mapping[str, Any] | Sequence[Any] | None = data.get("nodes")
-        if nodes_payload is None:
-            values = list(data.values())
-            if values and all(isinstance(val, Mapping) for val in values):
-                if any(_has_node_signature(val) for val in values):
-                    nodes_payload = data
-        if nodes_payload is None:
-            raise ValueError("residual_topology must define nodes.")
-        groups.extend(_groups_from_nodes(nodes_payload, conv_names))
-
-    elif isinstance(data, Sequence) and not isinstance(data, (str, bytes)):
-        if not any(
-            _has_node_signature(val) for val in data if isinstance(val, Mapping)
-        ):
-            raise ValueError("residual_topology must define nodes.")
-        groups.extend(_groups_from_nodes(data, conv_names))
-
-    merged = _merge_overlapping(groups)
-    order_index = {name: idx for idx, name in enumerate(conv_names)}
-    return _sort_groups(merged, order_index)
 
 
 @dataclass
 class ResidualConvNetRule(SymmetryRule):
-    """One residual conv stack: conv channel groups tied by residual adds.
-
-    Groups are union-find roots over conv output channels (residual adds merge
-    the participating convs); FRN/BatchNorm parameters and BN running stats
-    follow their conv's group, and trailing ``Dense_*`` heads consume the last
-    conv group. Emitted as the semantic ``features`` component.
-    """
+    """Emit residual-channel actions from a validated module DAG."""
 
     kind: ClassVar[str] = "convnet"
-
     component_id: str = "features"
     parameter_root: str = "core"
     batch_stats_root: str | None = "batch_stats"
-    residual_topology: Mapping[str, Any] | Sequence[Any] | str | None = None
-    residual_connections: Sequence[tuple[str, str]] = dataclasses.field(
-        default_factory=list
-    )
+    residual_topology: Mapping[str, Any] | str | None = None
+    linear_residual_free: bool = False
 
-    def _module_root(self, parameter_root_path: tuple[str, ...]) -> tuple[str, ...]:
-        if parameter_root_path and parameter_root_path[0] == "params":
-            return parameter_root_path[1:]
-        return parameter_root_path
+    @staticmethod
+    def _module_root(parameter_root_path: tuple[str, ...]) -> tuple[str, ...]:
+        return (
+            parameter_root_path[1:]
+            if parameter_root_path[:1] == ("params",)
+            else parameter_root_path
+        )
 
-    def _collect_modules(
-        self, subtree: Mapping[str, Any]
-    ) -> tuple[
-        list[tuple[str, ...]],
-        list[tuple[str, ...]],
-        list[tuple[str, ...]],
-        list[tuple[str, ...]],
-    ]:
-        conv_paths: list[tuple[str, ...]] = []
-        frn_paths: list[tuple[str, ...]] = []
-        bn_paths: list[tuple[str, ...]] = []
-        dense_paths: list[tuple[str, ...]] = []
+    def _discover_parameter_modules(
+        self,
+        subtree: Mapping[str, Any],
+        parameter_root_path: tuple[str, ...],
+    ) -> tuple[dict[str, tuple[str, ...]], dict[str, tuple[str, ...]]]:
+        module_root = self._module_root(parameter_root_path)
+        convs: dict[str, tuple[str, ...]] = {}
+        dense: dict[str, tuple[str, ...]] = {}
 
-        def _walk(node: Mapping[str, Any], prefix: tuple[str, ...]) -> None:
+        def walk(node: Mapping[str, Any], relative: tuple[str, ...]) -> None:
+            if "kernel" in node and not isinstance(node["kernel"], Mapping):
+                shape = np.shape(node["kernel"])
+                module_id = "/".join((*module_root, *relative))
+                path = (*parameter_root_path, *relative)
+                if len(shape) >= 3:
+                    convs[module_id] = path
+                elif len(shape) == 2:
+                    dense[module_id] = path
+                return
             for name, value in node.items():
-                if not isinstance(value, Mapping):
-                    continue
-                path = prefix + (name,)
-                if name.startswith("Conv_"):
-                    conv_paths.append(path)
-                elif name.startswith("FRN_"):
-                    frn_paths.append(path)
-                elif name.startswith("BatchNorm_"):
-                    bn_paths.append(path)
-                elif name.startswith("Dense_"):
-                    dense_paths.append(path)
-                else:
-                    _walk(value, path)
+                if isinstance(value, Mapping):
+                    walk(value, (*relative, str(name)))
 
-        _walk(subtree, ())
-        return conv_paths, frn_paths, bn_paths, dense_paths
+        walk(subtree, ())
+        if not convs:
+            raise ValueError("No convolution modules found for ResidualConvNetRecipe.")
+        return convs, dense
 
-    def _frn_name_for(self, conv_name: str, available: set[str]) -> str | None:
-        parts = conv_name.split("/")
-        suffix = parts[-1].split("_", 1)[-1]
-        parts[-1] = f"FRN_{suffix}"
-        candidate = "/".join(parts)
-        return candidate if candidate in available else None
-
-    def _bn_name_for(self, conv_name: str, available: set[str]) -> str | None:
-        parts = conv_name.split("/")
-        suffix = parts[-1].split("_", 1)[-1]
-        parts[-1] = f"BatchNorm_{suffix}"
-        candidate = "/".join(parts)
-        return candidate if candidate in available else None
+    def _linear_topology(
+        self, convs: Mapping[str, Any], dense: Mapping[str, Any]
+    ) -> _ModuleTopology:
+        ordered_convs = sorted(convs, key=_natural_key)
+        ordered_dense = sorted(dense, key=_natural_key)
+        ordered = ordered_convs + ordered_dense
+        nodes = (_ModuleNode("input", "input"),) + tuple(
+            _ModuleNode(node_id, "conv" if node_id in convs else "dense")
+            for node_id in ordered
+        )
+        conv_chain = ["input", *ordered_convs]
+        edges = tuple(zip(conv_chain, conv_chain[1:], strict=False)) + tuple(
+            (ordered_convs[-1], dense_id) for dense_id in ordered_dense
+        )
+        return _ModuleTopology(nodes, edges)
 
     def add_to(self, builder: SymmetryGraphBuilder) -> None:
+        if not isinstance(self.linear_residual_free, bool):
+            raise ValueError("linear_residual_free must be a bool.")
+        if self.residual_topology is not None and self.linear_residual_free:
+            raise ValueError(
+                "Set residual_topology or linear_residual_free=true, not both."
+            )
+        if self.residual_topology is None and not self.linear_residual_free:
+            raise ValueError(
+                "ResidualConvNetRecipe requires residual_topology. For a strictly "
+                "linear, residual-free conv stack, set linear_residual_free=true."
+            )
+
         params = builder.params
         parameter_root_path = tuple(self.parameter_root.split("."))
         subtree = _maybe_descend(params, parameter_root_path)
-        if subtree is None:
+        if not isinstance(subtree, Mapping):
             raise ValueError(
-                f"parameter_root '{self.parameter_root}' not found in params."
+                f"parameter_root {self.parameter_root!r} not found in params."
+            )
+        conv_paths, dense_paths = self._discover_parameter_modules(
+            subtree, parameter_root_path
+        )
+        topology = (
+            _load_topology(self.residual_topology)
+            if self.residual_topology is not None
+            else self._linear_topology(conv_paths, dense_paths)
+        )
+        node_by_id = topology.by_id
+        declared_convs = {node.id for node in topology.nodes if node.kind == "conv"}
+        declared_dense = {node.id for node in topology.nodes if node.kind == "dense"}
+        if declared_convs != set(conv_paths) or declared_dense != set(dense_paths):
+            missing = sorted(
+                (set(conv_paths) | set(dense_paths)) - set(node_by_id), key=_natural_key
+            )
+            unknown = sorted(
+                (declared_convs | declared_dense)
+                - (set(conv_paths) | set(dense_paths)),
+                key=_natural_key,
+            )
+            raise ValueError(
+                "residual_topology must account for every conv/dense parameter module "
+                f"exactly once; missing={missing}, unknown={unknown}."
             )
 
         module_root = self._module_root(parameter_root_path)
-        conv_rel, frn_rel, bn_rel, dense_rel = self._collect_modules(subtree)
-        if not conv_rel:
-            raise ValueError("No Conv_* layers found for ResidualConvNetRecipe.")
 
-        def _format_id(relative: tuple[str, ...]) -> str:
-            parts = (*module_root, *relative) if module_root else relative
-            return "/".join(parts)
+        def module_path(module_id: str) -> tuple[str, ...]:
+            parts = tuple(module_id.split("/"))
+            if module_root and parts[: len(module_root)] != module_root:
+                raise ValueError(
+                    f"Module id {module_id!r} is outside parameter root "
+                    f"{'/'.join(module_root)!r}."
+                )
+            relative = parts[len(module_root) :] if module_root else parts
+            return (*parameter_root_path, *relative)
 
-        conv_names = [_format_id(path) for path in conv_rel]
-        conv_paths = {
-            conv_id: (*parameter_root_path, *rel)
-            for conv_id, rel in zip(conv_names, conv_rel, strict=False)
-        }
-        frn_paths = {
-            _format_id(path): (*parameter_root_path, *path) for path in frn_rel
-        }
-        bn_paths = {_format_id(path): (*parameter_root_path, *path) for path in bn_rel}
-        dense_rel = [path for path in dense_rel if len(path) == 1]
-        dense_paths = {
-            _format_id(path): (*parameter_root_path, *path) for path in dense_rel
-        }
-        frn_ids = set(frn_paths)
-        bn_ids = set(bn_paths)
-
-        stats_root_path = (
-            tuple(self.batch_stats_root.split(".")) if self.batch_stats_root else None
-        )
-        residual_groups = _infer_residual_groups(self.residual_topology, conv_names)
+        normalizer_paths: dict[str, tuple[str, ...]] = {}
+        for node in topology.nodes:
+            if node.normalizer is None:
+                continue
+            path = module_path(node.normalizer)
+            module = _maybe_descend(params, path)
+            if not isinstance(module, Mapping):
+                raise ValueError(
+                    f"Normalizer {node.normalizer!r} for {node.id!r} was not found."
+                )
+            normalizer_paths[node.id] = path
 
         unions = _GroupUnionFind()
-        order_index = {name: idx for idx, name in enumerate(conv_names)}
-        for conv_name in conv_names:
-            kernel = _descend(params, (*conv_paths[conv_name], "kernel"))
-            unions.add(conv_name, int(kernel.shape[-1]))
+        for conv_id, path in conv_paths.items():
+            kernel = _descend(params, (*path, "kernel"))
+            unions.add(conv_id, int(np.shape(kernel)[-1]))
 
-        for group in residual_groups:
-            names = sorted(group, key=order_index.__getitem__)
-            for left, right in zip(names, names[1:], strict=False):
-                unions.union(left, right)
+        incoming = topology.incoming
+        source_cache: dict[str, frozenset[str]] = {}
 
-        for left, right in self.residual_connections:
-            if left not in unions.parent or right not in unions.parent:
-                raise ValueError(
-                    f"Residual join references unknown convs: {(left, right)}."
+        def source_convs(node_id: str) -> frozenset[str]:
+            cached = source_cache.get(node_id)
+            if cached is not None:
+                return cached
+            node = node_by_id[node_id]
+            if node.kind == "conv":
+                result = frozenset({node_id})
+            elif node.kind == "input":
+                result = frozenset()
+            elif node.kind == "add":
+                result = frozenset().union(
+                    *(source_convs(source) for source in incoming[node_id])
                 )
-            unions.union(left, right)
+            else:
+                raise ValueError(
+                    f"Dense node {node_id!r} cannot feed a channel consumer."
+                )
+            source_cache[node_id] = result
+            return result
 
-        group_map = {name: unions.find(name) for name in conv_names}
-        group_sizes = unions.roots()
+        add_members: dict[str, tuple[str, ...]] = {}
+        for node_id in topology.topological_order():
+            if node_by_id[node_id].kind != "add":
+                continue
+            members = tuple(
+                sorted(
+                    frozenset().union(
+                        *(source_convs(source) for source in incoming[node_id])
+                    ),
+                    key=_natural_key,
+                )
+            )
+            for other in members[1:]:
+                unions.union(members[0], other)
+            add_members[node_id] = members
 
-        # Register every parameter tensor so the objective measures the whole
-        # tree, not only bound axes.
-        def _walk_all(node: Any, prefix: tuple[str, ...]) -> None:
+        root_members: dict[str, list[str]] = defaultdict(list)
+        for conv_id in conv_paths:
+            root_members[unions.find(conv_id)].append(conv_id)
+        canonical_for_root = {
+            root: sorted(members, key=_natural_key)[0]
+            for root, members in root_members.items()
+        }
+        group_map = {
+            conv_id: canonical_for_root[unions.find(conv_id)] for conv_id in conv_paths
+        }
+        for group_id in sorted(set(group_map.values()), key=_natural_key):
+            builder.add_group(group_id, unions.size[unions.find(group_id)])
+
+        def walk_tensors(node: Any, prefix: tuple[str, ...]) -> None:
             if isinstance(node, Mapping):
                 for name, value in node.items():
-                    _walk_all(value, prefix + (str(name),))
-                return
-            if np.shape(node):
+                    walk_tensors(value, (*prefix, str(name)))
+            elif np.shape(node):
                 builder.tensor(prefix)
 
-        _walk_all(params, ())
-
+        walk_tensors(params, ())
         seen_bindings: set[tuple[str, int, str]] = set()
 
-        def _bind(
+        def bind(
             path: tuple[str, ...],
             axis: int,
             group_id: str,
@@ -421,198 +430,210 @@ class ResidualConvNetRule(SymmetryRule):
             tensor_id = "/".join(path)
             key = (tensor_id, axis, group_id)
             if key not in seen_bindings:
-                seen_bindings.add(key)
                 builder.bind(path, axis, group_id, role=role, scale_power=scale_power)
+                seen_bindings.add(key)
             return tensor_id
 
-        conv_to_group: dict[str, str] = {}
-        conv_to_out_tensors: dict[str, list[str]] = {}
-
-        for idx, conv_name in enumerate(conv_names):
-            group_id = group_map[conv_name]
-            conv_to_group[conv_name] = group_id
-            if group_id not in builder.groups:
-                builder.add_group(group_id, group_sizes[group_id])
-            conv_path = conv_paths[conv_name]
+        conv_out_tensors: dict[str, list[str]] = {}
+        stats_root_path = (
+            tuple(self.batch_stats_root.split(".")) if self.batch_stats_root else None
+        )
+        normalized_by_add = {
+            member
+            for add_id, members in add_members.items()
+            if add_id in normalizer_paths
+            for member in members
+        }
+        for conv_id in sorted(conv_paths, key=_natural_key):
+            path = conv_paths[conv_id]
+            group_id = group_map[conv_id]
             group_size = builder.groups[group_id].size
-            kernel_path = (*conv_path, "kernel")
-            _validate_channel_size(
-                kernel_path, _descend(params, kernel_path), group_size
+            kernel_path = (*path, "kernel")
+            normalizer_path = normalizer_paths.get(conv_id)
+            scale_power = (
+                0.0
+                if normalizer_path is not None or conv_id in normalized_by_add
+                else 1.0
             )
+            out_tensors = [bind(kernel_path, -1, group_id, "out", scale_power)]
+            module = _descend(params, path)
+            if "bias" in module:
+                bias_path = (*path, "bias")
+                _validate_channel_size(bias_path, module["bias"], group_size, axis=0)
+                out_tensors.append(bind(bias_path, 0, group_id, "out", scale_power))
+            if normalizer_path is not None:
+                normalizer = _descend(params, normalizer_path)
+                if any(name in normalizer for name in ("gamma", "tau")):
+                    self._attach_frn_bindings(
+                        params, group_id, group_size, normalizer_path, bind, out_tensors
+                    )
+                elif any(name in normalizer for name in ("scale", "bias")):
+                    self._attach_batchnorm_bindings(
+                        params,
+                        group_id,
+                        group_size,
+                        normalizer_path,
+                        bind,
+                        parameter_root_path,
+                        stats_root_path,
+                        out_tensors,
+                    )
+                else:
+                    raise ValueError(
+                        f"Normalizer {node_by_id[conv_id].normalizer!r} is neither FRN nor BatchNorm."
+                    )
+            conv_out_tensors[conv_id] = list(dict.fromkeys(out_tensors))
 
-            frn_name = self._frn_name_for(conv_name, frn_ids)
-            bn_name = self._bn_name_for(conv_name, bn_ids)
-            if frn_name and bn_name:
-                raise ValueError(
-                    f"Conv '{conv_name}' has both FRN ({frn_name}) and "
-                    f"BatchNorm ({bn_name}) modules."
-                )
-
-            # A following normalization layer absorbs pre-norm scales only in
-            # the eps->0 limit, so an exact scale action must leave the conv
-            # untouched; the norm's affine parameters carry the symmetry.
-            conv_scale_power = 0.0 if (frn_name or bn_name) else 1.0
-            out_tensors: list[str] = [
-                _bind(kernel_path, -1, group_id, "out", conv_scale_power),
-                _bind((*conv_path, "bias"), 0, group_id, "out", conv_scale_power),
-            ]
-            if frn_name:
+        add_out_tensors: dict[str, list[str]] = defaultdict(list)
+        for add_id, members in add_members.items():
+            normalizer_path = normalizer_paths.get(add_id)
+            if normalizer_path is None:
+                continue
+            group_id = group_map[members[0]]
+            group_size = builder.groups[group_id].size
+            normalizer = _descend(params, normalizer_path)
+            if any(name in normalizer for name in ("gamma", "tau")):
                 self._attach_frn_bindings(
                     params,
                     group_id,
                     group_size,
-                    frn_paths[frn_name],
-                    _bind,
-                    out_tensors,
+                    normalizer_path,
+                    bind,
+                    add_out_tensors[add_id],
                 )
-            if bn_name:
+            elif any(name in normalizer for name in ("scale", "bias")):
                 self._attach_batchnorm_bindings(
                     params,
                     group_id,
                     group_size,
-                    bn_paths[bn_name],
-                    _bind,
+                    normalizer_path,
+                    bind,
                     parameter_root_path,
                     stats_root_path,
-                    out_tensors,
+                    add_out_tensors[add_id],
                 )
-
-            conv_to_out_tensors[conv_name] = list(dict.fromkeys(out_tensors))
-
-            next_conv = conv_names[idx + 1] if idx + 1 < len(conv_names) else None
-            if next_conv:
-                next_path = (*conv_paths[next_conv], "kernel")
-                next_kernel = _descend(params, next_path)
-                _validate_channel_size(next_path, next_kernel, group_size, axis=-2)
-                _bind(next_path, -2, group_id, "in")
-
-        dense_candidates = sorted(dense_paths, key=_natural_key)
-        last_group = group_map[conv_names[-1]]
-        for dense_name in dense_candidates:
-            dense_path = (*dense_paths[dense_name], "kernel")
-            kernel = _descend(params, dense_path)
-            in_size = int(kernel.shape[0])
-            if builder.groups[last_group].size != in_size:
+            else:
                 raise ValueError(
-                    f"Dense layer {dense_name} expects input {in_size}, but last "
-                    f"conv group {last_group} has {builder.groups[last_group].size}."
+                    f"Normalizer {node_by_id[add_id].normalizer!r} is neither FRN nor BatchNorm."
                 )
-            _bind(dense_path, 0, last_group, "in")
 
-        def _residual_channel_tie(
-            members: tuple[str, ...], source: str
-        ) -> ResidualChannelTie:
-            tie_groups = tuple(
+        for node in topology.nodes:
+            if node.kind not in {"conv", "dense"} or not incoming[node.id]:
+                continue
+            source = incoming[node.id][0]
+            producers = source_convs(source)
+            if not producers:
+                # External model input has no modeled channel action.
+                continue
+            source_groups = {group_map[producer] for producer in producers}
+            if len(source_groups) != 1:
+                raise ValueError(
+                    f"Consumer {node.id!r} receives incompatible channel groups "
+                    f"from {source!r}: {sorted(source_groups)}."
+                )
+            group_id = next(iter(source_groups))
+            path = conv_paths[node.id] if node.kind == "conv" else dense_paths[node.id]
+            kernel_path = (*path, "kernel")
+            axis = -2 if node.kind == "conv" else 0
+            _validate_channel_size(
+                kernel_path,
+                _descend(params, kernel_path),
+                builder.groups[group_id].size,
+                axis=axis,
+            )
+            bind(kernel_path, axis, group_id, "in")
+
+        for add_id, members in add_members.items():
+            group_id = group_map[members[0]]
+            tensors = tuple(
                 dict.fromkeys(
-                    conv_to_group[member]
-                    for member in members
-                    if member in conv_to_group
+                    [
+                        tensor
+                        for member in members
+                        for tensor in conv_out_tensors[member]
+                    ]
+                    + add_out_tensors[add_id]
                 )
             )
-            tie_tensors: list[str] = []
-            for member in members:
-                tie_tensors.extend(conv_to_out_tensors.get(member, ()))
-            return ResidualChannelTie(
-                groups=tie_groups,
-                tensors=tuple(dict.fromkeys(tie_tensors)),
-                members=members,
-                source=source,
+            builder.add_constraint(
+                ResidualChannelTie(
+                    groups=(group_id,),
+                    tensors=tensors,
+                    members=members,
+                    source=add_id,
+                )
             )
-
-        for group in residual_groups:
-            members = tuple(sorted(group, key=order_index.__getitem__))
-            builder.add_constraint(_residual_channel_tie(members, "residual_topology"))
-        for left, right in self.residual_connections:
-            builder.add_constraint(_residual_channel_tie((left, right), "manual"))
 
         builder.add_component(self.component_id, self.kind, tuple(builder.group_order))
         builder.metadata.update(
             {
-                "conv_names": conv_names,
-                "dense_heads": dense_candidates,
-                "residual_groups": [sorted(group) for group in residual_groups],
-                "manual_residual_connections": list(self.residual_connections),
+                "conv_names": sorted(conv_paths, key=_natural_key),
+                "dense_heads": sorted(dense_paths, key=_natural_key),
+                "module_edges": [list(edge) for edge in topology.edges],
+                "residual_adds": {
+                    add_id: list(members) for add_id, members in add_members.items()
+                },
             }
         )
 
     def _attach_frn_bindings(
-        self,
-        params: Mapping[str, Any],
-        group_id: str,
-        group_size: int,
-        frn_path: tuple[str, ...],
-        bind,
-        out_tensors: list[str],
+        self, params, group_id, group_size, frn_path, bind, out_tensors
     ) -> None:
         module = _descend(params, frn_path)
         for param in ("gamma", "beta", "tau"):
             if param in module:
-                full_path = (*frn_path, param)
-                _validate_channel_size(
-                    full_path, _descend(params, full_path), group_size
-                )
-                out_tensors.append(bind(full_path, -1, group_id, "out"))
+                path = (*frn_path, param)
+                _validate_channel_size(path, _descend(params, path), group_size)
+                out_tensors.append(bind(path, -1, group_id, "out"))
         if "eps" in module:
-            eps_path = (*frn_path, "eps")
-            eps_value = _descend(params, eps_path)
-            if int(np.prod(np.shape(eps_value))) == group_size:
-                # eps sits inside the pre-affine sqrt; the post-norm affine
-                # symmetry must not touch it (it would need power 2 under the
-                # pre-norm gauge, which is not an exact symmetry here).
-                out_tensors.append(bind(eps_path, -1, group_id, "out", 0.0))
+            path = (*frn_path, "eps")
+            if int(np.prod(np.shape(_descend(params, path)))) == group_size:
+                out_tensors.append(bind(path, -1, group_id, "out", 0.0))
 
     def _attach_batchnorm_bindings(
         self,
-        params: Mapping[str, Any],
-        group_id: str,
-        group_size: int,
-        bn_path: tuple[str, ...],
+        params,
+        group_id,
+        group_size,
+        bn_path,
         bind,
-        parameter_root_path: tuple[str, ...],
-        stats_root_path: tuple[str, ...] | None,
-        out_tensors: list[str],
+        parameter_root_path,
+        stats_root_path,
+        out_tensors,
     ) -> None:
         module = _descend(params, bn_path)
         for param in ("scale", "bias"):
             if param in module:
-                full_path = (*bn_path, param)
-                _validate_channel_size(
-                    full_path, _descend(params, full_path), group_size
-                )
-                out_tensors.append(bind(full_path, -1, group_id, "out"))
-
-        if stats_root_path is None:
+                path = (*bn_path, param)
+                _validate_channel_size(path, _descend(params, path), group_size)
+                out_tensors.append(bind(path, -1, group_id, "out"))
+        if (
+            stats_root_path is None
+            or bn_path[: len(parameter_root_path)] != parameter_root_path
+        ):
             return
-        if not bn_path[: len(parameter_root_path)] == parameter_root_path:
-            return
-        bn_relative = bn_path[len(parameter_root_path) :]
-        stats_module = _maybe_descend(params, (*stats_root_path, *bn_relative))
+        relative = bn_path[len(parameter_root_path) :]
+        stats_module = _maybe_descend(params, (*stats_root_path, *relative))
         if not isinstance(stats_module, Mapping):
             return
         for stat in ("mean", "var"):
             if stat in stats_module:
-                full_path = (*stats_root_path, *bn_relative, stat)
-                _validate_channel_size(
-                    full_path, _descend(params, full_path), group_size
-                )
-                # Running stats describe the pre-norm activations; the
-                # post-norm affine symmetry leaves them untouched.
-                out_tensors.append(bind(full_path, -1, group_id, "out", 0.0))
+                path = (*stats_root_path, *relative, stat)
+                _validate_channel_size(path, _descend(params, path), group_size)
+                out_tensors.append(bind(path, -1, group_id, "out", 0.0))
 
 
 @register_recipe
 @dataclass
 class ResidualConvNetRecipe(ArchitectureRecipe):
-    """Recipe for ResNet-style conv nets: one conv-stack component."""
+    """Recipe for residual conv nets with explicit dataflow topology."""
 
     name: str = "residual_convnet"
     parameter_root: str = "core"
     batch_stats_root: str | None = "batch_stats"
     config_options: ClassVar[frozenset[str]] = RESIDUAL_CONVNET_OPTIONS
-    residual_topology: Mapping[str, Any] | Sequence[Any] | str | None = None
-    residual_connections: Sequence[tuple[str, str]] = dataclasses.field(
-        default_factory=list
-    )
+    residual_topology: Mapping[str, Any] | str | None = None
+    linear_residual_free: bool = False
 
     def build_graph(self, params: Mapping[str, Any]) -> SymmetryGraph:
         builder = SymmetryGraphBuilder(params, architecture=self.name)
@@ -620,6 +641,6 @@ class ResidualConvNetRecipe(ArchitectureRecipe):
             parameter_root=self.parameter_root,
             batch_stats_root=self.batch_stats_root,
             residual_topology=self.residual_topology,
-            residual_connections=self.residual_connections,
+            linear_residual_free=self.linear_residual_free,
         ).add_to(builder)
         return builder.finish()

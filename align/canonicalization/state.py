@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
 
 
-@dataclass
+@dataclass(frozen=True)
 class ScaleState:
     """Solver-free state holding one positive scale vector per group.
 
@@ -19,8 +20,23 @@ class ScaleState:
     """
 
     group_order: tuple[str, ...]
-    scales: dict[str, Any]
-    metadata: dict[str, Any] = field(default_factory=dict)
+    scales: Mapping[str, Any]
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    active_groups: frozenset[str] | None = None
+    _graph: Any | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "group_order", tuple(self.group_order))
+        object.__setattr__(self, "scales", MappingProxyType(dict(self.scales)))
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        active = self.active_groups
+        if active is None:
+            active = frozenset(
+                group_id
+                for group_id, value in self.scales.items()
+                if not np.all(np.asarray(value) == 1)
+            )
+        object.__setattr__(self, "active_groups", frozenset(active))
 
     @classmethod
     def identity(
@@ -33,7 +49,12 @@ class ScaleState:
             group_id: np.ones(group.size, dtype=dtype)
             for group_id, group in graph.groups.items()
         }
-        return cls(group_order=graph.group_order, scales=scales)
+        return cls(
+            group_order=graph.group_order,
+            scales=scales,
+            active_groups=frozenset(),
+            _graph=graph,
+        )
 
     @classmethod
     def from_scales(
@@ -44,8 +65,21 @@ class ScaleState:
         """Build a state, defaulting unspecified groups to an identity scale."""
 
         state = cls.identity(graph)
-        state.scales.update(dict(scales))
-        return state
+        values = dict(state.scales)
+        values.update(dict(scales))
+        return cls(
+            group_order=state.group_order,
+            scales=values,
+            active_groups=frozenset(
+                group_id
+                for group_id, value in values.items()
+                if not np.all(np.asarray(value) == 1)
+            ),
+            _graph=graph,
+        )
+
+    def validated_for(self, graph) -> bool:
+        return self._graph is graph
 
     def validate(self, graph) -> None:
         """Validate group coverage, vector shapes, and positivity."""

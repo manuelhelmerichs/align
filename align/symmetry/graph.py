@@ -26,6 +26,7 @@ from .tensor_ops import (
     binding_indexer,
     binding_selector,
     binding_sort_key,
+    scale_axis,
 )
 
 TRANSFORM_FAMILIES = (
@@ -36,7 +37,19 @@ TRANSFORM_FAMILIES = (
 )
 
 
-@dataclass
+def _freeze_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_value(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_freeze_value(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True)
 class SymmetryGroup:
     """A set of channels/units that must share one group transform.
 
@@ -68,6 +81,9 @@ class TensorSpec:
     path: tuple[str, ...]
     shape: tuple[int, ...]
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", _freeze_value(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -130,6 +146,9 @@ class ComponentSpec:
     groups: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", _freeze_value(self.metadata))
+
 
 def _array_namespace(backend: Literal["jax", "numpy"]):
     return jnp if backend == "jax" else np
@@ -141,21 +160,6 @@ def _set_axis_slice(tensor: Any, indexer: tuple[slice, ...], value: Any):
     updated = np.array(tensor, copy=True)
     updated[indexer] = value
     return updated
-
-
-def _scale_axis(
-    tensor: Any, scale: Any, *, axis: int, divide: bool, power: float = 1.0
-) -> Any:
-    """Multiply or divide ``tensor`` along ``axis`` by ``scale ** power``."""
-
-    xp = jnp if isinstance(tensor, jnp.ndarray) else np
-    factor = xp.asarray(scale)
-    if power != 1.0:
-        factor = factor**power
-    broadcast_shape = [1] * xp.ndim(tensor)
-    broadcast_shape[axis] = factor.shape[0]
-    factor = factor.reshape(broadcast_shape)
-    return tensor / factor if divide else tensor * factor
 
 
 class MaterializedTensors(Mapping[str, Any]):
@@ -203,16 +207,16 @@ class MaterializedTensors(Mapping[str, Any]):
         return {tensor_id: self[tensor_id] for tensor_id in self}
 
 
-@dataclass
+@dataclass(frozen=True)
 class SymmetryGraph:
     """Architecture recipe output consumed by graph-native matching solvers."""
 
-    groups: dict[str, SymmetryGroup]
-    tensors: dict[str, TensorSpec]
+    groups: Mapping[str, SymmetryGroup]
+    tensors: Mapping[str, TensorSpec]
     axis_bindings: tuple[AxisBinding, ...] = ()
     constraints: tuple[ConstraintRecord, ...] = ()
-    components: dict[str, ComponentSpec] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    components: Mapping[str, ComponentSpec] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
     _bindings_by_tensor: Mapping[str, tuple[AxisBinding, ...]] = field(
         init=False, repr=False
     )
@@ -227,12 +231,12 @@ class SymmetryGraph:
     _repeated_group_terms: Mapping[str, tuple[str, ...]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self.groups = dict(self.groups)
-        self.tensors = dict(self.tensors)
-        self.axis_bindings = tuple(self.axis_bindings)
-        self.constraints = tuple(self.constraints)
-        self.components = dict(self.components)
-        self.metadata = dict(self.metadata)
+        object.__setattr__(self, "groups", MappingProxyType(dict(self.groups)))
+        object.__setattr__(self, "tensors", MappingProxyType(dict(self.tensors)))
+        object.__setattr__(self, "axis_bindings", tuple(self.axis_bindings))
+        object.__setattr__(self, "constraints", tuple(self.constraints))
+        object.__setattr__(self, "components", MappingProxyType(dict(self.components)))
+        object.__setattr__(self, "metadata", _freeze_value(self.metadata))
         by_tensor: dict[str, list[AxisBinding]] = {
             tensor_id: [] for tensor_id in self.tensors
         }
@@ -242,40 +246,56 @@ class SymmetryGraph:
         for binding in self.axis_bindings:
             by_tensor.setdefault(binding.tensor_id, []).append(binding)
             by_group.setdefault(binding.group, []).append(binding)
-        self._bindings_by_tensor = MappingProxyType(
-            {key: tuple(value) for key, value in by_tensor.items()}
+        object.__setattr__(
+            self,
+            "_bindings_by_tensor",
+            MappingProxyType({key: tuple(value) for key, value in by_tensor.items()}),
         )
-        self._bindings_by_group = MappingProxyType(
-            {key: tuple(value) for key, value in by_group.items()}
+        object.__setattr__(
+            self,
+            "_bindings_by_group",
+            MappingProxyType({key: tuple(value) for key, value in by_group.items()}),
         )
-        self._sorted_bindings_by_tensor = MappingProxyType(
-            {
-                tensor_id: tuple(
-                    sorted(
-                        bindings,
-                        key=lambda binding: binding_sort_key(
-                            self.tensors[tensor_id].shape, binding
-                        ),
+        object.__setattr__(
+            self,
+            "_sorted_bindings_by_tensor",
+            MappingProxyType(
+                {
+                    tensor_id: tuple(
+                        sorted(
+                            bindings,
+                            key=lambda binding: binding_sort_key(
+                                self.tensors[tensor_id].shape, binding
+                            ),
+                        )
                     )
-                )
-                for tensor_id, bindings in by_tensor.items()
-                if tensor_id in self.tensors
-            }
+                    for tensor_id, bindings in by_tensor.items()
+                    if tensor_id in self.tensors
+                }
+            ),
         )
-        self._tensors_by_group = MappingProxyType(
-            {
-                group_id: tuple(
-                    dict.fromkeys(binding.tensor_id for binding in bindings)
-                )
-                for group_id, bindings in by_group.items()
-            }
+        object.__setattr__(
+            self,
+            "_tensors_by_group",
+            MappingProxyType(
+                {
+                    group_id: tuple(
+                        dict.fromkeys(binding.tensor_id for binding in bindings)
+                    )
+                    for group_id, bindings in by_group.items()
+                }
+            ),
         )
-        self._group_owner = MappingProxyType(
-            {
-                group_id: component_id
-                for component_id, component in self.components.items()
-                for group_id in component.groups
-            }
+        object.__setattr__(
+            self,
+            "_group_owner",
+            MappingProxyType(
+                {
+                    group_id: component_id
+                    for component_id, component in self.components.items()
+                    for group_id in component.groups
+                }
+            ),
         )
         repeated: dict[str, list[str]] = {}
         for tensor_id, tensor in self.tensors.items():
@@ -286,8 +306,12 @@ class SymmetryGraph:
             for group_id, axes in axes_by_group.items():
                 if len(axes) > 1:
                     repeated.setdefault(group_id, []).append(tensor_id)
-        self._repeated_group_terms = MappingProxyType(
-            {group_id: tuple(tensors) for group_id, tensors in repeated.items()}
+        object.__setattr__(
+            self,
+            "_repeated_group_terms",
+            MappingProxyType(
+                {group_id: tuple(tensors) for group_id, tensors in repeated.items()}
+            ),
         )
 
     @property
@@ -685,6 +709,8 @@ class SymmetryGraph:
         self,
         params: Mapping[str, Any],
         transform,
+        *,
+        active_groups: frozenset[str] | None = None,
     ) -> Mapping[str, Any]:
         """Walk every bound tensor and apply ``transform`` per binding.
 
@@ -698,9 +724,14 @@ class SymmetryGraph:
         replacements: list[tuple[tuple[str, ...], Any]] = []
         for tensor_id, tensor in self.tensors.items():
             bindings = self.sorted_bindings_for_tensor(tensor_id)
+            if active_groups is not None:
+                bindings = tuple(
+                    binding for binding in bindings if binding.group in active_groups
+                )
             if not bindings:
                 continue
             updated = _descend(params, tensor.path)
+            mutable_numpy = False
             for binding in bindings:
                 selector = binding_selector(tensor.shape, binding)
                 intervals = binding_axis_intervals(tensor.shape, binding)
@@ -718,7 +749,13 @@ class SymmetryGraph:
                     )
                     segment = updated[indexer]
                     transformed = transform(segment, axis, binding)
-                    updated = _set_axis_slice(updated, indexer, transformed)
+                    if isinstance(updated, np.ndarray):
+                        if not mutable_numpy:
+                            updated = np.array(updated, copy=True)
+                            mutable_numpy = True
+                        updated[indexer] = transformed
+                    else:
+                        updated = _set_axis_slice(updated, indexer, transformed)
             replacements.append((tensor.path, updated))
         return replace_paths(params, replacements)
 
@@ -731,7 +768,8 @@ class SymmetryGraph:
         bindings receive only the transform's permutation content.
         """
 
-        state.validate(self, hard=True)
+        if not state.validated_for(self):
+            state.validate(self, hard=True)
 
         def _transform(segment, axis, binding):
             return apply_group_transform_to_axis(
@@ -742,7 +780,9 @@ class SymmetryGraph:
                 scope=binding.transform_scope,
             )
 
-        return self._transform_bound_tensors(params, _transform)
+        return self._transform_bound_tensors(
+            params, _transform, active_groups=state.active_groups
+        )
 
     def apply_scales(self, params: Mapping[str, Any], scale_state) -> Mapping[str, Any]:
         """Apply a per-group positive scale to all bound tensor axes.
@@ -754,12 +794,13 @@ class SymmetryGraph:
         its scale action.
         """
 
-        scale_state.validate(self)
+        if not scale_state.validated_for(self):
+            scale_state.validate(self)
 
         def _scale(segment, axis, binding):
             if binding.scale_power == 0.0:
                 return segment
-            return _scale_axis(
+            return scale_axis(
                 segment,
                 scale_state.scales[binding.group],
                 axis=axis,
@@ -767,7 +808,9 @@ class SymmetryGraph:
                 power=binding.scale_power,
             )
 
-        return self._transform_bound_tensors(params, _scale)
+        return self._transform_bound_tensors(
+            params, _scale, active_groups=scale_state.active_groups
+        )
 
 
 def materialize_many(
@@ -778,17 +821,20 @@ def materialize_many(
 ) -> dict[str, Any]:
     """Materialize and stack tensors for a sequence of target samples."""
 
-    xp = _array_namespace(backend)
-    per_sample = [
-        graph.materialize(params, backend=backend, cache=False).materialize()
-        for params in params_batch
-    ]
-    if not per_sample:
+    if not params_batch:
         return {}
-    return {
-        tensor_id: xp.stack([sample[tensor_id] for sample in per_sample], axis=0)
-        for tensor_id in graph.tensors
+    import jax
+
+    host_params = jax.device_get(list(params_batch))
+    host_stacks = {
+        tensor_id: np.stack(
+            [np.asarray(_descend(params, spec.path)) for params in host_params], axis=0
+        )
+        for tensor_id, spec in graph.tensors.items()
     }
+    if backend == "numpy":
+        return host_stacks
+    return jax.device_put(host_stacks)
 
 
 __all__ = [

@@ -170,7 +170,11 @@ def run(args: argparse.Namespace) -> None:
     config.paths.tree_path = tree_path
     resolve_recipe_defaults(config)
 
-    if output_dir.exists() and not config.runtime.resume:
+    if (
+        output_dir.exists()
+        and not config.runtime.resume
+        and not config.runtime.validate_only
+    ):
         raise FileExistsError(
             "Output directory already exists. Pass --resume to continue the run."
         )
@@ -184,6 +188,7 @@ def run(args: argparse.Namespace) -> None:
         selection=config.selection,
         sample_format=sample_format,
         resume=config.runtime.resume,
+        persist=not config.runtime.validate_only,
     )
     validate_reference_sample(manifest, config.selection)
 
@@ -207,6 +212,19 @@ def run(args: argparse.Namespace) -> None:
             or config.runtime.validate_only
         ):
             return
+
+    prepared_run = None
+    if not config.runtime.list_samples and not config.runtime.describe_symmetry:
+        from .runtime import prepare_run
+
+        prepared_run = prepare_run(config, manifest)
+
+    if config.runtime.validate_only:
+        print(
+            "Validation successful. No alignment executed.\n"
+            + json.dumps(prepared_run.summary, indent=2)
+        )
+        return
 
     digest_payload = _digest_payload(config_payload)
     digest = compute_config_digest(digest_payload)
@@ -238,10 +256,6 @@ def run(args: argparse.Namespace) -> None:
         print(_describe_symmetry(config, manifest))
         return
 
-    if config.runtime.validate_only:
-        print("Validation successful. No alignment executed.")
-        return
-
     from .runtime import AlignmentRunner, RunArtifactStore
 
     artifact_store = RunArtifactStore(
@@ -256,10 +270,11 @@ def run(args: argparse.Namespace) -> None:
         run_state=run_state,
         artifact_store=artifact_store,
         progress_logger=logger,
+        prepared_run=prepared_run,
     )
 
     if config.runtime.dry_run:
-        runner.execute(dry_run=True)
+        runner.execute()
         print("Dry run complete. Inspect state directory for manifest summary.")
         return
 
@@ -291,6 +306,10 @@ def _configure_platform_preferences(config: RunConfig) -> None:
     force_gpu = bool(runtime_cfg.force_gpu)
     if force_cpu and force_gpu:
         raise ValueError("--force-cpu and --force-gpu are mutually exclusive.")
+    if runtime_cfg.mps_async_dispatch is not None:
+        os.environ["JAX_MPS_ASYNC_DISPATCH"] = (
+            "1" if runtime_cfg.mps_async_dispatch else "0"
+        )
 
     preference = "cpu"
     if force_gpu:
@@ -307,25 +326,15 @@ def _configure_platform_preferences(config: RunConfig) -> None:
         )
     import jax
 
-    log = logging.getLogger("align")
     if applied_preference == "cpu":
         jax.config.update("jax_platform_name", "cpu")
         return
 
-    try:
-        gpus = [dev for dev in jax.devices() if is_gpu_platform(dev.platform)]
-        if not gpus:
-            raise RuntimeError("No GPU devices visible")
-    except Exception as exc:
-        if force_gpu:
-            raise RuntimeError(
-                "--force-gpu was requested, but no usable GPU device is visible."
-            ) from exc
-        log.warning("GPU backend unavailable (%s). Falling back to CPU.", exc)
-        os.environ["JAX_PLATFORMS"] = "cpu"
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
-        os.environ["JAX_VISIBLE_DEVICES"] = ""
-        jax.config.update("jax_platform_name", "cpu")
+    gpus = [dev for dev in jax.devices() if is_gpu_platform(dev.platform)]
+    if not gpus:
+        # configure_jax_platforms probes the backend in a disposable process,
+        # so reaching this point indicates the selected environment changed.
+        raise RuntimeError("Selected GPU backend exposes no devices.")
 
 
 def _format_manifest_summary(manifest) -> str:
@@ -445,6 +454,7 @@ def _load_or_build_manifest(
     selection,
     sample_format: str,
     resume: bool,
+    persist: bool = True,
 ) -> SampleManifest:
     if resume and manifest_path.exists():
         manifest = SampleManifest.load(manifest_path)
@@ -460,10 +470,12 @@ def _load_or_build_manifest(
             reference_sample=selection.reference_sample,
             sample_format=sample_format,
         )
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest.save(manifest_path)
-    manifest.ensure_shared_records(manifest_path)
-    manifest.ensure_shared_tree(manifest_path)
+        if persist:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest.save(manifest_path)
+    if persist:
+        manifest.ensure_shared_records(manifest_path)
+        manifest.ensure_shared_tree(manifest_path)
     return manifest
 
 

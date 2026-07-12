@@ -44,7 +44,10 @@ def test_residual_conv_exact_orbit_benchmark_tracks_channel_ties():
 
     group_order = case.graph.metadata["group_order"]
     assert len(group_order) == 2
-    assert case.graph.metadata["residual_groups"] == [["core/Conv_0", "core/Conv_2"]]
+    assert tuple(case.graph.metadata["residual_adds"]["residual_add"]) == (
+        "core/Conv_0",
+        "core/Conv_2",
+    )
     actual_indices = np.asarray(result.transforms[group_order[0]], dtype=np.int64)
     actual_matrix = np.eye(actual_indices.size)[actual_indices]
     np.testing.assert_allclose(

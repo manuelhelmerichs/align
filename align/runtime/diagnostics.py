@@ -12,34 +12,48 @@ from ..matching import TransformState, match_sample
 from ..samples import ParamTree, WeightSample
 
 
-def tree_mean(samples: Iterable[WeightSample]) -> WeightSample:
-    """Compute a streaming, dtype-preserving mean of weight samples."""
+class OnlineTreeMean:
+    """Streaming dtype-preserving mean accumulator for weight samples."""
 
-    totals = None
-    dtypes = None
-    count = 0
-    for sample in samples:
-        if totals is None:
-            totals = jax.tree_util.tree_map(
+    def __init__(self) -> None:
+        self._totals = None
+        self._dtypes = None
+        self._count = 0
+
+    def update(self, sample: WeightSample) -> None:
+        if self._totals is None:
+            self._totals = jax.tree_util.tree_map(
                 lambda leaf: np.asarray(leaf, dtype=np.float64), sample.params
             )
-            dtypes = jax.tree_util.tree_map(
+            self._dtypes = jax.tree_util.tree_map(
                 lambda leaf: np.asarray(leaf).dtype, sample.params
             )
         else:
-            totals = jax.tree_util.tree_map(
+            self._totals = jax.tree_util.tree_map(
                 lambda total, leaf: total + np.asarray(leaf, dtype=np.float64),
-                totals,
+                self._totals,
                 sample.params,
             )
-        count += 1
+        self._count += 1
 
-    if totals is None or dtypes is None or count == 0:
-        raise ValueError("Cannot compute the mean of an empty sample collection.")
-    params = jax.tree_util.tree_map(
-        lambda total, dtype: np.asarray(total / count, dtype=dtype), totals, dtypes
-    )
-    return WeightSample(params=params)
+    def result(self) -> WeightSample:
+        if self._totals is None or self._dtypes is None or self._count == 0:
+            raise ValueError("Cannot compute the mean of an empty sample collection.")
+        params = jax.tree_util.tree_map(
+            lambda total, dtype: np.asarray(total / self._count, dtype=dtype),
+            self._totals,
+            self._dtypes,
+        )
+        return WeightSample(params=params)
+
+
+def tree_mean(samples: Iterable[WeightSample]) -> WeightSample:
+    """Compute a streaming, dtype-preserving mean of weight samples."""
+
+    accumulator = OnlineTreeMean()
+    for sample in samples:
+        accumulator.update(sample)
+    return accumulator.result()
 
 
 def _tree_distance(left: ParamTree, right: ParamTree) -> float:
@@ -64,6 +78,8 @@ def reference_stability_diagnostic(
     solvers: Sequence[Mapping[str, Any]] | Sequence[Any],
     previous_pass: int,
     current_pass: int,
+    previous_mean: WeightSample | None = None,
+    current_mean: WeightSample | None = None,
 ) -> dict[str, Any]:
     """Convergence ratio measuring reference stability across a barycenter update.
 
@@ -77,8 +93,8 @@ def reference_stability_diagnostic(
     signal, not a certificate that the matching found the correct basin.
     """
 
-    previous_mean = tree_mean(previous_samples())
-    current_mean = tree_mean(current_samples())
+    previous_mean = previous_mean or tree_mean(previous_samples())
+    current_mean = current_mean or tree_mean(current_samples())
     # Match the two barycenters with a plain L2 frame even under a data-dependent
     # objective (e.g. diagonal_fisher): here we want the geometric movement of canonical
     # positions between passes, not an objective-weighted distance.
@@ -142,4 +158,4 @@ def reference_stability_diagnostic(
     }
 
 
-__all__ = ["reference_stability_diagnostic", "tree_mean"]
+__all__ = ["OnlineTreeMean", "reference_stability_diagnostic", "tree_mean"]

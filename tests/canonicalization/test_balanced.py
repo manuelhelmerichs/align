@@ -29,6 +29,11 @@ def _graph_and_params(seed=0, sizes=(3, 5, 4, 2)):
     return graph, params
 
 
+def _canonicalize(graph, params, **kwargs):
+    kwargs.setdefault("activation", "relu")
+    return ScaleCanonicalizer().canonicalize(graph, params, **kwargs)
+
+
 def _tree_max_abs_diff(a, b):
     return max(
         float(np.max(np.abs(np.asarray(x) - np.asarray(y))))
@@ -55,7 +60,7 @@ def _random_scales(graph, seed, low=-1.0, high=1.0):
 
 def test_balanced_is_default_and_preserves_function():
     graph, params = _graph_and_params(seed=0)
-    canonicalized, _, aux = ScaleCanonicalizer().canonicalize(graph, params)
+    canonicalized, _, aux = _canonicalize(graph, params)
 
     assert aux["strategy"] == "balanced"
     assert aux["convergence"]["converged"] is True
@@ -71,7 +76,7 @@ def test_balanced_is_default_and_preserves_function():
 
 def test_balanced_equalizes_in_out_energies():
     graph, params = _graph_and_params(seed=2)
-    canonicalized, _, _ = ScaleCanonicalizer().canonicalize(graph, params)
+    canonicalized, _, _ = _canonicalize(graph, params)
 
     fcn = canonicalized["params"]["fcn"]
     names = sorted(fcn, key=lambda n: int(n.split("_")[-1]))
@@ -86,8 +91,8 @@ def test_balanced_equalizes_in_out_energies():
 
 def test_balanced_is_idempotent():
     graph, params = _graph_and_params(seed=3)
-    once, _, _ = ScaleCanonicalizer().canonicalize(graph, params)
-    twice, _, _ = ScaleCanonicalizer().canonicalize(graph, once)
+    once, _, _ = _canonicalize(graph, params)
+    twice, _, _ = _canonicalize(graph, once)
     assert _tree_max_abs_diff(once, twice) < 1e-6
 
 
@@ -97,8 +102,8 @@ def test_balanced_collapses_the_scale_orbit():
         params, ScaleState.from_scales(graph, _random_scales(graph, seed=5))
     )
 
-    canonical_a, _, _ = ScaleCanonicalizer().canonicalize(graph, params)
-    canonical_b, _, _ = ScaleCanonicalizer().canonicalize(graph, scaled)
+    canonical_a, _, _ = _canonicalize(graph, params)
+    canonical_b, _, _ = _canonicalize(graph, scaled)
     assert _tree_max_abs_diff(canonical_a, canonical_b) < 1e-5
 
 
@@ -106,8 +111,8 @@ def test_balanced_is_minimum_norm():
     """The balanced representative has the smallest total norm in its orbit."""
 
     graph, params = _graph_and_params(seed=6)
-    balanced, _, _ = ScaleCanonicalizer().canonicalize(graph, params)
-    unit, _, _ = ScaleCanonicalizer().canonicalize(graph, params, strategy="unit_norm")
+    balanced, _, _ = _canonicalize(graph, params)
+    unit, _, _ = _canonicalize(graph, params, strategy="unit_norm")
 
     balanced_norm = _total_squared_norm(balanced)
     assert balanced_norm <= _total_squared_norm(params) + 1e-6
@@ -125,7 +130,7 @@ def test_balanced_is_minimum_norm():
 
 def test_balanced_reported_scales_reproduce_the_action():
     graph, params = _graph_and_params(seed=9)
-    canonicalized, scales, _ = ScaleCanonicalizer().canonicalize(graph, params)
+    canonicalized, scales, _ = _canonicalize(graph, params)
 
     action_scales = scales
     via_action = graph.apply_scales(
@@ -144,20 +149,20 @@ def test_balanced_preserves_degenerate_units():
     fcn["Dense_0"]["kernel"] = jnp.asarray(kernel)
     fcn["Dense_0"]["bias"] = jnp.asarray(bias)
 
-    _, scales, _ = ScaleCanonicalizer().canonicalize(graph, params)
+    _, scales, _ = _canonicalize(graph, params)
     assert float(np.asarray(scales["mlp/h0"])[1]) == pytest.approx(1.0)
 
 
 def test_unknown_strategy_is_rejected():
     graph, params = _graph_and_params(seed=11)
     with pytest.raises(ValueError, match="Unknown canonicalize strategy"):
-        ScaleCanonicalizer().canonicalize(graph, params, strategy="bogus")
+        _canonicalize(graph, params, strategy="bogus")
 
 
 def test_convnet_accepts_balanced_strategy():
     case = make_frn_residual_conv_orbit_case(seed=0)
     _, _, aux = ScaleCanonicalizer().canonicalize(
-        case.graph, case.reference, strategy="balanced"
+        case.graph, case.reference, strategy="balanced", activation="tlu"
     )
     assert aux["plan"] == "conv_balanced"
     assert aux["strategy"] == "balanced"
@@ -167,5 +172,5 @@ def test_attention_rejects_unit_norm_strategy():
     case = make_layernorm_mha_transformer_orbit_case(seed=0)
     with pytest.raises(ValueError, match="undefined for attention"):
         ScaleCanonicalizer().canonicalize(
-            case.graph, case.reference, strategy="unit_norm", activation="gelu"
+            case.graph, case.reference, strategy="unit_norm"
         )
