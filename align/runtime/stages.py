@@ -76,7 +76,7 @@ class StageExecutor(ABC):
         return self.process_single(record, sample).sample
 
 
-def prepare_stage_executors(
+def _prepare_stage_executors(
     stages: Sequence[tuple[str, StageExecutor]],
     manifest: SampleManifest,
     reference_sample: WeightSample,
@@ -163,7 +163,7 @@ def build_stage_executors(
             family=family,
             recipe_kwargs=recipe_kwargs,
         )
-    return prepare_stage_executors(
+    return _prepare_stage_executors(
         [(name, executors[name]) for name in stage_order],
         manifest,
         reference_sample,
@@ -206,7 +206,7 @@ class CanonicalizeExecutor(StageExecutor):
             **self.config.canonicalizer_kwargs,
         )
         return StageResult(
-            sample=sample.with_params(canonical_params),
+            sample=WeightSample(canonical_params),
             scales=scales,
             diagnostics=dict(diagnostics or {}),
         )
@@ -256,7 +256,7 @@ class CenterSoftmaxHeadExecutor(StageExecutor):
             raise RuntimeError("CenterSoftmaxHeadExecutor not prepared.")
         centered, diagnostics = center_softmax_head(sample.params, self.head_path)
         return StageResult(
-            sample=sample.with_params(centered),
+            sample=WeightSample(centered),
             diagnostics=diagnostics,
         )
 
@@ -358,7 +358,7 @@ class MatchExecutor(StageExecutor):
             for group_id, group in self.graph.groups.items()
         }
         return StageResult(
-            sample=sample.with_params(params),
+            sample=WeightSample(params),
             transforms=transforms,
             diagnostics=diagnostics_payload,
         )
@@ -473,6 +473,5 @@ __all__ = [
     "CanonicalizeExecutor",
     "CenterSoftmaxHeadExecutor",
     "MatchExecutor",
-    "prepare_stage_executors",
     "build_stage_executors",
 ]

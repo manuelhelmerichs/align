@@ -14,7 +14,6 @@ paths:
   samples_dir: null
   tree_path: null
   output_dir: null
-  sample_format: pytree_npz
 
 architecture:
   family: layernorm_mha_transformer
@@ -30,7 +29,7 @@ selection:
   reference_chain: 0
   reference_sample: 0
 
-canonicalize:
+canonicalize: {}
   # Attention circuits carry an exact diagonal scale symmetry per intra-head
   # dimension (qk and vo); canonicalization balances the query/key and
   # value/out energies. GELU FFN hidden units have no scale symmetry and stay

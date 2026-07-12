@@ -162,7 +162,6 @@ def run(args: argparse.Namespace) -> None:
     exp_root = exp_root.resolve()
     config.paths.experiment_root = exp_root
     samples_dir = (config.paths.samples_dir or (exp_root / "samples")).resolve()
-    sample_format = config.paths.sample_format
     tree_path = (config.paths.tree_path or _detect_tree_path(exp_root)).resolve()
     output_dir = (config.paths.output_dir or _default_output_dir(exp_root)).resolve()
     config.paths.output_dir = output_dir
@@ -186,7 +185,6 @@ def run(args: argparse.Namespace) -> None:
         samples_dir,
         tree_path,
         selection=config.selection,
-        sample_format=sample_format,
         resume=config.runtime.resume,
         persist=not config.runtime.validate_only,
     )
@@ -200,7 +198,6 @@ def run(args: argparse.Namespace) -> None:
         "samples_dir": str(samples_dir),
         "tree_path": str(tree_path),
         "output_dir": str(output_dir),
-        "sample_format": sample_format,
     }
     config_payload["stages"] = stages
     if args.print_config:
@@ -273,12 +270,9 @@ def run(args: argparse.Namespace) -> None:
         prepared_run=prepared_run,
     )
 
-    if config.runtime.dry_run:
-        runner.execute()
-        print("Dry run complete. Inspect state directory for manifest summary.")
-        return
-
     runner.execute()
+    if config.runtime.dry_run:
+        print("Dry run complete. Inspect state directory for manifest summary.")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -347,12 +341,10 @@ def _format_manifest_summary(manifest) -> str:
     filters = summary.get("filters") or {}
     filter_text = _format_key_values(filters)
     total = summary.get("total_samples", "-")
-    sample_format = summary.get("sample_format", "-")
     return (
         "Manifest | "
         f"chains={chains_text} | "
         f"total_samples={total} | "
-        f"sample_format={sample_format} | "
         f"reference=chain{reference_chain}/sample{reference_sample} | "
         f"filters[{filter_text}]"
     )
@@ -429,7 +421,6 @@ def _digest_payload(config_payload: Mapping[str, Any]) -> dict[str, Any]:
             "experiment_root": resolved.get("experiment_root"),
             "samples_dir": resolved.get("samples_dir"),
             "tree_path": resolved.get("tree_path"),
-            "sample_format": resolved.get("sample_format"),
         },
         "selection": selection,
         "pipeline": config_payload.get("pipeline"),
@@ -452,7 +443,6 @@ def _load_or_build_manifest(
     tree_path: Path,
     *,
     selection,
-    sample_format: str,
     resume: bool,
     persist: bool = True,
 ) -> SampleManifest:
@@ -468,7 +458,6 @@ def _load_or_build_manifest(
             max_total=selection.max_total,
             reference_chain=selection.reference_chain,
             reference_sample=selection.reference_sample,
-            sample_format=sample_format,
         )
         if persist:
             manifest_path.parent.mkdir(parents=True, exist_ok=True)

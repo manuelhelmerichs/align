@@ -3,7 +3,6 @@ paths:
   samples_dir: null        # Optional override when samples live outside experiment_root.
   tree_path: null          # Override the pickled PyTree definition; defaults to tree|tree_sampling.
   output_dir: null         # Defaults to <experiment_root>/align/<timestamp>; set to reuse an existing folder.
-  sample_format: pytree_npz # SMILE/MILE-style leaf-order NPZ files plus a pickled PyTreeDef.
 
 architecture:
   family: mlp
@@ -66,8 +65,7 @@ match:
     #   tolerance: 0.0
 
 runtime:
-  # Optional experimental Apple MPS dispatch policy; omit to inherit the plugin default.
-  mps_async_dispatch: null
+  # mps_async_dispatch: true # Optional Apple MPS dispatch policy; omit to inherit the plugin default.
   resume: false            # Reuse manifests/outputs inside output_dir and continue unfinished runs.
   dry_run: false           # Build manifests, validate configuration, and exit without aligning samples.
   list_samples: false      # Emit the manifest ordering to stdout and exit (debugging aid).

@@ -12,7 +12,7 @@ import numpy as np
 
 from ..run_state import ArtifactChecksumStore, file_checksum, write_npz_compressed
 from ..sample_manifest import SampleManifest, SampleRecord
-from ..samples import WeightSample, create_sample_codec
+from ..samples import PyTreeNpzCodec, WeightSample
 from .resources import STATE_SAVE_INTERVAL_SECONDS
 
 _METADATA_KEY = "__metadata__"
@@ -106,21 +106,9 @@ def write_transforms_artifact(
     transforms: Mapping[str, Any],
     *,
     transform_families: Mapping[str, str] | None = None,
-) -> Path | None:
-    """Persist exact hard transforms keyed by stable symmetry-group id."""
-
-    written, _ = write_transforms_artifact_with_checksum(
-        path, transforms, transform_families=transform_families
-    )
-    return written
-
-
-def write_transforms_artifact_with_checksum(
-    path: str | Path,
-    transforms: Mapping[str, Any],
-    *,
-    transform_families: Mapping[str, str] | None = None,
 ) -> tuple[Path | None, int]:
+    """Persist hard transforms keyed by symmetry-group id; return path and checksum."""
+
     path = Path(path)
     if not transforms:
         if path.exists():
@@ -140,16 +128,11 @@ def read_transforms_artifact(
     return _read_npz_artifact(path, expected_type="transforms")
 
 
-def write_scales_artifact(path: str | Path, scales: Mapping[str, Any]) -> Path | None:
-    """Persist scale vectors keyed by stable group or constraint id."""
-
-    written, _ = write_scales_artifact_with_checksum(path, scales)
-    return written
-
-
-def write_scales_artifact_with_checksum(
+def write_scales_artifact(
     path: str | Path, scales: Mapping[str, Any]
 ) -> tuple[Path | None, int]:
+    """Persist scale vectors keyed by group/constraint id; return path and checksum."""
+
     path = Path(path)
     if not scales:
         if path.exists():
@@ -201,10 +184,7 @@ class RunArtifactStore:
         self.state_dir = self.output_dir / "state"
         self.diagnostics_dir = self.state_dir / "sample_diagnostics"
         self.tree_path = Path(self.manifest.tree_path)
-        self.sample_codec = create_sample_codec(
-            self.manifest.sample_format,
-            tree_path=self.tree_path,
-        )
+        self.sample_codec = PyTreeNpzCodec(self.tree_path)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.diagnostics_dir.mkdir(parents=True, exist_ok=True)
 
@@ -422,7 +402,7 @@ class RunArtifactStore:
         path = self.artifact_paths(record).get("transforms")
         if path is None:
             return
-        written, checksum = write_transforms_artifact_with_checksum(
+        written, checksum = write_transforms_artifact(
             path,
             transforms,
             transform_families=transform_families,
@@ -435,7 +415,7 @@ class RunArtifactStore:
         path = self.artifact_paths(record).get("scales")
         if path is None:
             return
-        written, checksum = write_scales_artifact_with_checksum(path, scales)
+        written, checksum = write_scales_artifact(path, scales)
         self._update_checksum(
             record, kind="scales", path=written, checksum_value=checksum
         )
@@ -563,7 +543,5 @@ __all__ = [
     "read_transforms_artifact",
     "write_diagnostics_artifact",
     "write_scales_artifact",
-    "write_scales_artifact_with_checksum",
     "write_transforms_artifact",
-    "write_transforms_artifact_with_checksum",
 ]

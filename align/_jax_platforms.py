@@ -109,17 +109,11 @@ def _looks_like_mps_system() -> bool:
 
 
 def _cuda_plugin_installed() -> bool:
-    for distribution in (
-        "jax-cuda13-plugin",
-        "jax-cuda12-plugin",
-        "jax-cuda11-plugin",
-    ):
-        try:
-            metadata.version(distribution)
-        except metadata.PackageNotFoundError:
-            continue
-        return True
-    return False
+    try:
+        metadata.version("jax-cuda13-plugin")
+    except metadata.PackageNotFoundError:
+        return False
+    return True
 
 
 def _probe_platform(name: str) -> bool:

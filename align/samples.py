@@ -1,13 +1,12 @@
-"""Canonical weight sample representation and artifact codecs."""
+"""Canonical weight sample representation and the NPZ artifact codec."""
 
 from __future__ import annotations
 
 import pickle
 import shutil
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -15,25 +14,15 @@ import numpy as np
 from jax.tree_util import DictKey, GetAttrKey, SequenceKey
 
 from .run_state import write_npz_compressed
-from .sample_formats import DEFAULT_SAMPLE_FORMAT, normalize_sample_format
 
 type ParamTree = Any
-
-
-class _PyTreeDefinitionUnpickler(pickle.Unpickler):
-    """Load PyTree definitions across JAXlib's internal module relocation."""
-
-    def find_class(self, module: str, name: str) -> Any:
-        if module == "jaxlib.xla_extension.pytree" and name == "PyTreeDef":
-            return jax.tree_util.PyTreeDef
-        return super().find_class(module, name)
 
 
 def load_pytree_definition(path: str | Path) -> jax.tree_util.PyTreeDef:
     """Load a pickled JAX PyTree definition from a producer artifact."""
 
     with Path(path).open("rb") as handle:
-        treedef = _PyTreeDefinitionUnpickler(handle).load()
+        treedef = pickle.load(handle)
     if not isinstance(treedef, jax.tree_util.PyTreeDef):
         raise TypeError(
             f"Expected a JAX PyTreeDef in {path}, got {type(treedef).__name__}."
@@ -46,27 +35,6 @@ class WeightSample:
     """Canonical in-memory representation of one weight sample."""
 
     params: ParamTree
-    metadata: Mapping[str, Any] = field(default_factory=dict)
-
-    def with_params(self, params: ParamTree) -> WeightSample:
-        """Return a sample with updated parameters and unchanged metadata."""
-
-        return WeightSample(params=params, metadata=dict(self.metadata))
-
-
-class WeightSampleCodec(Protocol):
-    """Codec boundary between filesystem artifacts and ``WeightSample``."""
-
-    name: str
-
-    def load(self, path: str | Path) -> WeightSample:
-        """Decode one sample artifact."""
-
-    def save(self, path: str | Path, sample: WeightSample) -> int:
-        """Encode one sample artifact and return its content checksum."""
-
-    def copy_structure(self, target_dir: str | Path, *, artifact_name: str) -> Path:
-        """Copy any shared structure file required to reload saved samples."""
 
 
 def tree_leaves_with_names(
@@ -96,8 +64,6 @@ def tree_leaves_with_names(
 class PyTreeNpzCodec:
     """Codec for SMILE/MILE-style leaf-order NPZ files plus a pickled PyTreeDef."""
 
-    name = DEFAULT_SAMPLE_FORMAT
-
     def __init__(self, tree_path: str | Path) -> None:
         self.tree_path = Path(tree_path)
         self._treedef: jax.tree_util.PyTreeDef | None = None
@@ -112,7 +78,6 @@ class PyTreeNpzCodec:
         sample_path = Path(path)
         with np.load(sample_path, allow_pickle=False) as data:
             leaves = [jnp.asarray(data[key]) for key in data.files]
-            leaf_keys = tuple(data.files)
 
         expected = int(self.treedef.num_leaves)
         if len(leaves) != expected:
@@ -121,14 +86,7 @@ class PyTreeNpzCodec:
                 f"but tree {self.tree_path} expects {expected}."
             )
         params = jax.tree_util.tree_unflatten(self.treedef, leaves)
-        return WeightSample(
-            params=params,
-            metadata={
-                "format": self.name,
-                "path": str(sample_path),
-                "leaf_keys": leaf_keys,
-            },
-        )
+        return WeightSample(params=params)
 
     def save(self, path: str | Path, sample: WeightSample) -> int:
         sample_path = Path(path)
@@ -151,25 +109,10 @@ class PyTreeNpzCodec:
         return dest
 
 
-def create_sample_codec(
-    sample_format: str | None,
-    *,
-    tree_path: str | Path | None,
-) -> WeightSampleCodec:
-    """Create the codec for a configured sample format."""
-
-    normalize_sample_format(sample_format)
-    if tree_path is None:
-        raise ValueError("tree_path is required for sample_format='pytree_npz'.")
-    return PyTreeNpzCodec(tree_path)
-
-
 __all__ = [
     "ParamTree",
     "PyTreeNpzCodec",
     "WeightSample",
-    "WeightSampleCodec",
-    "create_sample_codec",
     "load_pytree_definition",
     "tree_leaves_with_names",
 ]

@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from ..sample_formats import normalize_sample_format
 from ._utils import _merge_dicts, _validate_fields
 from .architecture import ArchitectureConfig
 from .paths import PathConfig, path_to_dict
@@ -177,7 +176,6 @@ def validate_paths(config: RunConfig) -> None:
     samples_dir = config.paths.samples_dir or (root / "samples")
     if not samples_dir.exists():
         raise FileNotFoundError(f"Samples directory not found: {samples_dir}")
-    normalize_sample_format(config.paths.sample_format)
     tree_path = config.paths.tree_path
     if tree_path is not None:
         resolved_tree = tree_path.resolve()

@@ -15,8 +15,6 @@ from typing import Any
 
 import numpy as np
 
-from .sample_manifest import SampleRecord
-
 _CHECKSUM_CHUNK_SIZE = 1 << 20
 
 
@@ -277,15 +275,7 @@ class RunState:
             self._tracker = ProcessedTracker(self.tracker_path, self.total_samples)
         return self._tracker
 
-    def record_progress(
-        self,
-        record: SampleRecord | None = None,
-        *,
-        sample_index: int | None = None,
-    ) -> None:
-        index = record.index if record is not None else sample_index
-        if index is None:
-            raise ValueError("sample_index must be provided when recording progress.")
+    def record_progress(self, index: int) -> None:
         if self._ensure_tracker().mark(int(index)):
             self.updated_at = time.time()
 

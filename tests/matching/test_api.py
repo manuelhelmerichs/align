@@ -651,7 +651,7 @@ def test_transform_artifacts_round_trip_all_families(tmp_path):
     for key in ("rotation_pairs", "orthogonal"):
         assert artifacts[key].dtype == np.float32
 
-    path = write_transforms_artifact(
+    path, _ = write_transforms_artifact(
         tmp_path / "transforms.npz",
         artifacts,
         transform_families={key: key for key in families},
@@ -672,7 +672,7 @@ def test_transform_artifacts_round_trip_all_families(tmp_path):
         np.testing.assert_allclose(loaded[key], families[key], atol=1e-6)
 
     identity_artifacts = TransformState.identity(graph, backend="numpy").to_artifacts()
-    identity_path = write_transforms_artifact(
+    identity_path, _ = write_transforms_artifact(
         tmp_path / "identity_transforms.npz",
         identity_artifacts,
         transform_families={key: key for key in families},

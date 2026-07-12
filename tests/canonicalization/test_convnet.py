@@ -31,8 +31,6 @@ from benchmarks.synthetic import (
 )
 
 _MODULE_GRAPH = {
-    "schema": "align.residual_module_graph",
-    "version": 1,
     "nodes": [
         {"id": "input", "kind": "input"},
         {"id": "core/Conv_0", "kind": "conv", "normalizer": "core/FRN_0"},
@@ -365,8 +363,6 @@ def test_bare_conv_self_loop_group_balances_exactly():
         }
     }
     topology = {
-        "schema": "align.residual_module_graph",
-        "version": 1,
         "nodes": [
             {"id": "input", "kind": "input"},
             {"id": "core/Conv_0", "kind": "conv"},

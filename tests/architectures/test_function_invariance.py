@@ -118,8 +118,6 @@ def test_residual_dag_action_preserves_fanout_projection_function_when_reordered
         }
     }
     topology = {
-        "schema": "align.residual_module_graph",
-        "version": 1,
         "nodes": [
             {"id": "input", "kind": "input"},
             {"id": "core/Conv_0", "kind": "conv"},
@@ -197,8 +195,6 @@ def test_residual_dag_with_more_than_ten_convs_uses_topological_order():
     graph = ResidualConvNetRecipe(
         parameter_root="core",
         residual_topology={
-            "schema": "align.residual_module_graph",
-            "version": 1,
             "nodes": nodes,
             "edges": edges,
         },

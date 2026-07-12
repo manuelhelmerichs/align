@@ -31,7 +31,7 @@ class _CanonicalizeStage:
     def process_single(self, record, sample):
         value = sample.params["x"] + 1
         return StageResult(
-            sample=sample.with_params({"x": value}),
+            sample=WeightSample({"x": value}),
             scales={"g": jnp.asarray([record.index + 1])},
             diagnostics={"plan": "dense_chain"},
         )
@@ -57,7 +57,7 @@ class _MatchStage:
     def _result(self, record, sample):
         value = sample.params["x"] + 10
         return StageResult(
-            sample=sample.with_params({"x": value}),
+            sample=WeightSample({"x": value}),
             transforms={"g": jnp.eye(1, dtype=jnp.uint8)},
             diagnostics={
                 "reference": record.index == 0,

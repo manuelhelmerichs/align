@@ -13,13 +13,13 @@ from typing import TYPE_CHECKING, Any
 
 from ..sample_manifest import SampleManifest, SampleRecord
 from .artifacts import (
-    write_scales_artifact_with_checksum,
-    write_transforms_artifact_with_checksum,
+    write_scales_artifact,
+    write_transforms_artifact,
 )
 from .pipeline import SampleAlignmentResult, StagePipeline
 
 if TYPE_CHECKING:
-    from ..samples import WeightSample, WeightSampleCodec
+    from ..samples import PyTreeNpzCodec, WeightSample
 
 
 class _ArtifactWriter:
@@ -29,7 +29,7 @@ class _ArtifactWriter:
         self,
         scratch_root: Path,
         *,
-        sample_codec: WeightSampleCodec,
+        sample_codec: PyTreeNpzCodec,
         stage_output_stages: tuple[str, ...],
     ) -> None:
         self.root = Path(scratch_root)
@@ -62,19 +62,17 @@ class _ArtifactWriter:
 
         transform_path = None
         if transforms is not None:
-            transform_path, transform_checksum = (
-                write_transforms_artifact_with_checksum(
-                    sample_dir / "transforms.npz",
-                    transforms,
-                    transform_families=transform_families,
-                )
+            transform_path, transform_checksum = write_transforms_artifact(
+                sample_dir / "transforms.npz",
+                transforms,
+                transform_families=transform_families,
             )
         artifacts["transforms_path"] = str(transform_path) if transform_path else None
         checksums["transforms"] = transform_checksum if transform_path else 0
 
         scale_path = None
         if scales is not None:
-            scale_path, scale_checksum = write_scales_artifact_with_checksum(
+            scale_path, scale_checksum = write_scales_artifact(
                 sample_dir / "scales.npz", scales
             )
         artifacts["scales_path"] = str(scale_path) if scale_path else None
@@ -138,14 +136,11 @@ class _WorkerLoop:
             save_intermediate=self.save_intermediate,
         )
 
-        from ..samples import create_sample_codec
+        from ..samples import PyTreeNpzCodec
 
         self._artifact_writer = _ArtifactWriter(
             Path(job["scratch_dir"]),
-            sample_codec=create_sample_codec(
-                manifest.sample_format,
-                tree_path=manifest.tree_path,
-            ),
+            sample_codec=PyTreeNpzCodec(manifest.tree_path),
             stage_output_stages=(
                 tuple(name for name, _ in self.stages[:-1])
                 if self.save_intermediate

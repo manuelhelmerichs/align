@@ -79,7 +79,7 @@ class _RunnerPipelineSink:
         if self.final_pass or self.persist_diagnostics:
             artifact_store.write_diagnostics(record, output.diagnostics)
         if self.final_pass:
-            self.runner.run_state.record_progress(record=record)
+            self.runner.run_state.record_progress(record.index)
             self.runner._maybe_persist_state()
         self.bar.update(label=record.label)
         if self.final_pass:
@@ -127,12 +127,6 @@ class AlignmentRunner:
         self._pass_mean = OnlineTreeMean()
         self._collect_pass_mean = False
         self._input_samples_dir: Path | None = None
-
-    def _dry_run_summary_extra(self) -> dict[str, Any]:
-        return {
-            "stages": self.stage_order,
-            "barycenter_passes": self._barycenter_passes(),
-        }
 
     def _barycenter_passes(self) -> int:
         config = self.config.match
@@ -460,8 +454,9 @@ class AlignmentRunner:
             "manifest": self.manifest.summary(),
             "pending_samples": len(pending),
             "output_dir": str(self.run_state.output_dir),
+            "stages": self.stage_order,
+            "barycenter_passes": self._barycenter_passes(),
         }
-        summary.update(self._dry_run_summary_extra())
         summary_path.write_text(json.dumps(summary, indent=2))
         self.progress_logger.info("Dry run summary written to %s", summary_path)
 
@@ -676,7 +671,7 @@ class AlignmentRunner:
                         except ValueError:
                             pass
                         if final_pass:
-                            self.run_state.record_progress(sample_index=sample_index)
+                            self.run_state.record_progress(sample_index)
                             self._maybe_persist_state()
                         bar.update(label=record.label)
                         if final_pass:

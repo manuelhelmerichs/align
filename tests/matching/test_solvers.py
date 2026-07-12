@@ -112,8 +112,6 @@ class TestLAPSchedule:
         recipe = ResidualConvNetRecipe(
             parameter_root="core",
             residual_topology={
-                "schema": "align.residual_module_graph",
-                "version": 1,
                 "nodes": [
                     {"id": "input", "kind": "input"},
                     {"id": "core/Conv_0", "kind": "conv"},

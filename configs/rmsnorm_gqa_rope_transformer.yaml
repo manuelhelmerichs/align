@@ -33,7 +33,6 @@ paths:
   samples_dir: null
   tree_path: null
   output_dir: null
-  sample_format: pytree_npz
 
 architecture:
   family: rmsnorm_gqa_rope_transformer
@@ -49,7 +48,7 @@ selection:
   reference_chain: 0
   reference_sample: 0
 
-canonicalize:
+canonicalize: {}
   # GELU FFN hidden units carry no scale symmetry; the plan touches only
   # RMSNorm gammas and the attention circuits.
 

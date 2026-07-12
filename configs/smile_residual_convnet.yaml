@@ -3,7 +3,6 @@ paths:
   samples_dir: null
   tree_path: null
   output_dir: null
-  sample_format: pytree_npz
 
 architecture:
   family: residual_convnet

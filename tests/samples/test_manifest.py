@@ -37,7 +37,6 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(manifest.total, 1)
             self.assertEqual(manifest.reference_index, 0)
             self.assertEqual(manifest.filters["chain_indices"], [0])
-            self.assertEqual(manifest.sample_format, "pytree_npz")
 
             manifest_path = root / "manifest.json"
             manifest.save(manifest_path)
@@ -65,7 +64,6 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(loaded.records[0].label, "chain0_sample0")
             self.assertEqual(loaded.digest(), manifest.digest())
             self.assertEqual(Path(loaded.tree_path), tree_copy.resolve())
-            self.assertEqual(loaded.sample_format, "pytree_npz")
 
 
 if __name__ == "__main__":  # pragma: no cover

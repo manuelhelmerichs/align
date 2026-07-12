@@ -326,7 +326,7 @@ def test_resume_with_no_pending_samples_repairs_finalization(tmp_path) -> None:
         tmp_path
     )
     for record in manifest.records:
-        run_state.record_progress(record=record)
+        run_state.record_progress(record.index)
     run_state.save()
 
     runner = AlignmentRunner(
@@ -411,7 +411,7 @@ def test_matching_solver_diagnostics_survive_aggregation(tmp_path) -> None:
 def test_worker_rebuilds_matching_against_refined_reference(tmp_path) -> None:
     config, manifest, _, _ = _build_runtime_state(tmp_path)
     initial = SampleLoader(manifest).load_reference()
-    refined = initial.with_params(
+    refined = WeightSample(
         jax.tree_util.tree_map(lambda leaf: leaf + 0.25, initial.params)
     )
     job = {
@@ -481,7 +481,7 @@ def test_runner_requeues_on_checksum_mismatch(tmp_path) -> None:
     sample = loader.load(record)
     artifact_store.write_aligned_sample(record, sample)
     artifact_store.maybe_flush(force=True)
-    run_state.record_progress(record=record)
+    run_state.record_progress(record.index)
 
     aligned_path = artifact_store.artifact_paths(record)["aligned_sample"]
     aligned_path.write_bytes(b"corrupt")

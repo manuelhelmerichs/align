@@ -158,7 +158,7 @@ def test_scale_artifact_retains_ids_and_reconstructs_action(tmp_path):
     graph = MLPRecipe(parameter_root="params.fcn").build_graph(params)
     canonicalized, scales, _ = _canonicalize(graph, params)
 
-    path = write_scales_artifact(tmp_path / "scales.npz", scales)
+    path, _ = write_scales_artifact(tmp_path / "scales.npz", scales)
     loaded, metadata = read_scales_artifact(path)
 
     assert metadata["scale_ids"] == list(scales)

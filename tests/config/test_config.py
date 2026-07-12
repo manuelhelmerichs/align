@@ -371,22 +371,6 @@ runtime:
             self.assertEqual(config.active_stages(), ["canonicalize"])
             self.assertIsNone(config.match)
             self.assertTrue(config.runtime.dry_run)
-            self.assertEqual(config.paths.sample_format, "pytree_npz")
-
-    def test_path_config_validates_sample_format(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            config_file = root / "config.yaml"
-            config_file.write_text(
-                f"""
-pipeline: [canonicalize]
-paths:
-  experiment_root: {root}
-  sample_format: missing
-                """
-            )
-            with self.assertRaises(ValueError):
-                load_align_config(config_file)
 
     def test_residual_convnet_accepted_by_validator(self) -> None:
         config = RunConfig(architecture=ArchitectureConfig(family="residual_convnet"))

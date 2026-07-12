@@ -1,4 +1,4 @@
-"""Residual ConvNet recipe driven by an explicit, versioned module DAG."""
+"""Residual ConvNet recipe driven by an explicit module DAG."""
 
 from __future__ import annotations
 
@@ -18,9 +18,6 @@ from .graph_builder import SymmetryGraphBuilder
 from .recipe import ArchitectureRecipe, register_recipe
 from .rules import SymmetryRule
 from .schemas import RESIDUAL_CONVNET_OPTIONS
-
-_TOPOLOGY_SCHEMA = "align.residual_module_graph"
-_TOPOLOGY_VERSION = 1
 
 
 class _GroupUnionFind:
@@ -126,15 +123,7 @@ def _load_topology(value: Any) -> _ModuleTopology:
             raise ValueError(f"residual_topology must be valid JSON: {path}") from exc
     if not isinstance(value, Mapping):
         raise ValueError("residual_topology must be a mapping or JSON file path.")
-    _strict_keys(
-        "residual_topology",
-        value,
-        {"schema", "version", "nodes", "edges", "metadata"},
-    )
-    if value.get("schema") != _TOPOLOGY_SCHEMA:
-        raise ValueError(f"residual_topology.schema must be {_TOPOLOGY_SCHEMA!r}.")
-    if value.get("version") != _TOPOLOGY_VERSION:
-        raise ValueError(f"residual_topology.version must be {_TOPOLOGY_VERSION}.")
+    _strict_keys("residual_topology", value, {"nodes", "edges", "metadata"})
     raw_nodes, raw_edges = value.get("nodes"), value.get("edges")
     if not isinstance(raw_nodes, list) or not raw_nodes:
         raise ValueError("residual_topology.nodes must be a non-empty list.")

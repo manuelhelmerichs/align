@@ -144,8 +144,6 @@ def test_residual_convnet_recipe_residual_grouping_permutes_all_sites():
         }
     }
     residual_topology = {
-        "schema": "align.residual_module_graph",
-        "version": 1,
         "nodes": [
             {"id": "input", "kind": "input"},
             {"id": "core/Conv_0", "kind": "conv", "normalizer": "core/FRN_0"},
@@ -233,8 +231,6 @@ def test_residual_convnet_recipe_validates_join_sizes():
         }
     }
     residual_topology = {
-        "schema": "align.residual_module_graph",
-        "version": 1,
         "nodes": [
             {"id": "input", "kind": "input"},
             {"id": "core/Conv_0", "kind": "conv"},
@@ -273,8 +269,6 @@ def test_residual_convnet_recipe_transitive_residual_union():
         }
     }
     residual_topology = {
-        "schema": "align.residual_module_graph",
-        "version": 1,
         "nodes": [
             {"id": "input", "kind": "input"},
             {"id": "core/Conv_0", "kind": "conv"},
@@ -340,8 +334,6 @@ def test_residual_convnet_recipe_requires_explicit_dataflow_edges():
         }
     }
     residual_topology = {
-        "schema": "align.residual_module_graph",
-        "version": 1,
         "nodes": [
             {"id": "input", "kind": "input"},
             {"id": "core/Conv_0", "kind": "conv"},
@@ -381,8 +373,6 @@ def test_residual_convnet_recipe_recursive_conv_discovery():
         }
     }
     residual_topology = {
-        "schema": "align.residual_module_graph",
-        "version": 1,
         "nodes": [
             {"id": "input", "kind": "input"},
             {"id": "core/Block_0/Conv_0", "kind": "conv"},
@@ -436,8 +426,6 @@ def test_residual_convnet_recipe_batchnorm_permutation():
         parameter_root="params.core",
         batch_stats_root="batch_stats.core",
         residual_topology={
-            "schema": "align.residual_module_graph",
-            "version": 1,
             "nodes": [
                 {"id": "input", "kind": "input"},
                 {

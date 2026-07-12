@@ -61,32 +61,7 @@ def test_pytree_npz_codec_loads_leaf_ordered_sample(tmp_path) -> None:
     sample = codec.load(sample_path)
 
     assert isinstance(sample, WeightSample)
-    assert sample.metadata["format"] == "pytree_npz"
-    assert sample.metadata["leaf_keys"] == ("third", "first", "second", "fourth")
     _assert_same_tree(sample.params, params)
-
-
-def test_pytree_npz_codec_loads_pre_jax_0_5_tree_pickle(tmp_path) -> None:
-    params = _params_tree()
-    leaves, treedef = jax.tree_util.tree_flatten(params)
-    tree_path = tmp_path / "tree"
-    sample_path = tmp_path / "sample.npz"
-
-    payload = pickle.dumps(treedef, protocol=4)
-    current_module = type(treedef).__module__.encode()
-    legacy_module = b"jaxlib.xla_extension.pytree"
-    current_global = bytes((0x8C, len(current_module))) + current_module
-    legacy_global = bytes((0x8C, len(legacy_module))) + legacy_module
-    assert current_global in payload
-    tree_path.write_bytes(payload.replace(current_global, legacy_global, 1))
-    np.savez(
-        sample_path,
-        **{f"leaf_{idx}": np.asarray(leaf) for idx, leaf in enumerate(leaves)},
-    )
-
-    loaded = PyTreeNpzCodec(tree_path).load(sample_path)
-
-    _assert_same_tree(loaded.params, params)
 
 
 def test_pytree_npz_codec_save_round_trips(tmp_path) -> None:

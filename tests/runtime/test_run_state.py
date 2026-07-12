@@ -60,7 +60,7 @@ def test_run_state_progress_and_unprocess(tmp_path: Path) -> None:
         total_samples=manifest.total,
     )
 
-    run_state.record_progress(sample_index=0)
+    run_state.record_progress(0)
     assert run_state.processed_count() == 1
 
     run_state.mark_unprocessed(0)
@@ -84,7 +84,7 @@ def test_run_state_reloads_partial_bitmap_count(tmp_path: Path) -> None:
         total_samples=10,
     )
     for sample_index in (0, 2, 8):
-        run_state.record_progress(sample_index=sample_index)
+        run_state.record_progress(sample_index)
     run_state.save()
 
     reloaded = RunState.load(run_state_path)
@@ -124,7 +124,6 @@ def test_load_or_build_manifest_respects_resume_flag(tmp_path: Path) -> None:
         samples_dir,
         tree_path,
         selection=selection,
-        sample_format="pytree_npz",
         resume=False,
     )
     assert built.digest() == manifest.digest()
@@ -135,7 +134,6 @@ def test_load_or_build_manifest_respects_resume_flag(tmp_path: Path) -> None:
         samples_dir,
         tree_path,
         selection=selection,
-        sample_format="pytree_npz",
         resume=True,
     )
     assert loaded.digest() == built.digest()

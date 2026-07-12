@@ -88,8 +88,6 @@ def _perm_matrix(indices: np.ndarray) -> np.ndarray:
 
 def _residual_convnet_residual_topology() -> dict[str, object]:
     return {
-        "schema": "align.residual_module_graph",
-        "version": 1,
         "nodes": [
             {"id": "input", "kind": "input"},
             {"id": "core/Conv_0", "kind": "conv"},

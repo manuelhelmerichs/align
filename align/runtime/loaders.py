@@ -7,7 +7,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from ..sample_manifest import SampleManifest, SampleRecord
-from ..samples import WeightSample, create_sample_codec
+from ..samples import PyTreeNpzCodec, WeightSample
 
 
 class SampleLoader:
@@ -15,10 +15,7 @@ class SampleLoader:
 
     def __init__(self, manifest: SampleManifest):
         self.manifest = manifest
-        self.codec = create_sample_codec(
-            manifest.sample_format,
-            tree_path=Path(manifest.tree_path),
-        )
+        self.codec = PyTreeNpzCodec(Path(manifest.tree_path))
 
     def load(self, record: SampleRecord) -> WeightSample:
         abs_path = record.absolute_path(self.manifest.samples_dir)

@@ -17,12 +17,6 @@ from typing import Any
 import numpy as np
 from numpy.lib import format as np_format
 
-from .sample_formats import (
-    DEFAULT_SAMPLE_FORMAT,
-    normalize_sample_format,
-    sample_file_suffixes,
-)
-
 _INT_PATTERN = re.compile(r"(\d+)(?!.*\d)")
 _RECORD_DTYPE = np.dtype(
     [
@@ -86,10 +80,9 @@ def _iter_chains(samples_dir: Path) -> Iterator[tuple[int, Path]]:
             continue
 
 
-def _iter_samples(chain_dir: Path, *, sample_format: str) -> Iterator[tuple[int, Path]]:
-    suffixes = sample_file_suffixes(sample_format)
+def _iter_samples(chain_dir: Path) -> Iterator[tuple[int, Path]]:
     files = sorted(
-        [path for path in chain_dir.iterdir() if path.suffix in suffixes],
+        [path for path in chain_dir.iterdir() if path.suffix == ".npz"],
         key=lambda path: _extract_last_int(path.stem),
     )
     for file_path in files:
@@ -201,7 +194,6 @@ class SampleManifest:
     reference_sample: int
     reference_index: int
     filters: Mapping[str, Any]
-    sample_format: str = DEFAULT_SAMPLE_FORMAT
     created_at: float = field(default_factory=time.time)
 
     @property
@@ -216,7 +208,6 @@ class SampleManifest:
         return {
             "samples_dir": str(self.samples_dir),
             "tree_path": str(self.tree_path),
-            "sample_format": self.sample_format,
             "records": [record.to_dict() for record in self.records],
             "reference_chain": self.reference_chain,
             "reference_sample": self.reference_sample,
@@ -231,7 +222,6 @@ class SampleManifest:
             "records": [record.relative_path for record in self.records],
             "reference_chain": self.reference_chain,
             "reference_sample": self.reference_sample,
-            "sample_format": self.sample_format,
             "total": self.total,
         }
         encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -248,7 +238,6 @@ class SampleManifest:
         return {
             "chains": sorted({record.chain_id for record in self.records}),
             "total_samples": self.total,
-            "sample_format": self.sample_format,
             "reference": {
                 "chain": self.reference_chain,
                 "sample": self.reference_sample,
@@ -337,7 +326,6 @@ class SampleManifest:
             reference_sample=int(payload["reference_sample"]),
             reference_index=int(payload["reference_index"]),
             filters=payload.get("filters", {}),
-            sample_format=normalize_sample_format(str(payload["sample_format"])),
             created_at=float(payload.get("created_at", time.time())),
         )
         manifest._attach_shared_records(Path(path))
@@ -356,11 +344,9 @@ class SampleManifest:
         max_total: int | None = None,
         reference_chain: int = 0,
         reference_sample: int = 0,
-        sample_format: str = DEFAULT_SAMPLE_FORMAT,
     ) -> SampleManifest:
         samples_dir = Path(samples_dir).resolve()
         tree_path = Path(tree_path).resolve()
-        sample_format = normalize_sample_format(sample_format)
         chain_filter = set(chain_indices) if chain_indices is not None else None
         sample_step = max(sample_step, 1)
 
@@ -370,9 +356,7 @@ class SampleManifest:
             if chain_filter is not None and chain_id not in chain_filter:
                 continue
             loaded = 0
-            for offset, (sample_id, file_path) in enumerate(
-                _iter_samples(chain_dir, sample_format=sample_format)
-            ):
+            for offset, (sample_id, file_path) in enumerate(_iter_samples(chain_dir)):
                 if offset % sample_step != 0:
                     continue
                 record = SampleRecord(
@@ -411,7 +395,6 @@ class SampleManifest:
                 "sample_step": sample_step,
                 "max_total": max_total,
             },
-            sample_format=sample_format,
         )
 
 
