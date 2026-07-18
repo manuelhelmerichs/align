@@ -12,6 +12,7 @@ from benchmarks.posterior import (
     load_experiment_posterior_case,
     make_synthetic_layernorm_mha_transformer_posterior_case,
     make_synthetic_mlp_posterior_case,
+    rank_normalized_split_rhat,
     run_posterior_benchmark,
     split_rhat,
 )
@@ -44,6 +45,34 @@ def test_split_rhat_validates_input_shape():
         split_rhat(np.zeros((1, 8, 2)))
     with pytest.raises(ValueError):
         split_rhat(np.zeros((2, 3, 2)))
+
+
+def test_rank_normalized_split_rhat_detects_location_and_scale_failures():
+    rng = np.random.default_rng(7)
+    stationary = rng.standard_normal((4, 200, 2))
+    location = stationary.copy()
+    location[2:, :, 0] += 3.0
+    scale = stationary.copy()
+    scale[2:, :, 1] *= 4.0
+
+    stationary_rhat = rank_normalized_split_rhat(stationary)
+    location_rhat = rank_normalized_split_rhat(location)
+    scale_rhat = rank_normalized_split_rhat(scale)
+
+    assert set(stationary_rhat) == {"bulk", "folded", "max"}
+    np.testing.assert_allclose(stationary_rhat["max"], 1.0, atol=0.05)
+    assert location_rhat["bulk"][0] > 1.5
+    assert scale_rhat["folded"][1] > 1.2
+    assert scale_rhat["folded"][1] > scale_rhat["bulk"][1]
+    np.testing.assert_array_equal(
+        scale_rhat["max"],
+        np.maximum(scale_rhat["bulk"], scale_rhat["folded"]),
+    )
+
+
+def test_rank_normalized_split_rhat_validates_input_shape():
+    with pytest.raises(ValueError, match="Expected"):
+        rank_normalized_split_rhat(np.zeros((4, 8)))
 
 
 def test_synthetic_posterior_case_validates_chain_and_sample_counts():
