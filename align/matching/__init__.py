@@ -63,7 +63,7 @@ from .temporal import (
     TemporalGaugeSolver,
     TemporalStrategy,
     match_temporal_sequence,
-    transform_hamming_distance,
+    transform_transition_distance,
 )
 
 __all__ = [
@@ -110,5 +110,5 @@ __all__ = [
     "solve_rotation_pairs_maximize",
     "solve_signed_lap_maximize",
     "update_group_transform",
-    "transform_hamming_distance",
+    "transform_transition_distance",
 ]

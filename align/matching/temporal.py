@@ -1,11 +1,41 @@
-"""Sequence-regularized permutation gauges for temporally ordered samples.
+r"""Sequence-regularized discrete gauges for temporally ordered samples.
 
 This module is deliberately separate from ordinary population matching.  A
 temporal gauge solves a different problem: every sample is still matched to a
-fixed population reference, but adjacent hard permutations pay a unit-level
-Hamming penalty.  The resulting path is suitable for studying time-series
-diagnostics; it is not used by :func:`align.matching.match_sample` or
+fixed population reference, but adjacent hard transforms pay a transition
+penalty.  The resulting path is suitable for studying time-series diagnostics;
+it is not used by :func:`align.matching.match_sample` or
 :func:`align.matching.match_batch`.
+
+Transition metric
+-----------------
+
+The transition penalty uses the half squared chordal distance between the
+orthogonal matrix realizations of two hard transforms,
+
+.. math:: d(T, T') = \tfrac12 \lVert M(T) - M(T') \rVert_F^2 .
+
+On permutations this is exactly the unit-level Hamming distance (each
+relabeled unit costs 1).  On signed permutations it counts 1 per relabeled
+unit and 2 per in-place sign flip — a sign flip moves that unit's aligned
+weights to their antipode, which is a strictly larger path jump than
+relabeling to an independent unit.  For isotropic unit rows ``w`` with
+``E[w wᵀ] = σ² I`` the expected squared aligned-coordinate jump induced by
+changing the gauge is ``2 σ² d(T, T')``, so ``λ·d`` penalizes exactly the
+expected gauge-induced path-roughness increment, in the same squared-weight
+units as the alignment cost.
+
+The metric is Hamming-like (integer-valued, additive per unit, bi-invariant)
+precisely for the discrete transform families.  Connected continuous families
+(``rotation_pairs``, the full orthogonal update) admit no non-trivial
+integer-valued invariant transition metric — any continuous invariant metric
+on a connected group takes a full interval of values — so those groups are
+rejected rather than silently discretized; ``orthogonal`` groups are matched
+within their signed-permutation subgroup, mirroring per-draw ``lap``
+schedules.  Attention-coupled circuits have a well-defined composite metric (a
+moved head costs its head dimension, a stationary head pays its intra-head
+signed distance) but no implemented exact coupled window solve, and are
+rejected as well.
 """
 
 from __future__ import annotations
@@ -22,19 +52,29 @@ from scipy.sparse import coo_matrix
 
 from ..samples import ParamTree
 from ..symmetry import SymmetryGraph
+from ..symmetry.constraints import GQARoPECircuitConstraint, MHACircuitConstraint
 from .objectives import Objective, get_objective
 from .solvers import assignment_objective_margin
-from .state import PermutationTransform, TransformState, solve_lap_maximize
+from .state import (
+    PermutationTransform,
+    SignedPermutationTransform,
+    TransformState,
+    solve_lap_maximize,
+    transform_matrix,
+)
 
 TemporalStrategy = Literal["greedy", "lookahead"]
+
+_DISCRETE_FAMILIES = ("permutation", "signed_permutation", "orthogonal")
 
 
 @dataclass(frozen=True)
 class TemporalGaugeConfig:
-    r"""Configuration for a transition-penalized permutation path.
+    r"""Configuration for a transition-penalized discrete gauge path.
 
     ``regularization_strength`` is :math:`\lambda` in squared alignment-cost
-    units per changed unit.  ``lookahead_window`` is used only by the
+    units per unit of transition distance (half squared chordal distance;
+    unit Hamming on permutations).  ``lookahead_window`` is used only by the
     ``lookahead`` strategy and includes the sample currently being committed.
     """
 
@@ -64,34 +104,99 @@ class TemporalGaugeConfig:
             raise ValueError("tolerance must be finite and non-negative.")
 
 
-def transform_hamming_distance(
+def transform_transition_distance(
     graph: SymmetryGraph, left: TransformState, right: TransformState
-) -> int:
-    """Return unit-level Hamming distance between two permutation states."""
+) -> float:
+    """Half squared chordal distance ``½‖M(T)−M(T′)‖²_F`` summed over groups.
 
-    distance = 0
+    Equals unit Hamming distance on permutation groups; counts 1 per
+    relabeled unit and 2 per in-place sign flip on signed-permutation
+    groups; is continuous-valued on matrix states (diagnostic use only — the
+    exact temporal solver accepts only discrete assignments, including the
+    signed subgroup selected by LAP for an ``orthogonal`` group).
+    """
+
+    if any(
+        isinstance(constraint, (MHACircuitConstraint, GQARoPECircuitConstraint))
+        for constraint in graph.constraints
+    ):
+        raise ValueError(
+            "Attention-coupled transition distance requires the composite "
+            "head/intra-head metric; refusing to silently sum independent "
+            "unit distances."
+        )
+
+    total = 0.0
     for group_id in graph.group_order:
         left_transform = left.transforms[group_id]
         right_transform = right.transforms[group_id]
-        if not isinstance(left_transform, PermutationTransform) or not isinstance(
+        if isinstance(left_transform, PermutationTransform) and isinstance(
             right_transform, PermutationTransform
         ):
-            raise ValueError("Temporal Hamming distance supports permutations only.")
-        distance += int(
-            np.count_nonzero(
-                np.asarray(left_transform.indices)
-                != np.asarray(right_transform.indices)
+            total += float(
+                np.count_nonzero(
+                    np.asarray(left_transform.indices)
+                    != np.asarray(right_transform.indices)
+                )
             )
+        elif isinstance(left_transform, SignedPermutationTransform) and isinstance(
+            right_transform, SignedPermutationTransform
+        ):
+            left_indices = np.asarray(left_transform.indices)
+            right_indices = np.asarray(right_transform.indices)
+            moved = left_indices != right_indices
+            flipped = ~moved & (
+                np.asarray(left_transform.signs, dtype=np.float64)
+                != np.asarray(right_transform.signs, dtype=np.float64)
+            )
+            total += float(np.count_nonzero(moved) + 2 * np.count_nonzero(flipped))
+        else:
+            delta = np.asarray(
+                transform_matrix(left_transform, dtype=np.float64)
+            ) - np.asarray(transform_matrix(right_transform, dtype=np.float64))
+            total += 0.5 * float(np.vdot(delta, delta).real)
+    return total
+
+
+def _group_assignment(transform: PermutationTransform | SignedPermutationTransform):
+    """Return ``(indices, sign_index)`` with sign index 0 → +1, 1 → −1."""
+
+    indices = np.asarray(transform.indices, dtype=np.int64)
+    if isinstance(transform, SignedPermutationTransform):
+        sign_index = (np.asarray(transform.signs, dtype=np.float64) < 0).astype(
+            np.int64
         )
-    return distance
+    else:
+        sign_index = None
+    return indices, sign_index
 
 
-def _with_permutation(
-    state: TransformState, group_id: str, indices: np.ndarray
+def _with_assignment(
+    state: TransformState,
+    group_id: str,
+    indices: np.ndarray,
+    sign_index: np.ndarray | None,
 ) -> TransformState:
-    return state.with_transforms(
-        {group_id: PermutationTransform(np.asarray(indices, dtype=np.int32))}
-    )
+    if sign_index is None:
+        transform: Any = PermutationTransform(np.asarray(indices, dtype=np.int32))
+    else:
+        transform = SignedPermutationTransform(
+            np.asarray(indices, dtype=np.int32),
+            np.where(np.asarray(sign_index) == 0, 1, -1).astype(np.int8),
+        )
+    return state.with_transforms({group_id: transform})
+
+
+def _assignment_changed(
+    transform: PermutationTransform | SignedPermutationTransform,
+    indices: np.ndarray,
+    sign_index: np.ndarray | None,
+) -> int:
+    current_indices, current_signs = _group_assignment(transform)
+    changed = np.asarray(indices) != current_indices
+    if sign_index is not None:
+        changed |= np.asarray(sign_index) != current_signs
+    return int(np.count_nonzero(changed))
 
 
 def _transition_bonus(indices: np.ndarray, strength: float) -> np.ndarray:
@@ -108,13 +213,67 @@ def _transition_bonus(indices: np.ndarray, strength: float) -> np.ndarray:
     return bonus
 
 
+def _signed_transition_bonus(
+    indices: np.ndarray, sign_index: np.ndarray, strength: float
+) -> np.ndarray:
+    """Signed payoff adjustment realizing the chordal transition penalty.
+
+    Up to a per-row constant, ``-(λ/2)·d`` becomes ``+λ/2`` for keeping the
+    signed destination, ``-λ/2`` for keeping the destination with a flipped
+    sign, and 0 for relabeling.
+    """
+
+    size = int(indices.size)
+    bonus = np.zeros((size, size, 2), dtype=np.float64)
+    rows = np.arange(size)
+    columns = np.asarray(indices, dtype=np.int64)
+    signs = np.asarray(sign_index, dtype=np.int64)
+    bonus[rows, columns, signs] = 0.5 * strength
+    bonus[rows, columns, 1 - signs] = -0.5 * strength
+    return bonus
+
+
+def _signed_payoff(signed: np.ndarray, invariant: np.ndarray) -> np.ndarray:
+    """Stack the ± sign payoffs as ``(size, size, 2)`` (index 0 → +1)."""
+
+    signed = np.asarray(signed, dtype=np.float64)
+    invariant = np.asarray(invariant, dtype=np.float64)
+    return np.stack([invariant + signed, invariant - signed], axis=-1)
+
+
+def _solve_signed_assignment(score: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Exact signed assignment maximizing a ``(size, size, 2)`` payoff."""
+
+    reduced = score.max(axis=-1)
+    indices = solve_lap_maximize(reduced)
+    rows = np.arange(score.shape[0])
+    sign_index = np.argmax(score[rows, indices, :], axis=-1)
+    return indices, sign_index
+
+
+def _signed_assignment_margin(score: np.ndarray) -> float | None:
+    """Best-vs-second-best payoff gap over all signed assignments.
+
+    The second-best signed assignment either changes the destination
+    assignment (bounded by the LAP margin of the sign-maximized scores) or
+    flips a single assigned unit's sign (the cheapest per-unit sign gap).
+    """
+
+    reduced = score.max(axis=-1)
+    indices = solve_lap_maximize(reduced)
+    rows = np.arange(score.shape[0])
+    flip = float(np.min(np.abs(score[rows, indices, 0] - score[rows, indices, 1])))
+    destination = assignment_objective_margin(reduced)
+    return flip if destination is None else min(destination, flip)
+
+
 def _solve_window_assignment(
     scores: Sequence[np.ndarray],
     *,
     strength: float,
     previous_indices: np.ndarray | None,
 ) -> list[np.ndarray]:
-    """Solve one group's finite-window assignment path exactly.
+    """Solve one permutation group's finite-window assignment path exactly.
 
     Binary ``x[t, i, j]`` variables encode each time-local permutation.  A
     continuous stay variable receives the positive transition bonus exactly
@@ -246,6 +405,173 @@ def _window_milp_structure(
     return LinearConstraint(constraint_matrix, lower, upper), integrality
 
 
+def _solve_signed_window_assignment(
+    scores: Sequence[np.ndarray],
+    *,
+    strength: float,
+    previous: tuple[np.ndarray, np.ndarray] | None,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Solve one signed group's finite-window assignment path exactly.
+
+    Binary ``x[t, i, j, s]`` variables encode each time-local signed
+    permutation.  A continuous full-stay variable earns payoff ``λ`` when the
+    identical signed assignment occurs on both sides of an edge, and a
+    continuous destination-stay variable pays ``λ/2`` when the destination
+    (with either sign) is retained; together they realize the chordal
+    transition cost 0 / 1 / 2 for stay / relabel / in-place sign flip, up to
+    a constant.  The assignment variables are integral, so the linearization
+    is exact for the finite window.
+    """
+
+    if not scores:
+        return []
+    score_array = np.asarray(scores, dtype=np.float64)
+    steps, size = score_array.shape[0], score_array.shape[1]
+    if score_array.shape[1:] != (size, size, 2):
+        raise ValueError(
+            f"Signed window scores must be (steps, n, n, 2), got {score_array.shape}."
+        )
+
+    x_count = steps * size * size * 2
+    edge_count = max(steps - 1, 0)
+    y_count = edge_count * size * size * 2
+    a_count = edge_count * size * size
+    variable_count = x_count + y_count + a_count
+    objective = np.empty(variable_count, dtype=np.float64)
+    objective[:x_count] = -score_array.reshape(-1)
+    objective[x_count : x_count + y_count] = -strength
+    objective[x_count + y_count :] = 0.5 * strength
+
+    def x_index(step: int, row: int, column: int, sign: int) -> int:
+        return ((step * size + row) * size + column) * 2 + sign
+
+    if previous is not None:
+        previous_indices, previous_signs = previous
+        for row in range(size):
+            column = int(previous_indices[row])
+            sign = int(previous_signs[row])
+            objective[x_index(0, row, column, sign)] -= 0.5 * strength
+            objective[x_index(0, row, column, 1 - sign)] += 0.5 * strength
+
+    constraints, integrality = _signed_window_milp_structure(steps, size)
+    result = milp(
+        objective,
+        integrality=integrality,
+        bounds=Bounds(0.0, 1.0),
+        constraints=constraints,
+        options={"presolve": True},
+    )
+    if not result.success or result.x is None:
+        raise RuntimeError(
+            "Signed look-ahead temporal assignment failed: "
+            f"status={result.status}, message={result.message}"
+        )
+
+    assignments = result.x[:x_count].reshape(steps, size, size, 2)
+    paths = []
+    for assignment in assignments:
+        indices = solve_lap_maximize(assignment.sum(axis=-1))
+        rows = np.arange(size)
+        sign_index = np.argmax(assignment[rows, indices, :], axis=-1)
+        paths.append((indices, sign_index))
+    return paths
+
+
+@lru_cache(maxsize=32)
+def _signed_window_milp_structure(
+    steps: int, size: int
+) -> tuple[LinearConstraint, np.ndarray]:
+    """Cache the shape-only sparse constraints for signed rolling windows."""
+
+    x_count = steps * size * size * 2
+    edge_count = max(steps - 1, 0)
+    y_count = edge_count * size * size * 2
+    variable_count = x_count + y_count + edge_count * size * size
+
+    def x_index(step: int, row: int, column: int, sign: int) -> int:
+        return ((step * size + row) * size + column) * 2 + sign
+
+    def y_index(edge: int, row: int, column: int, sign: int) -> int:
+        return x_count + ((edge * size + row) * size + column) * 2 + sign
+
+    def a_index(edge: int, row: int, column: int) -> int:
+        return x_count + y_count + (edge * size + row) * size + column
+
+    matrix_rows: list[int] = []
+    matrix_columns: list[int] = []
+    matrix_values: list[float] = []
+    lower: list[float] = []
+    upper: list[float] = []
+
+    def add_constraint(entries: Sequence[tuple[int, float]], lb: float, ub: float):
+        constraint = len(lower)
+        for variable, coefficient in entries:
+            matrix_rows.append(constraint)
+            matrix_columns.append(variable)
+            matrix_values.append(coefficient)
+        lower.append(lb)
+        upper.append(ub)
+
+    for step in range(steps):
+        for row in range(size):
+            add_constraint(
+                [
+                    (x_index(step, row, column, sign), 1.0)
+                    for column in range(size)
+                    for sign in (0, 1)
+                ],
+                1.0,
+                1.0,
+            )
+        for column in range(size):
+            add_constraint(
+                [
+                    (x_index(step, row, column, sign), 1.0)
+                    for row in range(size)
+                    for sign in (0, 1)
+                ],
+                1.0,
+                1.0,
+            )
+
+    # y = min(x_left, x_right) at the optimum (negative objective pushes up);
+    # a = max(0, dest_left + dest_right - 1) (positive objective pushes down).
+    for edge in range(edge_count):
+        for row in range(size):
+            for column in range(size):
+                for sign in (0, 1):
+                    stay = y_index(edge, row, column, sign)
+                    add_constraint(
+                        [(stay, 1.0), (x_index(edge, row, column, sign), -1.0)],
+                        -np.inf,
+                        0.0,
+                    )
+                    add_constraint(
+                        [(stay, 1.0), (x_index(edge + 1, row, column, sign), -1.0)],
+                        -np.inf,
+                        0.0,
+                    )
+                add_constraint(
+                    [
+                        (a_index(edge, row, column), 1.0),
+                        (x_index(edge, row, column, 0), -1.0),
+                        (x_index(edge, row, column, 1), -1.0),
+                        (x_index(edge + 1, row, column, 0), -1.0),
+                        (x_index(edge + 1, row, column, 1), -1.0),
+                    ],
+                    -1.0,
+                    np.inf,
+                )
+
+    constraint_matrix = coo_matrix(
+        (matrix_values, (matrix_rows, matrix_columns)),
+        shape=(len(lower), variable_count),
+    ).tocsr()
+    integrality = np.zeros(variable_count, dtype=np.uint8)
+    integrality[:x_count] = 1
+    return LinearConstraint(constraint_matrix, lower, upper), integrality
+
+
 def _flatten_tree(params: ParamTree) -> np.ndarray:
     return np.concatenate(
         [
@@ -281,7 +607,7 @@ def _path_roughness(params_sequence: Sequence[ParamTree]) -> dict[str, float]:
 
 
 class TemporalGaugeSolver:
-    """Solve an opt-in sequence-regularized permutation gauge."""
+    """Solve an opt-in sequence-regularized discrete gauge."""
 
     def __init__(self, objective: Objective, config: TemporalGaugeConfig) -> None:
         self.objective = objective
@@ -292,10 +618,24 @@ class TemporalGaugeSolver:
         return "numpy"
 
     def validate_graph(self, graph: SymmetryGraph) -> None:
+        coupled = [
+            constraint
+            for constraint in graph.constraints
+            if isinstance(constraint, (MHACircuitConstraint, GQARoPECircuitConstraint))
+        ]
+        if coupled:
+            raise ValueError(
+                "Temporal gauges do not support attention-coupled circuits: "
+                "the composite chordal transition metric is defined (a moved "
+                "head costs its head dimension; a stationary head pays its "
+                "intra-head signed distance), but the exact coupled "
+                "head/intra-head window solve is not implemented. Refusing to "
+                "decouple the circuit silently."
+            )
         unsupported = [
             group_id
             for group_id, group in graph.groups.items()
-            if group.transform_family != "permutation"
+            if group.transform_family not in _DISCRETE_FAMILIES
         ]
         if unsupported:
             detail = ", ".join(
@@ -303,10 +643,29 @@ class TemporalGaugeSolver:
                 for group_id in unsupported
             )
             raise ValueError(
-                "Temporal gauges currently support plain permutation groups only; "
-                f"unsupported groups: {detail}."
+                "Temporal gauges support permutation, signed-permutation, and "
+                "the signed subgroup of orthogonal groups; unsupported "
+                f"groups: {detail}. Connected continuous transform families "
+                "admit no Hamming-like "
+                "(integer-valued, invariant) transition metric — their half "
+                "squared chordal transition distance is continuous-valued and "
+                "requires a smoothing treatment outside the exact discrete "
+                "transition model."
+            )
+        repeated = graph.repeated_group_terms()
+        if repeated:
+            joined = ", ".join(sorted(repeated))
+            raise ValueError(
+                "Temporal gauges require LAP-linearizable groups; group(s) "
+                f"{joined} appear multiple times in one tensor term (QAP)."
             )
         self.objective.validate_graph(graph)
+
+    def _group_signed(self, graph: SymmetryGraph, group_id: str) -> bool:
+        return graph.groups[group_id].transform_family in (
+            "signed_permutation",
+            "orthogonal",
+        )
 
     def _group_score(
         self,
@@ -316,14 +675,29 @@ class TemporalGaugeSolver:
         state: TransformState,
         group_id: str,
     ) -> np.ndarray:
+        """Return the payoff — ``(n, n)`` plain or ``(n, n, 2)`` signed."""
+
         self.objective.begin_lap_execution(graph, target_data)
         try:
-            score = self.objective.linearize_group(
+            signed, invariant = self.objective.linearize_group_split(
                 graph, reference_data, target_data, state, group_id
             )
         finally:
             self.objective.end_lap_execution()
-        return np.asarray(score, dtype=np.float64)
+        if self._group_signed(graph, group_id):
+            return _signed_payoff(signed, invariant)
+        return np.asarray(signed, dtype=np.float64) + np.asarray(
+            invariant, dtype=np.float64
+        )
+
+    def _previous_assignment(
+        self, previous_state: TransformState | None, group_id: str
+    ) -> tuple[np.ndarray, np.ndarray | None] | None:
+        if previous_state is None:
+            return None
+        transform = previous_state.transforms[group_id]
+        assert isinstance(transform, (PermutationTransform, SignedPermutationTransform))
+        return _group_assignment(transform)
 
     def _solve_one(
         self,
@@ -343,25 +717,30 @@ class TemporalGaugeSolver:
                 score = self._group_score(
                     graph, reference_data, target_data, state, group_id
                 )
-                if previous_state is not None:
-                    previous = previous_state.transforms[group_id]
-                    assert isinstance(previous, PermutationTransform)
-                    score += _transition_bonus(
-                        np.asarray(previous.indices),
-                        self.config.regularization_strength,
-                    )
-                updated = solve_lap_maximize(score)
-                current = state.transforms[group_id]
-                assert isinstance(current, PermutationTransform)
-                changed = max(
-                    changed,
-                    int(
-                        np.count_nonzero(
-                            updated != np.asarray(current.indices, dtype=np.int32)
+                previous = self._previous_assignment(previous_state, group_id)
+                if self._group_signed(graph, group_id):
+                    if previous is not None:
+                        score = score + _signed_transition_bonus(
+                            previous[0],
+                            previous[1],
+                            self.config.regularization_strength,
                         )
-                    ),
+                    indices, sign_index = _solve_signed_assignment(score)
+                else:
+                    if previous is not None:
+                        score = score + _transition_bonus(
+                            previous[0], self.config.regularization_strength
+                        )
+                    indices = solve_lap_maximize(score)
+                    sign_index = None
+                current = state.transforms[group_id]
+                assert isinstance(
+                    current, (PermutationTransform, SignedPermutationTransform)
                 )
-                state = _with_permutation(state, group_id, updated)
+                changed = max(
+                    changed, _assignment_changed(current, indices, sign_index)
+                )
+                state = _with_assignment(state, group_id, indices, sign_index)
             if changed <= self.config.tolerance:
                 break
         return state, sweeps
@@ -426,27 +805,34 @@ class TemporalGaugeSolver:
                     )
                     for target_data, state in zip(target_window, states, strict=True)
                 ]
-                previous_indices = None
-                if previous_state is not None:
-                    previous_transform = previous_state.transforms[group_id]
-                    assert isinstance(previous_transform, PermutationTransform)
-                    previous_indices = np.asarray(previous_transform.indices)
-                assignments = _solve_window_assignment(
-                    scores,
-                    strength=self.config.regularization_strength,
-                    previous_indices=previous_indices,
-                )
-                for index, assignment in enumerate(assignments):
-                    current = states[index].transforms[group_id]
-                    assert isinstance(current, PermutationTransform)
-                    changed = max(
-                        changed,
-                        int(
-                            np.count_nonzero(assignment != np.asarray(current.indices))
-                        ),
+                previous = self._previous_assignment(previous_state, group_id)
+                if self._group_signed(graph, group_id):
+                    assignments = _solve_signed_window_assignment(
+                        scores,
+                        strength=self.config.regularization_strength,
+                        previous=previous,
                     )
-                    states[index] = _with_permutation(
-                        states[index], group_id, assignment
+                else:
+                    assignments = [
+                        (indices, None)
+                        for indices in _solve_window_assignment(
+                            scores,
+                            strength=self.config.regularization_strength,
+                            previous_indices=(
+                                None if previous is None else previous[0]
+                            ),
+                        )
+                    ]
+                for index, (indices, sign_index) in enumerate(assignments):
+                    current = states[index].transforms[group_id]
+                    assert isinstance(
+                        current, (PermutationTransform, SignedPermutationTransform)
+                    )
+                    changed = max(
+                        changed, _assignment_changed(current, indices, sign_index)
+                    )
+                    states[index] = _with_assignment(
+                        states[index], group_id, indices, sign_index
                     )
             if changed <= self.config.tolerance:
                 break
@@ -489,6 +875,32 @@ class TemporalGaugeSolver:
             sweeps.append(count)
         return committed, sweeps
 
+    def _regularized_score(
+        self,
+        score: np.ndarray,
+        group_id: str,
+        signed: bool,
+        neighbor_states: Sequence[TransformState],
+    ) -> np.ndarray:
+        regularized = np.array(score, copy=True)
+        for neighbor in neighbor_states:
+            transform = neighbor.transforms[group_id]
+            assert isinstance(
+                transform, (PermutationTransform, SignedPermutationTransform)
+            )
+            indices, sign_index = _group_assignment(transform)
+            if signed:
+                if sign_index is None:
+                    sign_index = np.zeros_like(indices)
+                regularized += _signed_transition_bonus(
+                    indices, sign_index, self.config.regularization_strength
+                )
+            else:
+                regularized += _transition_bonus(
+                    indices, self.config.regularization_strength
+                )
+        return regularized
+
     def _ambiguity(
         self,
         graph: SymmetryGraph,
@@ -508,26 +920,25 @@ class TemporalGaugeSolver:
             following = states[index + 1] if index + 1 < len(states) else None
             step_record: dict[str, dict[str, float | None]] = {}
             for group_id in graph.group_order:
+                signed = self._group_signed(graph, group_id)
                 score = self._group_score(
                     graph, reference_data, target_data, state, group_id
                 )
-                base_margin = assignment_objective_margin(score)
-                regularized_score = np.array(score, copy=True)
-                if previous is not None:
-                    transform = previous.transforms[group_id]
-                    assert isinstance(transform, PermutationTransform)
-                    regularized_score += _transition_bonus(
-                        np.asarray(transform.indices),
-                        self.config.regularization_strength,
+                margin_of = (
+                    _signed_assignment_margin if signed else assignment_objective_margin
+                )
+                base_margin = margin_of(score)
+                neighbors = [
+                    neighbor
+                    for neighbor in (
+                        previous,
+                        following if self.config.strategy == "lookahead" else None,
                     )
-                if self.config.strategy == "lookahead" and following is not None:
-                    transform = following.transforms[group_id]
-                    assert isinstance(transform, PermutationTransform)
-                    regularized_score += _transition_bonus(
-                        np.asarray(transform.indices),
-                        self.config.regularization_strength,
-                    )
-                regularized_margin = assignment_objective_margin(regularized_score)
+                    if neighbor is not None
+                ]
+                regularized_margin = margin_of(
+                    self._regularized_score(score, group_id, signed, neighbors)
+                )
                 if base_margin is not None:
                     base_margins.append(2.0 * base_margin)
                 if regularized_margin is not None:
@@ -578,6 +989,21 @@ class TemporalGaugeSolver:
             raise ValueError("Temporal matching requires at least one target sample.")
         if initial_state is not None:
             initial_state.validate(graph, hard=True)
+            continuous_orthogonal = [
+                group_id
+                for group_id, group in graph.groups.items()
+                if group.transform_family == "orthogonal"
+                and not isinstance(
+                    initial_state.transforms[group_id], SignedPermutationTransform
+                )
+            ]
+            if continuous_orthogonal:
+                joined = ", ".join(continuous_orthogonal)
+                raise ValueError(
+                    "Temporal LAP restricts orthogonal groups to their signed-"
+                    "permutation subgroup; the initial state contains a "
+                    f"continuous orthogonal transform for: {joined}."
+                )
         self.objective.set_reference_data(reference_data)
 
         if self.config.strategy == "greedy":
@@ -602,16 +1028,16 @@ class TemporalGaugeSolver:
             for target_data, state in zip(target_data_sequence, states, strict=True)
         ]
         boundary = [initial_state, *states[:-1]]
-        hamming = [
-            0 if left is None else transform_hamming_distance(graph, left, right)
+        distances = [
+            0.0 if left is None else transform_transition_distance(graph, left, right)
             for left, right in zip(boundary, states, strict=True)
         ]
         # The t=0 edge is a real transition only when an initial state was
         # explicitly supplied.  Ordinary chain solves start their switch-rate
         # denominator at t=1.
-        reported_hamming = hamming if initial_state is not None else hamming[1:]
+        reported_distances = distances if initial_state is not None else distances[1:]
         unit_count = sum(group.size for group in graph.groups.values())
-        edge_count = len(reported_hamming)
+        edge_count = len(reported_distances)
         changed_groups = 0
         group_edges = 0
         transition_pairs = (
@@ -624,14 +1050,12 @@ class TemporalGaugeSolver:
             for group_id in graph.group_order:
                 left_transform = left.transforms[group_id]
                 right_transform = right.transforms[group_id]
-                assert isinstance(left_transform, PermutationTransform)
-                assert isinstance(right_transform, PermutationTransform)
-                changed_groups += int(
-                    not np.array_equal(
-                        np.asarray(left_transform.indices),
-                        np.asarray(right_transform.indices),
-                    )
+                left_indices, left_signs = _group_assignment(left_transform)
+                right_indices, right_signs = _group_assignment(right_transform)
+                same = np.array_equal(left_indices, right_indices) and (
+                    left_signs is None or np.array_equal(left_signs, right_signs)
                 )
+                changed_groups += int(not same)
                 group_edges += 1
 
         ambiguity_records = None
@@ -649,7 +1073,9 @@ class TemporalGaugeSolver:
             "protocol": "temporal_gauge",
             "strategy": self.config.strategy,
             "regularization_strength": self.config.regularization_strength,
-            "transition_distance": "unit_hamming",
+            "transition_metric": (
+                "half_squared_chordal (unit Hamming on permutations)"
+            ),
             "lookahead_window": (
                 self.config.lookahead_window
                 if self.config.strategy == "lookahead"
@@ -663,19 +1089,19 @@ class TemporalGaugeSolver:
                 "sum": float(np.sum(alignment_costs)),
                 "mean": float(np.mean(alignment_costs)),
             },
-            "transition_hamming": {
-                "per_edge": reported_hamming,
-                "sum": int(np.sum(reported_hamming)),
-                "mean": float(np.mean(reported_hamming)) if edge_count else 0.0,
-                "unit_rate": (
-                    float(np.sum(reported_hamming)) / (edge_count * unit_count)
+            "transition_distance": {
+                "per_edge": [float(value) for value in reported_distances],
+                "sum": float(np.sum(reported_distances)),
+                "mean": (float(np.mean(reported_distances)) if edge_count else 0.0),
+                "per_unit_mean": (
+                    float(np.sum(reported_distances)) / (edge_count * unit_count)
                     if edge_count
                     else 0.0
                 ),
             },
             "switch_rate": {
                 "step": (
-                    float(np.count_nonzero(reported_hamming)) / edge_count
+                    float(np.count_nonzero(reported_distances)) / edge_count
                     if edge_count
                     else 0.0
                 ),
@@ -684,7 +1110,7 @@ class TemporalGaugeSolver:
             "regularized_objective": {
                 "sum": float(
                     np.sum(alignment_costs)
-                    + self.config.regularization_strength * np.sum(reported_hamming)
+                    + self.config.regularization_strength * np.sum(reported_distances)
                 )
             },
         }
@@ -766,5 +1192,5 @@ __all__ = [
     "TemporalGaugeSolver",
     "TemporalStrategy",
     "match_temporal_sequence",
-    "transform_hamming_distance",
+    "transform_transition_distance",
 ]

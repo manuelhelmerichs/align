@@ -4,12 +4,14 @@ import pickle
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from align.matching import TransformState
 from benchmarks.posterior import (
     evaluate_function_drift,
+    evaluate_interpolation_barriers,
     evaluate_posterior_metrics,
     load_experiment_posterior_case,
     make_synthetic_layernorm_mha_transformer_posterior_case,
@@ -99,6 +101,12 @@ def test_synthetic_posterior_alignment_collapses_symmetry_copies():
     assert before.weight_averaging_gap > 0.5
     assert after.weight_averaging_gap < 0.05
     assert after.cross_chain_distance_mean < 0.1 * before.cross_chain_distance_mean
+    # Symmetry-copy chains are barrier-separated before alignment and
+    # linearly connected (down to the within-chain noise floor) after it.
+    assert before.function_cross_barrier_mean > 0.3
+    assert before.function_cross_barrier_mean > 50 * before.function_within_barrier_mean
+    assert after.function_cross_barrier_mean < 0.02 * before.function_cross_barrier_mean
+    assert after.function_cross_barrier_mean < 3 * after.function_within_barrier_mean
     assert result.function_drift_max < 1e-5
     assert result.samples_per_s > 0.0
     assert len(result.aligned_chains) == len(case.chains)
@@ -206,6 +214,9 @@ def test_load_experiment_posterior_case_and_align_real_samples(tmp_path):
     # Real experiments carry no apply_fn, so function-space metrics are absent.
     assert result.function_drift_max is None
     assert before.weight_averaging_gap is None
+    assert before.function_cross_barrier_mean is None
+    assert before.function_within_barrier_mean is None
+    assert evaluate_interpolation_barriers(case, case.chains) is None
 
 
 def test_real_case_reports_invariant_functional_diagnostics_when_wired(tmp_path):
@@ -255,6 +266,47 @@ def test_real_case_reports_invariant_functional_diagnostics_when_wired(tmp_path)
     drift = evaluate_function_drift(case, case.chains, result.aligned_chains)
     assert drift is not None
     assert drift["max"] == pytest.approx(result.function_drift_max)
+
+    # The permutation-copy chains are barrier-separated before alignment and
+    # linearly connected after; barrier pair sampling is deterministic, so the
+    # before/after comparison uses identical draw pairs.
+    assert before.function_cross_barrier_mean > 1.0
+    assert before.function_cross_within_barrier_ratio > 100.0
+    assert after.function_cross_barrier_mean < 0.01 * before.function_cross_barrier_mean
+    assert after.function_cross_barrier_mean < 3 * after.function_within_barrier_mean
+    repeat = evaluate_posterior_metrics(case, case.chains)
+    assert repeat.function_cross_barrier_mean == before.function_cross_barrier_mean
+    assert repeat.function_within_barrier_mean == before.function_within_barrier_mean
+
+
+def test_interpolation_barriers_vanish_for_parameter_linear_models():
+    """A model affine in its parameters has exactly chord-linear outputs, so
+    the barrier must vanish to float32 roundoff — the zero identity behind the
+    metric's derivation."""
+
+    case = make_synthetic_mlp_posterior_case(seed=0, n_chains=2, n_samples=4)
+
+    def linear_apply(params, x):
+        total = sum(jnp.sum(leaf) for leaf in jax.tree_util.tree_leaves(params))
+        return total * jnp.ones((x.shape[0],))
+
+    case.apply_fn = linear_apply
+    barriers = evaluate_interpolation_barriers(case, case.chains)
+
+    assert barriers is not None
+    assert barriers["function_cross_barrier_max"] < 1e-4
+    assert barriers["function_within_barrier_mean"] < 1e-4
+
+
+def test_interpolation_barriers_validate_grid_and_pair_budget():
+    case = make_synthetic_mlp_posterior_case(seed=0, n_chains=2, n_samples=4)
+
+    with pytest.raises(ValueError, match="strictly inside"):
+        evaluate_interpolation_barriers(case, case.chains, ts=(0.0, 0.5))
+    with pytest.raises(ValueError, match="strictly inside"):
+        evaluate_interpolation_barriers(case, case.chains, ts=())
+    with pytest.raises(ValueError, match="max_pairs"):
+        evaluate_interpolation_barriers(case, case.chains, max_pairs=0)
 
 
 def test_real_case_functional_wiring_is_explicit_and_validated(tmp_path):
