@@ -25,3 +25,31 @@
 - Update the relevant pages in the `wiki/` submodule and example configs when
   behavior or user-facing configuration changes. Commit and push wiki changes
   before updating the submodule pointer in this repository.
+
+## Experiments and results
+
+- [`paper/paper.md`](paper/paper.md) is the central overview of the research
+  program: current state, learnings per experiment group, theory, and ranked
+  next avenues. Update it whenever an experiment changes a conclusion.
+- `experiments/` contains group subfolders of thematically related
+  experiments. Each group has:
+  - `README.md` — exactly what each experiment does and how to run it;
+  - `RESULTS.md` — all results and interpretation;
+  - `TODO.md` — open follow-up steps (only if any exist).
+  README and RESULTS document only implemented and completed experiments;
+  plans belong in TODO.md.
+- Experiments in a group are numbered contiguously: one runnable script per
+  experiment, named `e1_<slug>.py` … `eN_<slug>.py`, no gaps. Renumber (and
+  rename the stored results accordingly) when experiments are added or
+  removed.
+- Shared group code (loaders, models, helpers, tests) lives in
+  `experiments/<group>/shared/`, not next to the numbered scripts.
+- All experiment outputs (JSONs, sampler runs, artifacts) go to the
+  repository-root `results/` folder under the experiment-group name
+  (e.g. `results/diagnostics/`), never inside `experiments/`.
+- Experiments import `align`/`sampling`/`benchmarks` but never modify them,
+  and never import from another experiment group. Glue that several groups
+  need (campaign registry, loaders, chain-level alignment) belongs in
+  `benchmarks/campaigns.py`.
+- Delete superseded experiment code and results when a newer implementation
+  replaces them; do not keep parallel stale copies.
