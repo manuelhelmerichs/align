@@ -1,4 +1,3 @@
-literature/
 results/
 data/*
 !data/uci/

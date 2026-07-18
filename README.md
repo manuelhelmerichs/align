@@ -85,7 +85,18 @@ The paper benchmarks are repository-only and are not included in the installed
 ```bash
 uv run python -m benchmarks --help
 uv run python -m benchmarks regression --fast
+uv run python -m benchmarks posterior \
+  --experiment-root results/sampling/paper_issue28/uci_airfoil_mile_8x200 \
+  --architecture mlp \
+  --recipe-kwargs '{"parameter_root":"params.fcn"}' \
+  --samples-per-chain 25 --sample-step 8 --canonicalize
 ```
+
+For saved sampling bundles, the posterior command reconstructs the exact model
+and data split by default. Its report includes invariant chain-level functional
+disagreement, the weight-averaging/BMA gap, and a raw-output symmetry-drift
+certificate alongside weight-space metrics. Use `--no-functional-metrics` for
+a weight-only run.
 
 `align` is unpublished research software and its interfaces may change as the
 symmetry model evolves.

@@ -9,6 +9,8 @@ import pytest
 
 from align.matching import TransformState
 from benchmarks.posterior import (
+    evaluate_function_drift,
+    evaluate_posterior_metrics,
     load_experiment_posterior_case,
     make_synthetic_layernorm_mha_transformer_posterior_case,
     make_synthetic_mlp_posterior_case,
@@ -16,7 +18,7 @@ from benchmarks.posterior import (
     run_posterior_benchmark,
     split_rhat,
 )
-from benchmarks.synthetic import make_mlp_orbit_case, permutation_matrix
+from benchmarks.synthetic import make_mlp_orbit_case, mlp_apply, permutation_matrix
 
 
 def test_split_rhat_near_one_for_stationary_chains():
@@ -204,6 +206,73 @@ def test_load_experiment_posterior_case_and_align_real_samples(tmp_path):
     # Real experiments carry no apply_fn, so function-space metrics are absent.
     assert result.function_drift_max is None
     assert before.weight_averaging_gap is None
+
+
+def test_real_case_reports_invariant_functional_diagnostics_when_wired(tmp_path):
+    root = _write_experiment(tmp_path)
+    inputs = jax.random.normal(jax.random.key(4), (9, 3))
+    case = load_experiment_posterior_case(
+        root,
+        architecture="mlp",
+        apply_fn=mlp_apply,
+        inputs=inputs,
+        functional_batch_size=4,
+    )
+
+    before = evaluate_posterior_metrics(case, case.chains)
+    result = run_posterior_benchmark(
+        case, schedule=[{"solver": "lap", "max_sweeps": 25, "tolerance": 0.0}]
+    )
+    after = result.metrics_after
+
+    assert before.weight_averaging_gap is not None
+    assert before.function_variance_total is not None
+    assert before.function_within_chain_variance is not None
+    assert before.function_between_chain_mean_variance is not None
+    assert before.function_between_variance_fraction is not None
+    assert before.function_within_rms_distance is not None
+    assert before.function_cross_rms_distance is not None
+    assert before.function_cross_within_distance_ratio is not None
+    assert before.chain_mean_prediction_rmse_mean > 0.0
+    assert (
+        before.chain_mean_prediction_rmse_max >= before.chain_mean_prediction_rmse_mean
+    )
+    np.testing.assert_allclose(
+        after.chain_mean_prediction_rmse_mean,
+        before.chain_mean_prediction_rmse_mean,
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        after.function_cross_rms_distance,
+        before.function_cross_rms_distance,
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    assert result.function_drift_max < 1e-5
+    assert result.function_drift_rmse < 1e-6
+    assert result.function_drift_relative_rmse < 1e-6
+    drift = evaluate_function_drift(case, case.chains, result.aligned_chains)
+    assert drift is not None
+    assert drift["max"] == pytest.approx(result.function_drift_max)
+
+
+def test_real_case_functional_wiring_is_explicit_and_validated(tmp_path):
+    root = _write_experiment(tmp_path)
+    inputs = jax.random.normal(jax.random.key(5), (4, 3))
+
+    with pytest.raises(ValueError, match="provided together"):
+        load_experiment_posterior_case(root, architecture="mlp", apply_fn=mlp_apply)
+    with pytest.raises(ValueError, match="provided together"):
+        load_experiment_posterior_case(root, architecture="mlp", inputs=inputs)
+    with pytest.raises(ValueError, match="positive"):
+        load_experiment_posterior_case(
+            root,
+            architecture="mlp",
+            apply_fn=mlp_apply,
+            inputs=inputs,
+            functional_batch_size=0,
+        )
 
 
 def test_inverse_fisher_noise_mode_shapes_within_chain_noise():

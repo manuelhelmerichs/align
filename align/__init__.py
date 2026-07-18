@@ -19,6 +19,8 @@ _PUBLIC_API = {
     "SolverSequence": "align.matching",
     "SolverStep": "align.matching",
     "SymmetryGraph": "align.symmetry",
+    "TemporalGaugeConfig": "align.matching",
+    "TemporalGaugeSolver": "align.matching",
     "TransformState": "align.matching",
     "available_recipes": "align.architectures",
     "build_solver_sequence": "align.matching",
@@ -26,6 +28,7 @@ _PUBLIC_API = {
     "match_batch": "align.matching",
     "match_component_across": "align.matching",
     "match_sample": "align.matching",
+    "match_temporal_sequence": "align.matching",
 }
 
 __all__ = sorted(_PUBLIC_API)
