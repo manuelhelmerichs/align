@@ -28,7 +28,7 @@
 
 ## Experiments and results
 
-- [`paper/paper.md`](paper/paper.md) is the central overview of the research
+- [`paper/overview.md`](paper/overview.md) is the central overview of the research
   program: current state, learnings per experiment group, theory, and ranked
   next avenues. Update it whenever an experiment changes a conclusion.
 - `experiments/` contains group subfolders of thematically related
