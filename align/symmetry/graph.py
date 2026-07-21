@@ -53,14 +53,14 @@ def _freeze_value(value: Any) -> Any:
 class SymmetryGroup:
     """A set of channels/units that must share one group transform.
 
-    ``transform_family`` declares the *maximal exact symmetry class* of the group —
+    ``transform_family`` declares the *maximal exact symmetry class* of the group --
     solvers never exceed it, but may match within a subgroup:
 
     - ``"permutation"``: permutation matrices (the default).
     - ``"signed_permutation"``: permutations with per-channel sign flips
       (e.g. attention qk/vo intra-head dimensions, RMSNorm streams).
     - ``"rotation_pairs"``: component-diagonal 2-D rotations over the half-split
-      pairs ``(p, p + n/2)`` — the RoPE qk symmetry. Contains *no*
+      pairs ``(p, p + n/2)`` -- the RoPE qk symmetry. Contains *no*
       non-trivial permutations, so such groups are excluded from
       permutation-based solvers.
     - ``"orthogonal"``: the full orthogonal group (RMSNorm streams). Plain
@@ -99,7 +99,7 @@ class AxisBinding:
     ``scale_power`` is the exponent of the group scale applied to this axis
     (``factor = scale ** scale_power``); transforms ignore it. ``0.0`` marks
     axes that transform with the group but do not participate in its scale
-    symmetry — e.g. a conv kernel feeding a normalization layer (the norm
+    symmetry -- e.g. a conv kernel feeding a normalization layer (the norm
     absorbs pre-norm scales only in the ε→0 limit, so an exact action must not
     touch it), FRN's learned ``eps``, or BatchNorm running statistics.
 
@@ -112,7 +112,7 @@ class AxisBinding:
 
     ``transform_scope`` restricts which part of the group transform the axis
     carries: ``"linear"`` (default) applies the full group matrix, while
-    ``"permute_only"`` applies only its permutation content — RMSNorm scale
+    ``"permute_only"`` applies only its permutation content -- RMSNorm scale
     vectors permute with the stream but are exempt from sign flips and
     orthogonal maps, whose action the norm's consumers absorb (see
     :func:`align.symmetry.tensor_ops.binding_transform_matrix`).

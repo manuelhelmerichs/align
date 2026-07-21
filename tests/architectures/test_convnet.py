@@ -123,7 +123,7 @@ def test_mixed_schedule_recovers_exact_permutation_orbit():
     """Exact orbit recovery through the flatten boundary.
 
     Plain LAP coordinate descent stalls on some permutation seeds (the conv
-    group couples to the dense chain through the flatten slices — the same
+    group couples to the dense chain through the flatten slices -- the same
     stall class as the FRN residual cycle); the mixed schedule recovers all
     tested seeds exactly.
     """

@@ -313,13 +313,13 @@ class GQARoPEAttentionRule(SymmetryRule):
     ``rotation_pairs`` group per kv slot: rotary embeddings restrict the qk
     circuit symmetry to per frequency-pair scaled rotations (see the
     RMSNorm/GQA/RoPE architecture wiki page), so the qk groups carry
-    no permutations — solvers update them by the closed-form per-pair
+    no permutations -- solvers update them by the closed-form per-pair
     rotation projection, and the canonicalization plan balances the pair scales
     through the same bindings.
 
     Expected kernel layout (flat ``(d, H, dk)`` trees reshape losslessly with
     query head ``i`` in kv group ``i // (H/G)``): query ``(d, G, H/G, dk)``,
-    key/value ``(d, G, dk)``, out ``(G, H/G, dk, d)``. Biases are rejected —
+    key/value ``(d, G, dk)``, out ``(G, H/G, dk, d)``. Biases are rejected --
     the exact RoPE symmetry model assumes bias-free projections (LLaMA-style).
     """
 

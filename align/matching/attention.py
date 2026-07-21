@@ -438,8 +438,8 @@ class GQAModuleSpec:
 
     The head symmetry is the GQA quotient: kv-group permutations (size ``G``)
     times per-group query-head permutations (size ``H/G``), the wreath
-    product. The per-slot qk groups are ``rotation_pairs`` groups — RoPE
-    removes the qk permutation symmetry (see the LayerNorm MHA wiki page) — and are
+    product. The per-slot qk groups are ``rotation_pairs`` groups -- RoPE
+    removes the qk permutation symmetry (see the LayerNorm MHA wiki page) -- and are
     updated by the generic rotation projection, not by this structured
     update.
     """

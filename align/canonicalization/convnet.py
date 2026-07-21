@@ -1,8 +1,8 @@
 """Conv-stack scale canonicalization: post-norm affine and bare-conv symmetries.
 
 For a conv channel followed by FRN/TLU (or BatchNorm/ReLU), dividing the
-normalization layer's affine parameters — FRN ``(gamma, beta, tau)``, BN
-``(scale, bias)`` — by a positive per-channel factor scales the channel output
+normalization layer's affine parameters -- FRN ``(gamma, beta, tau)``, BN
+``(scale, bias)`` -- by a positive per-channel factor scales the channel output
 by its inverse, and multiplying every consumer of the channel restores the
 function *exactly*, for any ``eps`` and across residual adds. Channels of bare
 convs (no norm layer) carry the ordinary ReLU incoming-scale symmetry on the

@@ -33,9 +33,9 @@
   next avenues. Update it whenever an experiment changes a conclusion.
 - `experiments/` contains group subfolders of thematically related
   experiments. Each group has:
-  - `README.md` — exactly what each experiment does and how to run it;
-  - `RESULTS.md` — all results and interpretation;
-  - `TODO.md` — open follow-up steps (only if any exist).
+  - `README.md` -- exactly what each experiment does and how to run it;
+  - `RESULTS.md` -- all results and interpretation;
+  - `TODO.md` -- open follow-up steps (only if any exist).
   README and RESULTS document only implemented and completed experiments;
   plans belong in TODO.md.
 - Experiments in a group are numbered contiguously: one runnable script per

@@ -271,7 +271,7 @@ def binding_transform_matrix(
     orthogonal maps, whose action their consumers absorb): under a
     ``signed_permutation`` group the entrywise absolute value is applied
     (also a no-op for nonnegative soft relaxations), and under an
-    ``orthogonal`` group the binding is skipped entirely — exact only when
+    ``orthogonal`` group the binding is skipped entirely -- exact only when
     the bound tensor is the folded constant, which the solver preflight
     enforces. The decision is class-based, never value-based, so it is safe
     under JAX tracing.

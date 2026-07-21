@@ -17,7 +17,7 @@ orthogonal matrix realizations of two hard transforms,
 
 On permutations this is exactly the unit-level Hamming distance (each
 relabeled unit costs 1).  On signed permutations it counts 1 per relabeled
-unit and 2 per in-place sign flip — a sign flip moves that unit's aligned
+unit and 2 per in-place sign flip -- a sign flip moves that unit's aligned
 weights to their antipode, which is a strictly larger path jump than
 relabeling to an independent unit.  For isotropic unit rows ``w`` with
 ``E[w wᵀ] = σ² I`` the expected squared aligned-coordinate jump induced by
@@ -28,8 +28,8 @@ units as the alignment cost.
 The metric is Hamming-like (integer-valued, additive per unit, bi-invariant)
 precisely for the discrete transform families.  Connected continuous families
 (``rotation_pairs``, the full orthogonal update) admit no non-trivial
-integer-valued invariant transition metric — any continuous invariant metric
-on a connected group takes a full interval of values — so those groups are
+integer-valued invariant transition metric -- any continuous invariant metric
+on a connected group takes a full interval of values -- so those groups are
 rejected rather than silently discretized; ``orthogonal`` groups are matched
 within their signed-permutation subgroup, mirroring per-draw ``lap``
 schedules.  Attention-coupled circuits have a well-defined composite metric (a
@@ -111,7 +111,7 @@ def transform_transition_distance(
 
     Equals unit Hamming distance on permutation groups; counts 1 per
     relabeled unit and 2 per in-place sign flip on signed-permutation
-    groups; is continuous-valued on matrix states (diagnostic use only — the
+    groups; is continuous-valued on matrix states (diagnostic use only -- the
     exact temporal solver accepts only discrete assignments, including the
     signed subgroup selected by LAP for an ``orthogonal`` group).
     """
@@ -647,7 +647,7 @@ class TemporalGaugeSolver:
                 "the signed subgroup of orthogonal groups; unsupported "
                 f"groups: {detail}. Connected continuous transform families "
                 "admit no Hamming-like "
-                "(integer-valued, invariant) transition metric — their half "
+                "(integer-valued, invariant) transition metric -- their half "
                 "squared chordal transition distance is continuous-valued and "
                 "requires a smoothing treatment outside the exact discrete "
                 "transition model."
@@ -675,7 +675,7 @@ class TemporalGaugeSolver:
         state: TransformState,
         group_id: str,
     ) -> np.ndarray:
-        """Return the payoff — ``(n, n)`` plain or ``(n, n, 2)`` signed."""
+        """Return the payoff -- ``(n, n)`` plain or ``(n, n, 2)`` signed."""
 
         self.objective.begin_lap_execution(graph, target_data)
         try:

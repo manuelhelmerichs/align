@@ -281,7 +281,7 @@ def test_real_case_reports_invariant_functional_diagnostics_when_wired(tmp_path)
 
 def test_interpolation_barriers_vanish_for_parameter_linear_models():
     """A model affine in its parameters has exactly chord-linear outputs, so
-    the barrier must vanish to float32 roundoff — the zero identity behind the
+    the barrier must vanish to float32 roundoff -- the zero identity behind the
     metric's derivation."""
 
     case = make_synthetic_mlp_posterior_case(seed=0, n_chains=2, n_samples=4)
@@ -378,7 +378,7 @@ def test_barycenter_refinement_high_noise_quality_and_validity():
 
     Under the balanced canonicalization default, single-pass gaps on this
     anisotropic case are already strong (0.24; unit-norm needed the second
-    pass to reach that), so refinement's gap effect here is roughly neutral —
+    pass to reach that), so refinement's gap effect here is roughly neutral --
     its primary value is reference independence (see the dedicated test
     below). Pin: exact function preservation, a collapsed posterior, and no
     substantial gap regression from the second pass.

@@ -6,7 +6,7 @@ Three exact diagonal symmetries coexist in the RMSNorm + RoPE + GQA family
 - **RMSNorm post-norm scale.** ``RMSNorm(x) = gamma * x / rms(x)`` depends on
   ``gamma`` only linearly, so per channel ``gamma_c -> gamma_c / s_c`` with
   every consumer kernel row multiplied by ``s_c`` preserves the function
-  exactly for any nonzero ``s_c`` (including negative) and any ``eps`` — the
+  exactly for any nonzero ``s_c`` (including negative) and any ``eps`` -- the
   transformer analogue of the FRN/BN post-norm affine symmetry, plus a sign
   freedom the affine norms lack. Canonicalized one-shot by *signed* producer
   energy, ``s_c = sign(gamma_c) * sqrt(gamma_c^2 + eps)``, folding gamma to
