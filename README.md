@@ -1,3 +1,5 @@
+What does symmetry canonicalization change in the geometry of sampling-based inference (SAI), and when do those geometric changes translate into inferential benefit?
+
 # align
 
 `align` is a research CLI for post-processing posterior neural-network weight
