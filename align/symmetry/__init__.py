@@ -24,6 +24,7 @@ from .constraints import (
     ResidualChannelTie,
     RMSNormScaleConstraint,
 )
+from .coverage import symmetry_parameter_coverage
 from .graph import (
     TRANSFORM_FAMILIES,
     AxisBinding,
@@ -66,5 +67,6 @@ __all__ = [
     "match_component_tensors",
     "materialize_many",
     "resolve_component_patterns",
+    "symmetry_parameter_coverage",
     "tensors_for_component",
 ]
