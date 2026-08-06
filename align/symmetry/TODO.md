@@ -1,20 +1,5 @@
 # TODO -- symmetry-class completeness
 
-The parameter-coverage report answers whether at least one modeled graph
-binding touches a scalar coordinate. It does **not** establish that the
-transform family acting on covered coordinates is maximal. This distinction is
-load-bearing for the scale comparison: the current GPT graph covers 100% of
-the stored parameter vector, but its attention-circuit action is much smaller
-than the full exact factorization symmetry.
-
-Keep three equivalence boundaries separate:
-
-1. exact raw-output symmetries represented by `SymmetryGraph`;
-2. predictive-distribution equivalences that may change logits, kept outside
-   the exact graph;
-3. function-preserving relations that are not group actions on one fixed-width
-   parameter vector.
-
 ## 1. Add the exact FRN `eps` sign symmetry
 
 The ResNet-7 graph currently leaves six scalar `core/FRN_{0...5}/eps` leaves
@@ -51,32 +36,7 @@ Required tests:
   428,262/428,272, leaving only the ten class-bias coordinates outside the
   exact-logit graph.
 
-## 2. Do not fold softmax translation into the exact-logit graph
-
-For a classifier head,
-
-$$
-W \mapsto W + v\mathbf 1^\top,\qquad
-b \mapsto b + c\mathbf 1
-$$
-
-adds a common input-dependent scalar to every logit. Softmax probabilities and
-the categorical likelihood are invariant, but raw logits are not. The
-existing opt-in `center_softmax_head` stage is therefore the correct
-abstraction boundary.
-
-Follow-up:
-
-- document an optional predictive-probability coverage view if it becomes
-  useful, but do not combine it numerically with exact-logit graph coverage;
-- retain raw-logit drift as the exact-symmetry certificate;
-- do not claim the ten ResNet class-bias entries are missing exact graph
-  symmetries merely because the probability-level translation touches them.
-
-The MLP output bias and log observation scale have no analogous exact
-symmetry: they change the regression distribution and should remain fixed.
-
-## 3. Enlarge the GPT attention-circuit action
+## 2. Enlarge the GPT attention-circuit action
 
 This is the scientifically important extension. Within an ordinary attention
 head, the factorization admits
@@ -122,25 +82,3 @@ Required validation:
 Report raw gain, null gain, null excess, function-space barriers, runtime, and
 conditioning diagnostics. A larger raw matched-vs-random gain alone is not
 evidence of greater identifiability.
-
-## 4. Keep semi-permutations and width-changing relations separate
-
-Neuron splitting/merging and semi-permutations can relate different-width
-networks, but they are not ordinary invertible group actions on a single fixed
-parameter vector. Do not force them into `SymmetryGroup` or use parameter
-coverage as their scope metric.
-
-If pursued, introduce a separate typed correspondence/morphism abstraction
-with explicit source and target shapes, then test function preservation and
-null calibration independently. This comes after the fixed-width
-orthogonal/GL attention work.
-
-## Completion criteria
-
-- The exact graph contains every implemented exact raw-output action and keeps
-  probability-only or width-changing equivalences explicitly separate.
-- Coverage reports state both coordinate coverage and transform family; no
-  manuscript claim treats 100% coordinate coverage as maximality.
-- The primary and many-basin artifacts, diagnostics results, paper overview,
-  manuscript appendix, wiki architecture pages, and tests are updated together
-  for any implemented extension.
