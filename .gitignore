@@ -1,5 +1,9 @@
+# Generated trees: sampler campaign runs (experiment inputs), experiment
+# outputs, and derived caches.
+runs/
 results/
-/paper/
+cache/
+
 data/*
 !data/uci/
 !data/shakespeare/

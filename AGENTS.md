@@ -43,13 +43,29 @@
   rename the stored results accordingly) when experiments are added or
   removed.
 - Shared group code (loaders, models, helpers, tests) lives in
-  `experiments/<group>/shared/`, not next to the numbered scripts.
-- All experiment outputs (JSONs, sampler runs, artifacts) go to the
-  repository-root `results/` folder under the experiment-group name
-  (e.g. `results/diagnostics/`), never inside `experiments/`.
+  `experiments/<group>/shared/`, not next to the numbered scripts. Group tests
+  run in the standard suite: `experiments` is on `testpaths`.
+- `experiments/` and `benchmarks/` are installed packages. Import across them
+  by dotted path (`from experiments.<group>.shared import ...`); never add a
+  `sys.path` entry, and never give a module a name generic enough to collide
+  (`common`, `utils`).
+- Importing an experiment module must have no side effects: all work sits
+  behind `main()` under `if __name__ == "__main__":`, and nothing mutates
+  global JAX state (`jax.config.update`) at import time.
+- Three generated repository-root trees, all gitignored:
+  - `runs/` -- sampler campaign output, the *input* to experiments;
+  - `results/` -- experiment output;
+  - `cache/` -- derived intermediates shared across experiments.
+  Nothing else is written outside them, and never inside `experiments/`.
+- Every experiment writes exactly one directory,
+  `results/<group>/<experiment>/`, holding `manifest.json`, `summary.json`,
+  optional `summary.md`, and `artifacts/`. Use
+  `experiment_run(__file__, ...)` from `benchmarks.results`, which derives the
+  directory from the script path so the two cannot drift. Read another
+  experiment's result with `load_summary(group, experiment)`, never by path.
 - Experiments import `align`/`sampling`/`benchmarks` but never modify them,
   and never import from another experiment group. Glue that several groups
-  need (campaign registry, loaders, chain-level alignment) belongs in
-  `benchmarks/campaigns.py`.
+  need (campaign registry, loaders, chain-level alignment, the result layout)
+  belongs in `benchmarks/`.
 - Delete superseded experiment code and results when a newer implementation
   replaces them; do not keep parallel stale copies.

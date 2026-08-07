@@ -88,7 +88,7 @@ The research benchmarks are repository-only and are not included in the installe
 uv run python -m benchmarks --help
 uv run python -m benchmarks regression --fast
 uv run python -m benchmarks posterior \
-  --experiment-root results/sampling/paper_issue28/uci_airfoil_mile_8x200 \
+  --experiment-root runs/reference/uci_airfoil_mile_8x200 \
   --architecture mlp \
   --recipe-kwargs '{"parameter_root":"params.fcn"}' \
   --samples-per-chain 25 --sample-step 8 --canonicalize
