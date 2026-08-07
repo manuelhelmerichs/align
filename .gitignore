@@ -1,4 +1,5 @@
 results/
+/paper/
 data/*
 !data/uci/
 !data/shakespeare/

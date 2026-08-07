@@ -81,7 +81,7 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-The paper benchmarks are repository-only and are not included in the installed
+The research benchmarks are repository-only and are not included in the installed
 `align` package. Run their command-line harness from the repository root:
 
 ```bash
