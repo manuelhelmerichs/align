@@ -73,6 +73,11 @@ git clone --recurse-submodules https://github.com/manuelhelmerichs/align.git
 
 For an existing checkout, run `git submodule update --init`.
 
+To regenerate the research program from a clean clone, start with the
+[reproducibility profiles and dependency graph](experiments/REPRODUCING.md).
+It distinguishes reusable sampler campaigns from protocol-specific aligned
+caches and experiment results.
+
 ## Development
 
 ```bash
@@ -81,8 +86,10 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-The research benchmarks are repository-only and are not included in the installed
-`align` package. Run their command-line harness from the repository root:
+The source distribution installs `align`, `sampling`, `benchmarks`, and the
+active `experiments` packages (the deferred archive is excluded). The benchmark
+and experiment interfaces are research tooling rather than stable public APIs;
+run their command-line harnesses from the repository root:
 
 ```bash
 uv run python -m benchmarks --help
@@ -101,4 +108,9 @@ certificate alongside weight-space metrics. Use `--no-functional-metrics` for
 a weight-only run.
 
 `align` is unpublished research software and its interfaces may change as the
-symmetry model evolves.
+symmetry model evolves. It is not currently open-source licensed; see
+[`LICENSE`](LICENSE) and the tracked [data provenance](DATA.md) before
+redistributing a checkout. The pinned SMILE source revision from which
+`sampling/` was adapted does not include a license file in this repository;
+confirm the upstream authors' permission as well as this repository owner's
+permission before redistribution.

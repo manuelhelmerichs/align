@@ -347,16 +347,46 @@ class SampleManifest:
     ) -> SampleManifest:
         samples_dir = Path(samples_dir).resolve()
         tree_path = Path(tree_path).resolve()
-        chain_filter = set(chain_indices) if chain_indices is not None else None
-        sample_step = max(sample_step, 1)
+        if not samples_dir.is_dir():
+            raise FileNotFoundError(f"Samples directory not found: {samples_dir}")
+        if not tree_path.is_file():
+            raise FileNotFoundError(f"Tree definition not found: {tree_path}")
+        if sample_step < 1:
+            raise ValueError("sample_step must be positive.")
+        if samples_per_chain is not None and samples_per_chain < 1:
+            raise ValueError("samples_per_chain must be positive when provided.")
+        if max_total is not None and max_total < 1:
+            raise ValueError("max_total must be positive when provided.")
+        if samples_per_chain is not None and max_total is not None:
+            raise ValueError(
+                "samples_per_chain and max_total are mutually exclusive: a global "
+                "limit cannot guarantee an exact per-chain selection."
+            )
+
+        requested_chains = list(chain_indices) if chain_indices is not None else None
+        if requested_chains is not None:
+            if not requested_chains:
+                raise ValueError("chain_indices must not be empty when provided.")
+            if len(requested_chains) != len(set(requested_chains)):
+                raise ValueError("chain_indices must not contain duplicates.")
+        chain_filter = set(requested_chains) if requested_chains is not None else None
 
         records: list[SampleRecord] = []
         reference_index: int | None = None
+        loaded_by_chain: dict[int, int] = {}
         for chain_id, chain_dir in _iter_chains(samples_dir):
             if chain_filter is not None and chain_id not in chain_filter:
                 continue
+            if chain_id in loaded_by_chain:
+                raise ValueError(f"Duplicate chain id {chain_id} in {samples_dir}.")
             loaded = 0
+            seen_sample_ids: set[int] = set()
             for offset, (sample_id, file_path) in enumerate(_iter_samples(chain_dir)):
+                if sample_id in seen_sample_ids:
+                    raise ValueError(
+                        f"Chain {chain_id} contains duplicate sample id {sample_id}."
+                    )
+                seen_sample_ids.add(sample_id)
                 if offset % sample_step != 0:
                     continue
                 record = SampleRecord(
@@ -373,8 +403,29 @@ class SampleManifest:
                     break
                 if samples_per_chain is not None and loaded >= samples_per_chain:
                     break
+            loaded_by_chain[chain_id] = loaded
             if max_total is not None and len(records) >= max_total:
                 break
+
+        if chain_filter is not None:
+            missing_chains = sorted(chain_filter - loaded_by_chain.keys())
+            if missing_chains:
+                raise ValueError(f"Requested chains were not found: {missing_chains}.")
+        if samples_per_chain is not None:
+            incomplete = {
+                chain_id: count
+                for chain_id, count in loaded_by_chain.items()
+                if count != samples_per_chain
+            }
+            if incomplete:
+                details = ", ".join(
+                    f"chain {chain_id}: {count}/{samples_per_chain}"
+                    for chain_id, count in sorted(incomplete.items())
+                )
+                raise ValueError(
+                    "Not enough selected samples to satisfy samples_per_chain "
+                    f"after sample_step={sample_step}: {details}."
+                )
 
         if not records:
             raise ValueError("No samples were discovered. Check the directory filters.")
@@ -390,7 +441,9 @@ class SampleManifest:
             reference_sample=reference_sample,
             reference_index=reference_index,
             filters={
-                "chain_indices": sorted(chain_filter) if chain_filter else None,
+                "chain_indices": sorted(chain_filter)
+                if chain_filter is not None
+                else None,
                 "samples_per_chain": samples_per_chain,
                 "sample_step": sample_step,
                 "max_total": max_total,
