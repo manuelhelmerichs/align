@@ -1,11 +1,10 @@
-What does symmetry canonicalization change in the geometry of sampling-based inference (SAI), and when do those geometric changes translate into inferential benefit?
+# Exploring BNN posterior samples as a data modality
 
-# align
-
-`align` is a research CLI for post-processing posterior neural-network weight
-samples. It removes exact continuous scale symmetries by canonicalization and
-aligns discrete or matrix-valued symmetries by matching samples to a common
-reference.
+`bnn-posterior-samples` is a research codebase for studying Bayesian
+neural-network posterior weight samples as a data modality. Its `align` CLI
+post-processes posterior samples: it removes exact continuous scale symmetries
+by canonicalization and aligns discrete or matrix-valued symmetries by matching
+samples to a common reference.
 
 ## Install
 
@@ -34,7 +33,7 @@ uv run align configs/examples/align.yaml --output-dir results/example/align/lap
 
 An input experiment contains posterior samples grouped by chain and a matching
 pickled JAX tree definition. See the [input artifact
-contract](https://github.com/manuelhelmerichs/align/wiki/Input-artifact-contract)
+contract](https://github.com/manuelhelmerichs/bnn-posterior-samples/wiki/Input-artifact-contract)
 for the exact layout.
 
 ## Sampling posteriors
@@ -50,25 +49,25 @@ uv run python -m sampling -c configs/sampling/uci_benchmarks/tabular_regr_mile.y
 ```
 
 See [`sampling/README.md`](sampling/README.md) and the wiki's [sampling
-posteriors](https://github.com/manuelhelmerichs/align/wiki/Sampling-posteriors)
+posteriors](https://github.com/manuelhelmerichs/bnn-posterior-samples/wiki/Sampling-posteriors)
 page. Image and HuggingFace/BPE text experiments need
 `uv sync --extra dev --extra sampling`.
 
 ## Documentation
 
-The [project wiki](https://github.com/manuelhelmerichs/align/wiki) contains:
+The [project wiki](https://github.com/manuelhelmerichs/bnn-posterior-samples/wiki) contains:
 
-- a [theory and concepts overview](https://github.com/manuelhelmerichs/align/wiki/Theory-and-concepts),
+- a [theory and concepts overview](https://github.com/manuelhelmerichs/bnn-posterior-samples/wiki/Theory-and-concepts),
   including the supported architecture and algorithm matrix;
 - architecture pages organized like `align.architectures`;
-- the [developer reference](https://github.com/manuelhelmerichs/align/wiki/Developer-reference),
+- the [developer reference](https://github.com/manuelhelmerichs/bnn-posterior-samples/wiki/Developer-reference),
   configuration reference, runtime design, and artifact contracts.
 
 The wiki source is also available in [`wiki/`](wiki) as a Git submodule. Clone
 it together with this repository using:
 
 ```bash
-git clone --recurse-submodules https://github.com/manuelhelmerichs/align.git
+git clone --recurse-submodules https://github.com/manuelhelmerichs/bnn-posterior-samples.git
 ```
 
 For an existing checkout, run `git submodule update --init`.
@@ -86,10 +85,11 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-The source distribution installs `align`, `sampling`, `benchmarks`, and the
-active `experiments` packages (the deferred archive is excluded). The benchmark
-and experiment interfaces are research tooling rather than stable public APIs;
-run their command-line harnesses from the repository root:
+The `bnn-posterior-samples` source distribution installs `align`, `sampling`,
+`benchmarks`, and the active `experiments` packages (the deferred archive is
+excluded). The benchmark and experiment interfaces are research tooling rather
+than stable public APIs; run their command-line harnesses from the repository
+root:
 
 ```bash
 uv run python -m benchmarks --help

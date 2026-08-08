@@ -1,7 +1,7 @@
 [project]
-name = "align"
+name = "bnn-posterior-samples"
 version = "0.1.0"
-description = "Align posterior neural-network weight samples by canonicalizing scales and matching symmetry transforms."
+description = "Research tools and experiments for exploring BNN posterior samples as a data modality."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
