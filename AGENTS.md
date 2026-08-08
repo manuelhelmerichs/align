@@ -2,7 +2,8 @@
 
 ## Project context
 
-- `align` is an unpublished research tool for post-processing posterior neural-network weight samples.
+- `bnn-posterior-samples` is an unpublished research project for exploring posterior neural-network weight samples as a data modality.
+- `align` remains the CLI and Python package for symmetry-aware post-processing.
 - The main research context is Bayesian deep learning, weight-space generative modeling, and treating posterior or weight samples as a data modality.
 - The current user is the sole user. Optimize for correctness, clarity, and research velocity over preserving old interfaces.
 

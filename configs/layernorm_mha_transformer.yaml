@@ -10,7 +10,7 @@
 # circuit-cost update automatically.
 
 paths:
-  experiment_root: /Users/manuel/Projects/align/runs/nanogpt/gpt_tiny
+  experiment_root: /Users/manuel/Projects/bnn-posterior-samples/runs/nanogpt/gpt_tiny
   samples_dir: null
   tree_path: null
   output_dir: null
