@@ -106,11 +106,3 @@ and data split by default. Its report includes invariant chain-level functional
 disagreement, the weight-averaging/BMA gap, and a raw-output symmetry-drift
 certificate alongside weight-space metrics. Use `--no-functional-metrics` for
 a weight-only run.
-
-`align` is unpublished research software and its interfaces may change as the
-symmetry model evolves. It is not currently open-source licensed; see
-[`LICENSE`](LICENSE) and the tracked [data provenance](DATA.md) before
-redistributing a checkout. The pinned SMILE source revision from which
-`sampling/` was adapted does not include a license file in this repository;
-confirm the upstream authors' permission as well as this repository owner's
-permission before redistribution.
