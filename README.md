@@ -86,10 +86,9 @@ uv run ruff format --check .
 ```
 
 The `bnn-posterior-samples` source distribution installs `align`, `sampling`,
-`benchmarks`, and the active `experiments` packages (the deferred archive is
-excluded). The benchmark and experiment interfaces are research tooling rather
-than stable public APIs; run their command-line harnesses from the repository
-root:
+`benchmarks`, and the active `experiments` packages. The benchmark and 
+experiment interfaces are research tooling rather than stable public APIs;
+run their command-line harnesses from the repository root:
 
 ```bash
 uv run python -m benchmarks --help
