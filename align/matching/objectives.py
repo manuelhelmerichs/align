@@ -95,7 +95,7 @@ class Objective(ABC):
         for weighted objectives, the assignment-dependent self-energy). Class
         dispatch: permutation updates maximize ``signed + invariant``, signed
         updates ``|signed| + invariant``, and continuous (rotation/orthogonal)
-        updates project ``signed`` alone — exact for objectives whose
+        updates project ``signed`` alone -- exact for objectives whose
         self-energy is transform-invariant (plain L2), a documented heuristic
         for weighted metrics.
         """

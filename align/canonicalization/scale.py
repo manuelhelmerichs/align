@@ -25,9 +25,9 @@ Plans are dispatched on graph structure:
   ``strategy``: ``balanced`` (default) picks the minimum-norm orbit
   representative by equalizing each channel's dividing-side (scale-carrying
   producers: norm affine parameters or bare conv kernel/bias) and
-  multiplying-side (power-1 consumer bindings) energies — one-shot for
+  multiplying-side (power-1 consumer bindings) energies -- one-shot for
   norm-attached graphs, a convergent convex fixed point for bare-conv chains
-  and residual cycles — while ``unit_norm`` folds the joint producer energy
+  and residual cycles -- while ``unit_norm`` folds the joint producer energy
   to 1 per channel (see ``align.canonicalization.convnet``).
 - **Dense chain canonicalization** for linear ReLU-MLP graphs (each permutation
   group has a single ``out``-role producer kernel, kernels are 2-D, and the

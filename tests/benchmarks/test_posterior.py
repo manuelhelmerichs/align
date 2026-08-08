@@ -4,18 +4,23 @@ import pickle
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from align.matching import TransformState
 from benchmarks.posterior import (
+    evaluate_function_drift,
+    evaluate_interpolation_barriers,
+    evaluate_posterior_metrics,
     load_experiment_posterior_case,
     make_synthetic_layernorm_mha_transformer_posterior_case,
     make_synthetic_mlp_posterior_case,
+    rank_normalized_split_rhat,
     run_posterior_benchmark,
     split_rhat,
 )
-from benchmarks.synthetic import make_mlp_orbit_case, permutation_matrix
+from benchmarks.synthetic import make_mlp_orbit_case, mlp_apply, permutation_matrix
 
 
 def test_split_rhat_near_one_for_stationary_chains():
@@ -46,6 +51,34 @@ def test_split_rhat_validates_input_shape():
         split_rhat(np.zeros((2, 3, 2)))
 
 
+def test_rank_normalized_split_rhat_detects_location_and_scale_failures():
+    rng = np.random.default_rng(7)
+    stationary = rng.standard_normal((4, 200, 2))
+    location = stationary.copy()
+    location[2:, :, 0] += 3.0
+    scale = stationary.copy()
+    scale[2:, :, 1] *= 4.0
+
+    stationary_rhat = rank_normalized_split_rhat(stationary)
+    location_rhat = rank_normalized_split_rhat(location)
+    scale_rhat = rank_normalized_split_rhat(scale)
+
+    assert set(stationary_rhat) == {"bulk", "folded", "max"}
+    np.testing.assert_allclose(stationary_rhat["max"], 1.0, atol=0.05)
+    assert location_rhat["bulk"][0] > 1.5
+    assert scale_rhat["folded"][1] > 1.2
+    assert scale_rhat["folded"][1] > scale_rhat["bulk"][1]
+    np.testing.assert_array_equal(
+        scale_rhat["max"],
+        np.maximum(scale_rhat["bulk"], scale_rhat["folded"]),
+    )
+
+
+def test_rank_normalized_split_rhat_validates_input_shape():
+    with pytest.raises(ValueError, match="Expected"):
+        rank_normalized_split_rhat(np.zeros((4, 8)))
+
+
 def test_synthetic_posterior_case_validates_chain_and_sample_counts():
     with pytest.raises(ValueError):
         make_synthetic_mlp_posterior_case(n_chains=1)
@@ -68,6 +101,12 @@ def test_synthetic_posterior_alignment_collapses_symmetry_copies():
     assert before.weight_averaging_gap > 0.5
     assert after.weight_averaging_gap < 0.05
     assert after.cross_chain_distance_mean < 0.1 * before.cross_chain_distance_mean
+    # Symmetry-copy chains are barrier-separated before alignment and
+    # linearly connected (down to the within-chain noise floor) after it.
+    assert before.function_cross_barrier_mean > 0.3
+    assert before.function_cross_barrier_mean > 50 * before.function_within_barrier_mean
+    assert after.function_cross_barrier_mean < 0.02 * before.function_cross_barrier_mean
+    assert after.function_cross_barrier_mean < 3 * after.function_within_barrier_mean
     assert result.function_drift_max < 1e-5
     assert result.samples_per_s > 0.0
     assert len(result.aligned_chains) == len(case.chains)
@@ -175,6 +214,117 @@ def test_load_experiment_posterior_case_and_align_real_samples(tmp_path):
     # Real experiments carry no apply_fn, so function-space metrics are absent.
     assert result.function_drift_max is None
     assert before.weight_averaging_gap is None
+    assert before.function_cross_barrier_mean is None
+    assert before.function_within_barrier_mean is None
+    assert evaluate_interpolation_barriers(case, case.chains) is None
+
+
+def test_real_case_reports_invariant_functional_diagnostics_when_wired(tmp_path):
+    root = _write_experiment(tmp_path)
+    inputs = jax.random.normal(jax.random.key(4), (9, 3))
+    case = load_experiment_posterior_case(
+        root,
+        architecture="mlp",
+        apply_fn=mlp_apply,
+        inputs=inputs,
+        functional_batch_size=4,
+    )
+
+    before = evaluate_posterior_metrics(case, case.chains)
+    result = run_posterior_benchmark(
+        case, schedule=[{"solver": "lap", "max_sweeps": 25, "tolerance": 0.0}]
+    )
+    after = result.metrics_after
+
+    assert before.weight_averaging_gap is not None
+    assert before.function_variance_total is not None
+    assert before.function_within_chain_variance is not None
+    assert before.function_between_chain_mean_variance is not None
+    assert before.function_between_variance_fraction is not None
+    assert before.function_within_rms_distance is not None
+    assert before.function_cross_rms_distance is not None
+    assert before.function_cross_within_distance_ratio is not None
+    assert before.chain_mean_prediction_rmse_mean > 0.0
+    assert (
+        before.chain_mean_prediction_rmse_max >= before.chain_mean_prediction_rmse_mean
+    )
+    np.testing.assert_allclose(
+        after.chain_mean_prediction_rmse_mean,
+        before.chain_mean_prediction_rmse_mean,
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        after.function_cross_rms_distance,
+        before.function_cross_rms_distance,
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    assert result.function_drift_max < 1e-5
+    assert result.function_drift_rmse < 1e-6
+    assert result.function_drift_relative_rmse < 1e-6
+    drift = evaluate_function_drift(case, case.chains, result.aligned_chains)
+    assert drift is not None
+    assert drift["max"] == pytest.approx(result.function_drift_max)
+
+    # The permutation-copy chains are barrier-separated before alignment and
+    # linearly connected after; barrier pair sampling is deterministic, so the
+    # before/after comparison uses identical draw pairs.
+    assert before.function_cross_barrier_mean > 1.0
+    assert before.function_cross_within_barrier_ratio > 100.0
+    assert after.function_cross_barrier_mean < 0.01 * before.function_cross_barrier_mean
+    assert after.function_cross_barrier_mean < 3 * after.function_within_barrier_mean
+    repeat = evaluate_posterior_metrics(case, case.chains)
+    assert repeat.function_cross_barrier_mean == before.function_cross_barrier_mean
+    assert repeat.function_within_barrier_mean == before.function_within_barrier_mean
+
+
+def test_interpolation_barriers_vanish_for_parameter_linear_models():
+    """A model affine in its parameters has exactly chord-linear outputs, so
+    the barrier must vanish to float32 roundoff -- the zero identity behind the
+    metric's derivation."""
+
+    case = make_synthetic_mlp_posterior_case(seed=0, n_chains=2, n_samples=4)
+
+    def linear_apply(params, x):
+        total = sum(jnp.sum(leaf) for leaf in jax.tree_util.tree_leaves(params))
+        return total * jnp.ones((x.shape[0],))
+
+    case.apply_fn = linear_apply
+    barriers = evaluate_interpolation_barriers(case, case.chains)
+
+    assert barriers is not None
+    assert barriers["function_cross_barrier_max"] < 1e-4
+    assert barriers["function_within_barrier_mean"] < 1e-4
+
+
+def test_interpolation_barriers_validate_grid_and_pair_budget():
+    case = make_synthetic_mlp_posterior_case(seed=0, n_chains=2, n_samples=4)
+
+    with pytest.raises(ValueError, match="strictly inside"):
+        evaluate_interpolation_barriers(case, case.chains, ts=(0.0, 0.5))
+    with pytest.raises(ValueError, match="strictly inside"):
+        evaluate_interpolation_barriers(case, case.chains, ts=())
+    with pytest.raises(ValueError, match="max_pairs"):
+        evaluate_interpolation_barriers(case, case.chains, max_pairs=0)
+
+
+def test_real_case_functional_wiring_is_explicit_and_validated(tmp_path):
+    root = _write_experiment(tmp_path)
+    inputs = jax.random.normal(jax.random.key(5), (4, 3))
+
+    with pytest.raises(ValueError, match="provided together"):
+        load_experiment_posterior_case(root, architecture="mlp", apply_fn=mlp_apply)
+    with pytest.raises(ValueError, match="provided together"):
+        load_experiment_posterior_case(root, architecture="mlp", inputs=inputs)
+    with pytest.raises(ValueError, match="positive"):
+        load_experiment_posterior_case(
+            root,
+            architecture="mlp",
+            apply_fn=mlp_apply,
+            inputs=inputs,
+            functional_batch_size=0,
+        )
 
 
 def test_inverse_fisher_noise_mode_shapes_within_chain_noise():
@@ -228,7 +378,7 @@ def test_barycenter_refinement_high_noise_quality_and_validity():
 
     Under the balanced canonicalization default, single-pass gaps on this
     anisotropic case are already strong (0.24; unit-norm needed the second
-    pass to reach that), so refinement's gap effect here is roughly neutral —
+    pass to reach that), so refinement's gap effect here is roughly neutral --
     its primary value is reference independence (see the dedicated test
     below). Pin: exact function preservation, a collapsed posterior, and no
     substantial gap regression from the second pass.

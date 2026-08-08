@@ -50,12 +50,14 @@ requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["align*", "sampling*"]
+include = ["align*", "sampling*", "benchmarks*", "experiments*"]
 
 [tool.pytest.ini_options]
-addopts = "-ra"
+# Experiment-group tests live beside the group code they cover
+# (experiments/<group>/shared/), per AGENTS.md; they run in the same suite.
 testpaths = [
     "tests",
+    "experiments",
 ]
 filterwarnings = [
     "ignore:JAXopt is no longer maintained\\.:DeprecationWarning",
@@ -83,7 +85,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # Vendored SMILE code keeps upstream `str, Enum` mixins; converting to
-# `StrEnum` changes `str()` semantics and risks drift from the paper code.
+# `StrEnum` changes `str()` semantics and risks drift from experiment artifacts.
 "sampling/**" = ["UP042"]
 
 [tool.ruff.format]

@@ -1,3 +1,5 @@
+What does symmetry canonicalization change in the geometry of sampling-based inference (SAI), and when do those geometric changes translate into inferential benefit?
+
 # align
 
 `align` is a research CLI for post-processing posterior neural-network weight
@@ -71,6 +73,11 @@ git clone --recurse-submodules https://github.com/manuelhelmerichs/align.git
 
 For an existing checkout, run `git submodule update --init`.
 
+To regenerate the research program from a clean clone, start with the
+[reproducibility profiles and dependency graph](experiments/REPRODUCING.md).
+It distinguishes reusable sampler campaigns from protocol-specific aligned
+caches and experiment results.
+
 ## Development
 
 ```bash
@@ -79,13 +86,23 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-The paper benchmarks are repository-only and are not included in the installed
-`align` package. Run their command-line harness from the repository root:
+The source distribution installs `align`, `sampling`, `benchmarks`, and the
+active `experiments` packages (the deferred archive is excluded). The benchmark
+and experiment interfaces are research tooling rather than stable public APIs;
+run their command-line harnesses from the repository root:
 
 ```bash
 uv run python -m benchmarks --help
 uv run python -m benchmarks regression --fast
+uv run python -m benchmarks posterior \
+  --experiment-root runs/reference/uci_airfoil_mile_8x200 \
+  --architecture mlp \
+  --recipe-kwargs '{"parameter_root":"params.fcn"}' \
+  --samples-per-chain 25 --sample-step 8 --canonicalize
 ```
 
-`align` is unpublished research software and its interfaces may change as the
-symmetry model evolves.
+For saved sampling bundles, the posterior command reconstructs the exact model
+and data split by default. Its report includes invariant chain-level functional
+disagreement, the weight-averaging/BMA gap, and a raw-output symmetry-drift
+certificate alongside weight-space metrics. Use `--no-functional-metrics` for
+a weight-only run.

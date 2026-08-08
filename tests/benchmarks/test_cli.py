@@ -124,6 +124,7 @@ def test_posterior_command_runs_a_real_experiment_directory(tmp_path):
             str(root),
             "--architecture",
             "mlp",
+            "--no-functional-metrics",
             "--output",
             str(output),
         ]
@@ -144,6 +145,7 @@ def test_posterior_command_runs_a_real_experiment_directory(tmp_path):
             str(root),
             "--architecture",
             "mlp",
+            "--no-functional-metrics",
             "--schedule",
             '[{"solver": "lap", "max_sweeps": 5, "tolerance": 0.0}]',
             "--output",
@@ -153,6 +155,49 @@ def test_posterior_command_runs_a_real_experiment_directory(tmp_path):
     assert code == 0
     (record,) = json.loads(custom_output.read_text())["records"]
     assert record["name"] == "posterior/experiment_run42/custom/euclidean"
+
+
+def test_posterior_command_reports_functional_metrics(tmp_path, monkeypatch):
+    import jax.numpy as jnp
+
+    from benchmarks.synthetic import mlp_apply
+
+    root = _write_experiment(tmp_path)
+    output = tmp_path / "posterior_functional.json"
+    monkeypatch.setattr(
+        benchmarks_cli,
+        "make_experiment_evaluator",
+        lambda *args, **kwargs: {
+            "apply_fn": mlp_apply,
+            "inputs": jnp.ones((7, 3)),
+            "activation_fn": None,
+            "prediction_transform": None,
+            "functional_batch_size": 3,
+        },
+    )
+
+    code = benchmarks_cli.main(
+        [
+            "posterior",
+            "--experiment-root",
+            str(root),
+            "--architecture",
+            "mlp",
+            "--functional-inputs",
+            "7",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == 0
+    (record,) = json.loads(output.read_text())["records"]
+    metrics = record["metrics"]
+    assert metrics["before_chain_mean_prediction_rmse_mean"] > 0.0
+    assert metrics["before_function_cross_rms_distance"] > 0.0
+    assert metrics["before_weight_averaging_gap"] is not None
+    assert metrics["function_drift_max"] < 1e-5
+    assert metrics["function_drift_relative_rmse"] < 1e-6
 
 
 def test_posterior_command_requires_architecture(tmp_path):

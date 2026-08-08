@@ -2,7 +2,7 @@
 
 ``mode="balanced"`` (the dense-chain default) picks the minimum-norm
 representative of the positive scale orbit by equalizing each hidden unit's
-incoming and outgoing energies — the same canonical-form philosophy as
+incoming and outgoing energies -- the same canonical-form philosophy as
 attention circuit balancing. Unlike ``unit_norm``, it keeps canonical weights
 near the data scale, so posterior sample clouds are not inflated when true
 unit norms are far from 1.

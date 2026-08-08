@@ -19,7 +19,7 @@ contributes an independent linear term).
 Scale symmetries: bare conv channels and dense hidden units carry the usual
 positive-homogeneous scale symmetry, handled by the conv producer-energy plan
 (the ``convnet`` component selects it); non-homogeneous activations (e.g. the
-GELU lenetti) are rejected loudly by that plan, which is correct — they have
+GELU lenetti) are rejected loudly by that plan, which is correct -- they have
 no scale symmetry.
 """
 

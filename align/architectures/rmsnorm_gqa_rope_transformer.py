@@ -63,7 +63,7 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
 
     ``stream_transform_family`` selects the modeled stream symmetry class:
     ``signed_permutation`` (default; exact, discrete, no preconditions) or
-    ``orthogonal`` (the stream's full symmetry — enables ``procrustes``
+    ``orthogonal`` (the stream's full symmetry -- enables ``procrustes``
     schedule steps, and requires gamma-folded parameters at matching time).
     """
 
@@ -85,7 +85,7 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
             if is_layernorm_module(module):
                 raise ValueError(
                     f"Norm module {'/'.join(path)} carries a bias; this is a "
-                    "LayerNorm stack — use the 'layernorm_mha_transformer' recipe."
+                    "LayerNorm stack -- use the 'layernorm_mha_transformer' recipe."
                 )
             raise ValueError(f"{'/'.join(path)} is not an RMSNorm module.")
 
@@ -167,7 +167,7 @@ class RMSNormGQARoPETransformerRecipe(ArchitectureRecipe):
             ).add_to(builder)
 
             # Convention: the first RMSNorm (natural order) feeds attention,
-            # the second feeds the FFN — the standard pre-norm block layout.
+            # the second feeds the FFN -- the standard pre-norm block layout.
             attention_consumers = [
                 ((*inventory.full_path(module_path), name, "kernel"), 0)
                 for name in ("query", "key", "value")

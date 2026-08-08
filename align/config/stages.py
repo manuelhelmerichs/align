@@ -299,7 +299,7 @@ class CanonicalizeConfig:
 class CenterSoftmaxHeadConfig:
     """Configuration for the opt-in softmax-head translation stage.
 
-    Centers the classification head to zero-mean class columns — exactly
+    Centers the classification head to zero-mean class columns -- exactly
     probability-preserving but *not* logit-preserving, which is why it is a
     separate stage rather than part of ``canonicalize``. ``head`` names the
     head module (dot-separated path containing ``kernel`` and optionally

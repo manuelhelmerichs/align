@@ -16,7 +16,7 @@ idempotent, and exactly equivariant under further translations.
 
 Head discovery is structural: a softmax head kernel is a bound 2-D tensor
 whose input axis consumes a symmetry group (``in`` role) and whose output
-(class) axis is unbound — nothing downstream constrains the logits. Trees
+(class) axis is unbound -- nothing downstream constrains the logits. Trees
 with several such heads are ambiguous and require the explicit ``head``
 option (the module path containing ``kernel`` and optionally ``bias``).
 """

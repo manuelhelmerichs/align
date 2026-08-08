@@ -58,6 +58,13 @@ from .state import (
     sinkhorn_operator,
     solve_lap_maximize,
 )
+from .temporal import (
+    TemporalGaugeConfig,
+    TemporalGaugeSolver,
+    TemporalStrategy,
+    match_temporal_sequence,
+    transform_transition_distance,
+)
 
 __all__ = [
     "DiagonalFisherObjective",
@@ -67,6 +74,9 @@ __all__ = [
     "Objective",
     "RelativeFisherObjective",
     "TransformState",
+    "TemporalGaugeConfig",
+    "TemporalGaugeSolver",
+    "TemporalStrategy",
     "ProcrustesGroupSolver",
     "PermutationTransform",
     "SignedPermutationTransform",
@@ -88,6 +98,7 @@ __all__ = [
     "match_batch",
     "match_component_across",
     "match_sample",
+    "match_temporal_sequence",
     "register_objective",
     "resolve_calibration_kwargs",
     "resolve_relative_fisher_calibration_kwargs",
@@ -99,4 +110,5 @@ __all__ = [
     "solve_rotation_pairs_maximize",
     "solve_signed_lap_maximize",
     "update_group_transform",
+    "transform_transition_distance",
 ]
