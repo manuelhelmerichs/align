@@ -72,6 +72,15 @@ The [project wiki](https://github.com/manuelhelmerichs/align/wiki) contains:
 - the [developer reference](https://github.com/manuelhelmerichs/align/wiki/Developer-reference),
   configuration reference, runtime design, and artifact contracts.
 
+The wiki source is also available in [`wiki/`](wiki) as a Git submodule. Clone
+it together with this repository using:
+
+```bash
+git clone --recurse-submodules https://github.com/manuelhelmerichs/align.git
+```
+
+For an existing checkout, run `git submodule update --init`.
+
 ## Development
 
 ```bash

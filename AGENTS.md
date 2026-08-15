@@ -54,13 +54,13 @@ repository.
 ## Workflow
 
 - Use the project toolchain: `uv sync --extra dev`, then `uv run ...`.
-- Read through the relevant pages of the
-  [project wiki](https://github.com/manuelhelmerichs/align/wiki).
+- Read through the relevant pages of the [`wiki/`](wiki).
 - Standard checks:
   - `uv run pytest`
   - `uv run ruff check .`
   - `uv run ruff format --check .`
 - The benchmark regression gate:
   - `uv run python -m align.benchmarks regression --fast`
-- Update the relevant wiki pages and the example configs in
+- Update the relevant pages in the `wiki/` submodule and the example configs in
   [`configs/`](configs) when behavior or user-facing configuration changes.
+  Commit and push wiki changes before updating the submodule pointer here.
