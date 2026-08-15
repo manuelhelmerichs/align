@@ -14,13 +14,13 @@ import numpy as np
 import pytest
 
 from align.architectures import MLPRecipe
-from align.canonicalization import ScaleCanonicalizer, ScaleState
-from benchmarks.synthetic import (
+from align.benchmarks.synthetic import (
     make_dense_params,
     make_frn_residual_conv_orbit_case,
     make_layernorm_mha_transformer_orbit_case,
     mlp_apply,
 )
+from align.canonicalization import ScaleCanonicalizer, ScaleState
 
 
 def _graph_and_params(seed=0, sizes=(3, 5, 4, 2)):

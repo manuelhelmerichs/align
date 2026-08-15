@@ -8,8 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from align.matching import TransformState
-from benchmarks.posterior import (
+from align.benchmarks.posterior import (
     evaluate_function_drift,
     evaluate_interpolation_barriers,
     evaluate_posterior_metrics,
@@ -20,7 +19,12 @@ from benchmarks.posterior import (
     run_posterior_benchmark,
     split_rhat,
 )
-from benchmarks.synthetic import make_mlp_orbit_case, mlp_apply, permutation_matrix
+from align.benchmarks.synthetic import (
+    make_mlp_orbit_case,
+    mlp_apply,
+    permutation_matrix,
+)
+from align.matching import TransformState
 
 
 def test_split_rhat_near_one_for_stationary_chains():
@@ -429,8 +433,8 @@ def test_barycenter_refinement_restores_reference_independence():
 
     import jax
 
+    from align.benchmarks.posterior import tree_mean
     from align.matching import TransformState, match_sample
-    from benchmarks.posterior import tree_mean
 
     case = make_synthetic_mlp_posterior_case(
         seed=0, noise_mode="isotropic", noise_scale=0.4

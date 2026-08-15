@@ -14,6 +14,18 @@ import numpy as np
 import pytest
 
 from align.architectures import RMSNormGQARoPETransformerRecipe
+from align.benchmarks import (
+    make_rmsnorm_gqa_rope_transformer_orbit_case,
+    make_rmsnorm_gqa_rope_transformer_orthogonal_orbit_case,
+    make_rmsnorm_gqa_rope_transformer_params,
+    make_rmsnorm_gqa_rope_transformer_rotated_orbit_case,
+    make_rmsnorm_gqa_rope_transformer_scaled_orbit_case,
+    make_synthetic_rmsnorm_gqa_rope_transformer_posterior_case,
+    rmsnorm_gqa_rope_transformer_apply,
+    run_alignment_benchmark,
+)
+from align.benchmarks.posterior import run_posterior_benchmark
+from align.benchmarks.synthetic import default_schedule_grid
 from align.canonicalization import ScaleCanonicalizer, ScaleState
 from align.canonicalization.rmsnorm_gqa_rope import (
     apply_rms_gamma_scales,
@@ -25,18 +37,6 @@ from align.canonicalization.rmsnorm_gqa_rope import (
 from align.matching import TransformState, match_sample
 from align.matching.objectives import UnsupportedGroupLinearization, get_objective
 from align.symmetry.tensor_ops import _descend
-from benchmarks import (
-    make_rmsnorm_gqa_rope_transformer_orbit_case,
-    make_rmsnorm_gqa_rope_transformer_orthogonal_orbit_case,
-    make_rmsnorm_gqa_rope_transformer_params,
-    make_rmsnorm_gqa_rope_transformer_rotated_orbit_case,
-    make_rmsnorm_gqa_rope_transformer_scaled_orbit_case,
-    make_synthetic_rmsnorm_gqa_rope_transformer_posterior_case,
-    rmsnorm_gqa_rope_transformer_apply,
-    run_alignment_benchmark,
-)
-from benchmarks.posterior import run_posterior_benchmark
-from benchmarks.synthetic import default_schedule_grid
 
 DRIFT_TOL = 1e-4
 BREAK_TOL = 1e-3
@@ -560,11 +560,11 @@ class TestFlatTransformerSignSymmetries:
 
     def test_qk_vo_sign_flips_preserve_function_and_are_recovered(self):
         from align.architectures import LayerNormMHATransformerRecipe
-        from benchmarks import (
+        from align.benchmarks import (
             layernorm_mha_transformer_apply,
             make_layernorm_mha_transformer_params,
         )
-        from benchmarks.synthetic import (
+        from align.benchmarks.synthetic import (
             signed_permutation_matrix,
             tree_l2_distance,
         )

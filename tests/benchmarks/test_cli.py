@@ -1,4 +1,4 @@
-"""Tests for the ``python -m benchmarks`` CLI."""
+"""Tests for the ``python -m align.benchmarks`` CLI."""
 
 import json
 import pickle
@@ -8,10 +8,10 @@ import jax
 import numpy as np
 import pytest
 
+from align.benchmarks import __main__ as benchmarks_cli
+from align.benchmarks.harness import BenchmarkRecord
+from align.benchmarks.synthetic import make_mlp_orbit_case, permutation_matrix
 from align.matching import TransformState
-from benchmarks import __main__ as benchmarks_cli
-from benchmarks.harness import BenchmarkRecord
-from benchmarks.synthetic import make_mlp_orbit_case, permutation_matrix
 
 
 def _save_pytree_npz(path: Path, pytree) -> None:
@@ -113,6 +113,22 @@ def test_compare_parses_inverse_fisher_synthetic_posterior():
     assert args.posterior_noise_scale == 0.6
 
 
+def _stub_evaluator(experiment_root, *, split, n_inputs, batch_size):
+    """Stand in for a sampler-backed evaluator factory (see ``--evaluator``)."""
+
+    import jax.numpy as jnp
+
+    from align.benchmarks.synthetic import mlp_apply
+
+    return {
+        "apply_fn": mlp_apply,
+        "inputs": jnp.ones((n_inputs, 3)),
+        "activation_fn": None,
+        "prediction_transform": None,
+        "functional_batch_size": 3,
+    }
+
+
 def test_posterior_command_runs_a_real_experiment_directory(tmp_path):
     root = _write_experiment(tmp_path)
     output = tmp_path / "posterior.json"
@@ -124,7 +140,6 @@ def test_posterior_command_runs_a_real_experiment_directory(tmp_path):
             str(root),
             "--architecture",
             "mlp",
-            "--no-functional-metrics",
             "--output",
             str(output),
         ]
@@ -145,7 +160,6 @@ def test_posterior_command_runs_a_real_experiment_directory(tmp_path):
             str(root),
             "--architecture",
             "mlp",
-            "--no-functional-metrics",
             "--schedule",
             '[{"solver": "lap", "max_sweeps": 5, "tolerance": 0.0}]',
             "--output",
@@ -157,24 +171,9 @@ def test_posterior_command_runs_a_real_experiment_directory(tmp_path):
     assert record["name"] == "posterior/experiment_run42/custom/euclidean"
 
 
-def test_posterior_command_reports_functional_metrics(tmp_path, monkeypatch):
-    import jax.numpy as jnp
-
-    from benchmarks.synthetic import mlp_apply
-
+def test_posterior_command_reports_functional_metrics(tmp_path):
     root = _write_experiment(tmp_path)
     output = tmp_path / "posterior_functional.json"
-    monkeypatch.setattr(
-        benchmarks_cli,
-        "make_experiment_evaluator",
-        lambda *args, **kwargs: {
-            "apply_fn": mlp_apply,
-            "inputs": jnp.ones((7, 3)),
-            "activation_fn": None,
-            "prediction_transform": None,
-            "functional_batch_size": 3,
-        },
-    )
 
     code = benchmarks_cli.main(
         [
@@ -183,6 +182,8 @@ def test_posterior_command_reports_functional_metrics(tmp_path, monkeypatch):
             str(root),
             "--architecture",
             "mlp",
+            "--evaluator",
+            "tests.benchmarks.test_cli:_stub_evaluator",
             "--functional-inputs",
             "7",
             "--output",
@@ -198,6 +199,31 @@ def test_posterior_command_reports_functional_metrics(tmp_path, monkeypatch):
     assert metrics["before_weight_averaging_gap"] is not None
     assert metrics["function_drift_max"] < 1e-5
     assert metrics["function_drift_relative_rmse"] < 1e-6
+
+
+@pytest.mark.parametrize(
+    ("spec", "match"),
+    [
+        ("no_colon_here", "module:function"),
+        ("benchmarks.campaigns:not_a_real_name", "has no"),
+        ("benchmarks.does_not_exist:thing", "not importable"),
+    ],
+)
+def test_posterior_command_rejects_a_bad_evaluator_spec(tmp_path, spec, match):
+    root = _write_experiment(tmp_path)
+
+    with pytest.raises(SystemExit, match=match):
+        benchmarks_cli.main(
+            [
+                "posterior",
+                "--experiment-root",
+                str(root),
+                "--architecture",
+                "mlp",
+                "--evaluator",
+                spec,
+            ]
+        )
 
 
 def test_posterior_command_requires_architecture(tmp_path):

@@ -6,6 +6,13 @@ import numpy as np
 import pytest
 
 from align.architectures import LayerNormMHATransformerRecipe, MLPRecipe
+from align.benchmarks import (
+    layernorm_mha_transformer_apply,
+    make_layernorm_mha_transformer_orbit_case,
+    make_layernorm_mha_transformer_params,
+    run_alignment_benchmark,
+)
+from align.benchmarks.synthetic import layer_norm, mhdpa_apply
 from align.canonicalization import ScaleCanonicalizer
 from align.matching import (
     TransformState,
@@ -13,13 +20,6 @@ from align.matching import (
     match_sample,
 )
 from align.symmetry import MHACircuitConstraint
-from benchmarks import (
-    layernorm_mha_transformer_apply,
-    make_layernorm_mha_transformer_orbit_case,
-    make_layernorm_mha_transformer_params,
-    run_alignment_benchmark,
-)
-from benchmarks.synthetic import layer_norm, mhdpa_apply
 
 
 def _perm_matrix(indices) -> np.ndarray:

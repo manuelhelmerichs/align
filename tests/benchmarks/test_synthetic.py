@@ -2,8 +2,7 @@
 
 import numpy as np
 
-from align.matching import match_sample
-from benchmarks.synthetic import (
+from align.benchmarks.synthetic import (
     default_schedule_grid,
     make_mlp_orbit_case,
     make_residual_conv_orbit_case,
@@ -12,6 +11,7 @@ from benchmarks.synthetic import (
     run_alignment_benchmark,
     run_robustness_sweep,
 )
+from align.matching import match_sample
 
 
 def test_mlp_exact_orbit_benchmark_recovers_permutations_and_scales():

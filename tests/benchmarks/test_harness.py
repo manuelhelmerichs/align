@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from benchmarks.harness import (
+from align.benchmarks.harness import (
     DEFAULT_THRESHOLDS,
     BenchmarkRecord,
     build_report,
@@ -15,8 +15,8 @@ from benchmarks.harness import (
     run_regression_suite,
     write_report,
 )
-from benchmarks.posterior import make_synthetic_mlp_posterior_case
-from benchmarks.synthetic import default_schedule_grid
+from align.benchmarks.posterior import make_synthetic_mlp_posterior_case
+from align.benchmarks.synthetic import default_schedule_grid
 
 
 def test_fast_regression_suite_stays_within_thresholds():

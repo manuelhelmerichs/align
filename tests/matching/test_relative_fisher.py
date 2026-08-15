@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from align.benchmarks.synthetic import mlp_activation_samples
 from align.matching import (
     RelativeFisherObjective,
     TransformState,
@@ -14,7 +15,6 @@ from align.matching import (
     save_activation_gram_metrics_npz,
 )
 from align.matching.objectives import EuclideanObjective
-from benchmarks.synthetic import mlp_activation_samples
 from tests.matching._helpers import permutation_matrix, two_layer_graph
 
 

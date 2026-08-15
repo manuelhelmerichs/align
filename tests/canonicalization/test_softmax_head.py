@@ -12,11 +12,11 @@ import numpy as np
 import pytest
 
 from align.architectures import MLPRecipe, ResidualConvNetRecipe
+from align.benchmarks.synthetic import make_dense_params, mlp_apply
 from align.canonicalization.softmax_head import (
     center_softmax_head,
     detect_softmax_head,
 )
-from benchmarks.synthetic import make_dense_params, mlp_apply
 
 
 def _case(seed=0, sizes=(3, 5, 4, 3)):

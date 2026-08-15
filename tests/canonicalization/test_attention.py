@@ -15,16 +15,16 @@ import numpy as np
 import pytest
 
 from align.architectures import LayerNormMHATransformerRecipe
-from align.canonicalization import ScaleCanonicalizer, ScaleState
-from align.canonicalization.mha import (
-    attention_balancing_scales,
-    mha_circuit_constraints,
-)
-from benchmarks.synthetic import (
+from align.benchmarks.synthetic import (
     layernorm_mha_transformer_apply,
     make_layernorm_mha_transformer_params,
     make_layernorm_mha_transformer_scaled_orbit_case,
     run_alignment_benchmark,
+)
+from align.canonicalization import ScaleCanonicalizer, ScaleState
+from align.canonicalization.mha import (
+    attention_balancing_scales,
+    mha_circuit_constraints,
 )
 
 

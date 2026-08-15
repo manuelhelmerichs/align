@@ -560,7 +560,7 @@ def _minimal_params_for_family(family: str):
     import jax
     import jax.numpy as jnp
 
-    from benchmarks.synthetic import (
+    from align.benchmarks.synthetic import (
         make_layernorm_mha_transformer_params,
         make_rmsnorm_gqa_rope_transformer_params,
     )

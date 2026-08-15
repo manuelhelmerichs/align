@@ -15,13 +15,7 @@ import numpy as np
 import pytest
 
 from align.architectures import ResidualConvNetRecipe
-from align.canonicalization import ScaleCanonicalizer, ScaleState
-from align.canonicalization.convnet import (
-    convnet_balanced_scales,
-    convnet_producer_scales,
-)
-from align.symmetry.tensor_ops import _descend, binding_axis_interval
-from benchmarks.synthetic import (
+from align.benchmarks.synthetic import (
     frn_residual_conv_apply,
     make_frn_residual_conv_orbit_case,
     make_frn_residual_conv_params,
@@ -29,6 +23,12 @@ from benchmarks.synthetic import (
     residual_conv_apply,
     run_alignment_benchmark,
 )
+from align.canonicalization import ScaleCanonicalizer, ScaleState
+from align.canonicalization.convnet import (
+    convnet_balanced_scales,
+    convnet_producer_scales,
+)
+from align.symmetry.tensor_ops import _descend, binding_axis_interval
 
 _MODULE_GRAPH = {
     "nodes": [
