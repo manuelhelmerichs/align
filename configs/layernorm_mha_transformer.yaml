@@ -1,7 +1,7 @@
 # LayerNorm + MHA transformer example (bundled GPT layout).
 #
 # Inspect the weight-space symmetry first:
-#   uv run align configs/examples/layernorm_mha_transformer.yaml --describe-symmetry
+#   uv run align configs/layernorm_mha_transformer.yaml --describe-symmetry
 #
 # The schedule below demonstrates per-component solver configuration: attention
 # components and the residual stream run first, FFN components afterwards, then

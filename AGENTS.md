@@ -2,71 +2,65 @@
 
 ## Project context
 
-- `bnn-posterior-samples` is an unpublished research project for exploring posterior neural-network weight samples as a data modality.
-- `align` remains the CLI and Python package for symmetry-aware post-processing.
-- The main research context is Bayesian deep learning, weight-space generative modeling, and treating posterior or weight samples as a data modality.
-- The current user is the sole user. Optimize for correctness, clarity, and research velocity over preserving old interfaces.
+- `align` is symmetry-aware post-processing for neural-network weight samples.
+  It removes exact continuous scale symmetries by canonicalization and aligns
+  discrete or matrix-valued symmetries by matching samples to a common
+  reference.
+- It is a library and a CLI. Its input is a directory of weight samples grouped
+  by chain plus a pickled JAX tree definition -- the input artifact contract in
+  the [`wiki/`](wiki) -- and it never assumes which sampler produced them.
+- It is consumed as a git submodule by `bnn-posterior-samples`, an unpublished
+  research project treating posterior weight samples as a data modality.
+  Changes here reach that project through its submodule pointer, so a breaking
+  change is a two-repository change.
+- The current user is the sole user. Optimize for correctness, clarity, and
+  research velocity over preserving old interfaces.
 
 ## Development stance
 
 - Prefer clean, coherent designs even when they require breaking changes.
-- Do not add compatibility shims, deprecated aliases, legacy config bridges, migration layers, or silent fallbacks unless explicitly requested.
-- If an API, config schema, artifact layout, or abstraction is wrong, replace it cleanly and update all callers, tests, docs, and example configs in the same change.
-- Keep changes scoped, but do not preserve accidental complexity just because it already exists.
-- Treat benchmark and invariance failures as design feedback, not as cases to paper over.
+- Do not add compatibility shims, deprecated aliases, legacy config bridges,
+  migration layers, or silent fallbacks unless explicitly requested.
+- If an API, config schema, artifact layout, or abstraction is wrong, replace
+  it cleanly and update all callers, tests, docs, and example configs in the
+  same change.
+- Keep changes scoped, but do not preserve accidental complexity just because
+  it already exists.
+- Treat benchmark and invariance failures as design feedback, not as cases to
+  paper over.
+
+## Boundaries
+
+These are what make `align` reusable; they are the reason it is its own
+repository.
+
+- `align` depends on nothing in a consuming project. No import of a sampler, an
+  experiment, or a campaign registry, and no repository-root path assumption:
+  no `__file__`-relative walk to a `runs/`, `results/`, or `cache/` tree.
+  Everything a run needs arrives through `PathConfig` or a call argument.
+- `align/benchmarks/` is the alignment benchmark suite -- exact synthetic
+  orbits, posterior-level metrics, the regression harness, and
+  `python -m align.benchmarks`. It may import `align`; `align` must never
+  import it.
+- Function-space metrics need the model and data behind a run, which only the
+  sampler that wrote it can rebuild. `python -m align.benchmarks posterior
+  --evaluator module:function` is that seam. Do not close it by reaching for a
+  sampler here.
+- Reusable research models and exact-orbit builders belong to
+  `align/benchmarks/` under public names. Test modules must not import helpers
+  from other test modules; shared test-only support belongs in an explicitly
+  named private helper module.
 
 ## Workflow
 
 - Use the project toolchain: `uv sync --extra dev`, then `uv run ...`.
-- Read through the relevant pages of the [`wiki/`](wiki).
+- Read through the relevant pages of the
+  [project wiki](https://github.com/manuelhelmerichs/align/wiki).
 - Standard checks:
   - `uv run pytest`
   - `uv run ruff check .`
   - `uv run ruff format --check .`
-- Update the relevant pages in the `wiki/` submodule and example configs when
-  behavior or user-facing configuration changes. Commit and push wiki changes
-  before updating the submodule pointer in this repository.
-
-## Experiments and results
-
-- [`experiments/RESULTS.md`](experiments/RESULTS.md) is the central synthesis of
-  completed experiment results and derived theory. Update it whenever an
-  experiment changes a conclusion.
-- `experiments/` contains group subfolders of thematically related
-  experiments. Each group has:
-  - `README.md` -- exactly what each experiment does and how to run it;
-  - `RESULTS.md` -- all results and interpretation;
-  - `TODO.md` -- open follow-up steps (only if any exist).
-  README and RESULTS document only implemented and completed experiments;
-  plans belong in TODO.md.
-- Experiments in a group are numbered contiguously: one runnable script per
-  experiment, named `e1_<slug>.py` … `eN_<slug>.py`, no gaps. Renumber (and
-  rename the stored results accordingly) when experiments are added or
-  removed.
-- Shared group code (loaders, models, helpers, tests) lives in
-  `experiments/<group>/shared/`, not next to the numbered scripts. Group tests
-  run in the standard suite: `experiments` is on `testpaths`.
-- `experiments/` and `benchmarks/` are installed packages. Import across them
-  by dotted path (`from experiments.<group>.shared import ...`); never add a
-  `sys.path` entry, and never give a module a name generic enough to collide
-  (`common`, `utils`).
-- Importing an experiment module must have no side effects: all work sits
-  behind `main()` under `if __name__ == "__main__":`, and nothing mutates
-  global JAX state (`jax.config.update`) at import time.
-- Three generated repository-root trees, all gitignored:
-  - `runs/` -- sampler campaign output, the *input* to experiments;
-  - `results/` -- experiment output;
-  - `cache/` -- derived intermediates shared across experiments.
-  Nothing else is written outside them, and never inside `experiments/`.
-- Every experiment writes exactly one directory,
-  `results/<group>/<experiment>/`, holding `manifest.json`, `summary.json`,
-  optional `summary.md`, and `artifacts/`. Use
-  `experiment_run(__file__, ...)` from `benchmarks.results`, which derives the
-  directory from the script path so the two cannot drift. Read another
-  experiment's result with `load_summary(group, experiment)`, never by path.
-- Experiments import `align`/`sampling`/`benchmarks` but never modify them,
-  and never import from another experiment group. Glue that several groups
-  need (campaign registry, loaders, chain-level alignment, the result layout)
-  belongs in `benchmarks/`.
-- Delete superseded experiment code and results when a newer implementation
-  replaces them; do not keep parallel stale copies.
+- The benchmark regression gate:
+  - `uv run python -m align.benchmarks regression --fast`
+- Update the relevant wiki pages and the example configs in
+  [`configs/`](configs) when behavior or user-facing configuration changes.

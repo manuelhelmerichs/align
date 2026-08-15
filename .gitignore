@@ -1,12 +1,7 @@
-# Generated trees: sampler campaign runs (experiment inputs), experiment
-# outputs, and derived caches.
-runs/
+# Alignment output and derived caches.
 results/
 cache/
 
-data/*
-!data/uci/
-!data/shakespeare/
 .vscode/
 
 __pycache__/
@@ -28,6 +23,3 @@ htmlcov/
 *.npy
 *.csv
 *.ipynb
-
-*runs/
-*experiment_results/

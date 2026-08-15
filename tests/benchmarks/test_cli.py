@@ -205,8 +205,8 @@ def test_posterior_command_reports_functional_metrics(tmp_path):
     ("spec", "match"),
     [
         ("no_colon_here", "module:function"),
-        ("benchmarks.campaigns:not_a_real_name", "has no"),
-        ("benchmarks.does_not_exist:thing", "not importable"),
+        ("align.benchmarks.harness:not_a_real_name", "has no"),
+        ("align.benchmarks.does_not_exist:thing", "not importable"),
     ],
 )
 def test_posterior_command_rejects_a_bad_evaluator_spec(tmp_path, spec, match):

@@ -1,14 +1,12 @@
 [project]
-name = "bnn-posterior-samples"
+name = "align"
 version = "0.1.0"
-description = "Research tools and experiments for exploring BNN posterior samples as a data modality."
+description = "Symmetry-aware post-processing for neural-network weight samples."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "blackjax==1.2.2",
-    "dataserious[yaml] @ git+https://github.com/Noza23/dataserious.git@543ca3f4c94426cecfde208bb922e230a4f888eb",
-    "jax==0.10.2",
     "flax==0.12.7",
+    "jax==0.10.2",
     "numpy==2.5.1",
     "optax==0.2.8",
     "PyYAML==6.0.3",
@@ -23,14 +21,6 @@ cuda = [
 mps = [
     "jax-mps==0.10.9; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
-# Image and text data loading for the vendored SMILE sampler (`sampling/`).
-sampling = [
-    "datasets==5.0.0",
-    "dm-pix==0.4.5",
-    "tiktoken==0.13.0",
-    "tokenizers==0.23.1",
-    "torchvision==0.28.0",
-]
 dev = [
     "coverage==7.15.0",
     "pre-commit==4.6.0",
@@ -41,30 +31,15 @@ dev = [
 [project.scripts]
 align = "align.cli:main"
 
-[tool.uv]
-# fastprogress >= 1.1 (transitive via blackjax) pulls in a web-app stack.
-constraint-dependencies = ["fastprogress==1.0.3"]
-
 [build-system]
 requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["align*", "sampling*", "benchmarks*", "experiments*"]
+include = ["align*"]
 
 [tool.pytest.ini_options]
-# Experiment-group tests live beside the group code they cover
-# (experiments/<group>/shared/), per AGENTS.md; they run in the same suite.
-testpaths = [
-    "tests",
-    "experiments",
-]
-filterwarnings = [
-    "ignore:JAXopt is no longer maintained\\.:DeprecationWarning",
-]
-markers = [
-    "slow: marks tests that allocate large datasets (deselect with '-m \"not slow\"')",
-]
+testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 88
@@ -82,11 +57,6 @@ select = [
 ignore = [
     "E501",
 ]
-
-[tool.ruff.lint.per-file-ignores]
-# Vendored SMILE code keeps upstream `str, Enum` mixins; converting to
-# `StrEnum` changes `str()` semantics and risks drift from experiment artifacts.
-"sampling/**" = ["UP042"]
 
 [tool.ruff.format]
 quote-style = "double"

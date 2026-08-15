@@ -1,10 +1,18 @@
-# Exploring BNN posterior samples as a data modality
+# align
 
-`bnn-posterior-samples` is a research codebase for studying Bayesian
-neural-network posterior weight samples as a data modality. Its `align` CLI
-post-processes posterior samples: it removes exact continuous scale symmetries
-by canonicalization and aligns discrete or matrix-valued symmetries by matching
-samples to a common reference.
+`align` is symmetry-aware post-processing for neural-network weight samples. It
+makes networks that differ only by known, function-preserving symmetries
+comparable in weight space:
+
+- **canonicalization** removes exact continuous symmetries (scale, and the
+  softmax-head translation) by mapping each sample to a canonical
+  representative of its orbit;
+- **matching** aligns the remaining discrete or matrix-valued symmetries
+  (permutations, sign flips, attention-head and rotation structure) by matching
+  every sample to a common reference.
+
+Both are function-preserving by construction: the network a sample represents
+is unchanged, only its coordinates are.
 
 ## Install
 
@@ -23,59 +31,46 @@ uv sync --extra mps --extra dev   # experimental Apple Silicon MPS
 
 ## Quick start
 
-Start from one of the configurations in [`configs/examples`](configs/examples):
+Start from one of the configurations in [`configs/`](configs):
 
 ```bash
-uv run align configs/examples/align.yaml --validate-only
-uv run align configs/examples/align.yaml --dry-run
-uv run align configs/examples/align.yaml --output-dir results/example/align/lap
+uv run align configs/align.yaml --validate-only
+uv run align configs/align.yaml --dry-run
+uv run align configs/align.yaml --output-dir results/example/align/lap
 ```
 
-An input experiment contains posterior samples grouped by chain and a matching
-pickled JAX tree definition. See the [input artifact
-contract](https://github.com/manuelhelmerichs/bnn-posterior-samples/wiki/Input-artifact-contract)
+An input experiment is a directory of weight samples grouped by chain plus a
+matching pickled JAX tree definition. `align` does not care which sampler wrote
+it; see the [input artifact
+contract](https://github.com/manuelhelmerichs/align/wiki/Input-artifact-contract)
 for the exact layout.
 
-## Sampling posteriors
+## Benchmarks
 
-The repository bundles a sampler for producing such experiments in
-[`sampling/`](sampling), a vendored port of
-[EmanuelSommer/SMILE](https://github.com/EmanuelSommer/SMILE) (MILE/SMILE
-Bayesian deep ensembles). It runs from the repository root and writes
-artifacts that `align` consumes directly:
+`align/benchmarks` holds the alignment benchmark suite: exact synthetic orbits
+with mathematically known optimal solutions, posterior-level quality metrics
+over many chains, and a regression harness with thresholds.
 
 ```bash
-uv run python -m sampling -c configs/sampling/uci_benchmarks/tabular_regr_mile.yaml -d 10
+uv run python -m align.benchmarks --help
+uv run python -m align.benchmarks regression --fast
+uv run python -m align.benchmarks posterior --experiment-root <dir> --architecture mlp
 ```
 
-See [`sampling/README.md`](sampling/README.md) and the wiki's [sampling
-posteriors](https://github.com/manuelhelmerichs/bnn-posterior-samples/wiki/Sampling-posteriors)
-page. Image and HuggingFace/BPE text experiments need
-`uv sync --extra dev --extra sampling`.
+Function-space metrics need the model and data behind a run, which only the
+sampler that produced it can rebuild. Supply them with
+`--evaluator module:function`, a factory taking the experiment root and
+returning loader keyword arguments.
 
 ## Documentation
 
-The [project wiki](https://github.com/manuelhelmerichs/bnn-posterior-samples/wiki) contains:
+The [project wiki](https://github.com/manuelhelmerichs/align/wiki) contains:
 
-- a [theory and concepts overview](https://github.com/manuelhelmerichs/bnn-posterior-samples/wiki/Theory-and-concepts),
+- a [theory and concepts overview](https://github.com/manuelhelmerichs/align/wiki/Theory-and-concepts),
   including the supported architecture and algorithm matrix;
 - architecture pages organized like `align.architectures`;
-- the [developer reference](https://github.com/manuelhelmerichs/bnn-posterior-samples/wiki/Developer-reference),
+- the [developer reference](https://github.com/manuelhelmerichs/align/wiki/Developer-reference),
   configuration reference, runtime design, and artifact contracts.
-
-The wiki source is also available in [`wiki/`](wiki) as a Git submodule. Clone
-it together with this repository using:
-
-```bash
-git clone --recurse-submodules https://github.com/manuelhelmerichs/bnn-posterior-samples.git
-```
-
-For an existing checkout, run `git submodule update --init`.
-
-To regenerate the research program from a clean clone, start with the
-[reproducibility profiles and dependency graph](experiments/REPRODUCING.md).
-It distinguishes reusable sampler campaigns from protocol-specific aligned
-caches and experiment results.
 
 ## Development
 
@@ -85,23 +80,6 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-The `bnn-posterior-samples` source distribution installs `align`, `sampling`,
-`benchmarks`, and the active `experiments` packages. The benchmark and 
-experiment interfaces are research tooling rather than stable public APIs;
-run their command-line harnesses from the repository root:
-
-```bash
-uv run python -m benchmarks --help
-uv run python -m benchmarks regression --fast
-uv run python -m benchmarks posterior \
-  --experiment-root runs/reference/uci_airfoil_mile_8x200 \
-  --architecture mlp \
-  --recipe-kwargs '{"parameter_root":"params.fcn"}' \
-  --samples-per-chain 25 --sample-step 8 --canonicalize
-```
-
-For saved sampling bundles, the posterior command reconstructs the exact model
-and data split by default. Its report includes invariant chain-level functional
-disagreement, the weight-averaging/BMA gap, and a raw-output symmetry-drift
-certificate alongside weight-space metrics. Use `--no-functional-metrics` for
-a weight-only run.
+`align` is consumed as a submodule by
+[`bnn-posterior-samples`](https://github.com/manuelhelmerichs/bnn-posterior-samples),
+which supplies the samplers, campaigns, and experiments that use it.
