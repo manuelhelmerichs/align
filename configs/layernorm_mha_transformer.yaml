@@ -1,4 +1,4 @@
-# LayerNorm + MHA transformer example (bundled GPT layout).
+# LayerNorm + MHA transformer example (GPT-style layout).
 #
 # Inspect the weight-space symmetry first:
 #   uv run align configs/layernorm_mha_transformer.yaml --describe-symmetry
@@ -10,7 +10,7 @@
 # circuit-cost update automatically.
 
 paths:
-  experiment_root: /Users/manuel/Projects/bnn-posterior-samples/runs/nanogpt/gpt_tiny
+  experiment_root: results/example_layernorm_mha_transformer_run
   samples_dir: null
   tree_path: null
   output_dir: null

@@ -8,13 +8,7 @@
   reference.
 - It is a library and a CLI. Its input is a directory of weight samples grouped
   by chain plus a pickled JAX tree definition -- the input artifact contract in
-  the [`wiki/`](wiki) -- and it never assumes which sampler produced them.
-- It is consumed as a git submodule by `bnn-posterior-samples`, an unpublished
-  research project treating posterior weight samples as a data modality.
-  Changes here reach that project through its submodule pointer, so a breaking
-  change is a two-repository change.
-- The current user is the sole user. Optimize for correctness, clarity, and
-  research velocity over preserving old interfaces.
+  the [`wiki/`](wiki).
 
 ## Development stance
 
@@ -30,9 +24,6 @@
   paper over.
 
 ## Boundaries
-
-These are what make `align` reusable; they are the reason it is its own
-repository.
 
 - `align` depends on nothing in a consuming project. No import of a sampler, an
   experiment, or a campaign registry, and no repository-root path assumption:

@@ -88,7 +88,3 @@ uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 ```
-
-`align` is consumed as a submodule by
-[`bnn-posterior-samples`](https://github.com/manuelhelmerichs/bnn-posterior-samples),
-which supplies the samplers, campaigns, and experiments that use it.
